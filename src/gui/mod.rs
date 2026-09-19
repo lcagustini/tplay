@@ -3,7 +3,9 @@
 
 use crate::audio;
 use eframe::egui;
+use fastrand;
 use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
@@ -38,6 +40,16 @@ pub struct TPlayApp {
     /// which breaks the sequential flow.
     current_index: Option<usize>,
 
+    /// Shuffle mode: play tracks in random order
+    shuffle: bool,
+    /// Repeat mode: loop playlist (or random if shuffle also on)
+    repeat: bool,
+
+    /// Shuffled playlist indices. Regenerated when playlist changes or shuffle toggled.
+    shuffle_order: Vec<usize>,
+    /// Current position in shuffle_order.
+    shuffle_pos: usize,
+
     /// Index of the item being dragged, if any.
     drag_from: Option<usize>,
     /// Index of the item being hovered as a drop target.
@@ -50,7 +62,7 @@ impl TPlayApp {
         let (_stream, stream_handle) =
             OutputStream::try_default().expect("No audio output device found");
         let sink = Sink::try_new(&stream_handle).expect("Failed to create audio sink");
-        Self {
+        let app = Self {
             _stream, stream_handle, sink,
             current_path: None,
             track_title: String::from("No track loaded"),
@@ -61,13 +73,69 @@ impl TPlayApp {
             seektable_ready: None,
             playlist: Vec::new(),
             current_index: None,
+            shuffle: false,
+            repeat: false,
+            shuffle_order: Vec::new(),
+            shuffle_pos: 0,
             drag_from: None,
             drag_hover: None,
-        }
+        };
+        app
     }
 
     fn audio_dialog() -> rfd::FileDialog {
         rfd::FileDialog::new().add_filter("Audio", &["mp3", "wav", "ogg", "flac", "m4a"])
+    }
+
+    fn playlist_path() -> Option<PathBuf> {
+        dirs::config_dir().map(|d| d.join("tplay").join("playlist.json"))
+    }
+
+    fn save_playlist(&self) {
+        if let Some(path) = Self::playlist_path() {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            #[derive(Serialize)]
+            struct PlaylistData {
+                paths: Vec<String>,
+                shuffle: bool,
+                repeat: bool,
+            }
+            let data = PlaylistData {
+                paths: self.playlist.iter().filter_map(|p| p.to_str().map(|s| s.to_string())).collect(),
+                shuffle: self.shuffle,
+                repeat: self.repeat,
+            };
+            if let Ok(json) = serde_json::to_string_pretty(&data) {
+                let _ = std::fs::write(&path, json);
+            }
+        }
+    }
+
+    fn load_playlist(&mut self) {
+        if let Some(path) = Self::playlist_path() {
+            if let Ok(json) = std::fs::read_to_string(&path) {
+                #[derive(Deserialize)]
+                struct PlaylistData {
+                    paths: Vec<String>,
+                    shuffle: Option<bool>,
+                    repeat: Option<bool>,
+                }
+                if let Ok(data) = serde_json::from_str::<PlaylistData>(&json) {
+                    self.playlist = data.paths.into_iter()
+                        .filter_map(|s| PathBuf::from(s).canonicalize().ok())
+                        .filter(|p| p.exists())
+                        .collect();
+                    self.shuffle = data.shuffle.unwrap_or(false);
+                    self.repeat = data.repeat.unwrap_or(false);
+                    self.current_index = None;
+                    self.current_path = None;
+                    self.regenerate_shuffle_order();
+                    self.shuffle_pos = 0;
+                }
+            }
+        }
     }
 
     fn open_file(&mut self) {
@@ -77,10 +145,28 @@ impl TPlayApp {
     }
 
     fn add_to_playlist(&mut self, paths: Vec<PathBuf>) {
+        let mut added_count = 0;
         for path in paths {
             if !self.playlist.iter().any(|p| p == &path) {
                 self.playlist.push(path);
+                added_count += 1;
             }
+        }
+        if added_count > 0 {
+            // Add new songs to the unplayed portion of shuffle_order
+            let new_len = self.playlist.len();
+            let old_len = new_len - added_count;
+            // Indices of new songs are at the end: old_len .. new_len
+            // Insert them randomly into the unplayed portion (after shuffle_pos)
+            let mut new_indices: Vec<usize> = (old_len..new_len).collect();
+            // Fisher-Yates shuffle the new indices
+            for i in (1..new_indices.len()).rev() {
+                let j = fastrand::usize(..=i);
+                new_indices.swap(i, j);
+            }
+            // Insert into shuffle_order after current position
+            let insert_at = self.shuffle_pos.min(self.shuffle_order.len());
+            self.shuffle_order.splice(insert_at..insert_at, new_indices);
         }
     }
 
@@ -136,6 +222,142 @@ impl TPlayApp {
                 self.total_duration = None;
             }
         }
+    }
+
+    /// Returns the next track index based on shuffle/repeat settings.
+    /// Returns None if no next track is available (empty playlist, or end with no repeat).
+    fn next_track_index(&mut self) -> Option<usize> {
+        if self.playlist.is_empty() {
+            return None;
+        }
+        let len = self.playlist.len();
+        if len == 1 {
+            return self.repeat.then_some(0);
+        }
+
+        if !self.shuffle {
+            // Sequential modes
+            return match (self.repeat, self.current_index) {
+                (false, Some(i)) if i + 1 < len => Some(i + 1),
+                (true, Some(i)) => Some((i + 1) % len),
+                (true, None) => Some(0),
+                _ => None,
+            };
+        }
+
+        // Shuffle mode: use shuffle_order
+        self.ensure_shuffle_order();
+
+        if self.shuffle_pos >= self.shuffle_order.len() {
+            // Reached end of shuffle cycle
+            if self.repeat {
+                self.regenerate_shuffle_order();
+                self.shuffle_pos = 0;
+            } else {
+                return None;
+            }
+        }
+
+        let next = self.shuffle_order.get(self.shuffle_pos).copied();
+        self.shuffle_pos += 1;
+        next
+    }
+
+    /// Ensure shuffle_order is valid for current playlist.
+    /// Regenerates if empty or if playlist length changed.
+    fn ensure_shuffle_order(&mut self) {
+        if self.shuffle_order.len() != self.playlist.len() {
+            self.regenerate_shuffle_order();
+            self.shuffle_pos = 0;
+        }
+    }
+
+    /// Generate a new random permutation of playlist indices.
+    fn regenerate_shuffle_order(&mut self) {
+        let len = self.playlist.len();
+        self.shuffle_order = (0..len).collect();
+        for i in (1..len).rev() {
+            let j = fastrand::usize(..=i);
+            self.shuffle_order.swap(i, j);
+        }
+    }
+
+    /// Reset shuffle state (called when user clicks a track directly).
+    fn reset_shuffle(&mut self) {
+        self.shuffle_order.clear();
+        self.shuffle_pos = 0;
+    }
+
+    /// Returns the previous track index based on shuffle/repeat settings.
+    /// Returns None if no previous track is available.
+    fn prev_track_index(&mut self) -> Option<usize> {
+        if self.playlist.is_empty() {
+            return None;
+        }
+        let len = self.playlist.len();
+        if len == 1 {
+            return self.repeat.then_some(0);
+        }
+
+        if !self.shuffle {
+            // Sequential modes
+            return match (self.repeat, self.current_index) {
+                (false, Some(i)) if i > 0 => Some(i - 1),
+                (true, Some(i)) => Some((i + len - 1) % len),
+                (true, None) => Some(len - 1),
+                _ => None,
+            };
+        }
+
+        // Shuffle mode: go back in shuffle_order if possible
+        if self.shuffle_pos > 1 {
+            self.shuffle_pos -= 1;
+            Some(self.shuffle_order[self.shuffle_pos - 1])
+        } else if self.repeat && !self.shuffle_order.is_empty() {
+            // At start of shuffle cycle, wrap to end if repeat
+            self.shuffle_pos = len;
+            Some(self.shuffle_order[len - 1])
+        } else {
+            None
+        }
+    }
+
+    /// Check if there's a next track available (for button enabling).
+    fn has_next_track(&self) -> bool {
+        if self.playlist.is_empty() {
+            return false;
+        }
+        if self.playlist.len() == 1 {
+            return self.repeat;
+        }
+        if !self.shuffle {
+            return match (self.repeat, self.current_index) {
+                (false, Some(i)) => i + 1 < self.playlist.len(),
+                (true, _) => true,
+                _ => false,
+            };
+        }
+        // Shuffle: check if we have more in current cycle, or repeat is on
+        self.shuffle_pos < self.shuffle_order.len() || self.repeat
+    }
+
+    /// Check if there's a previous track available.
+    fn has_prev_track(&self) -> bool {
+        if self.playlist.is_empty() {
+            return false;
+        }
+        if self.playlist.len() == 1 {
+            return self.repeat;
+        }
+        if !self.shuffle {
+            return match (self.repeat, self.current_index) {
+                (false, Some(i)) => i > 0,
+                (true, _) => true,
+                _ => false,
+            };
+        }
+        // Shuffle: check if we can go back in current cycle, or repeat is on
+        self.shuffle_pos > 1 || self.repeat
     }
 
     fn fmt_duration(d: Duration) -> String {
@@ -228,10 +450,14 @@ impl TPlayApp {
 
     fn transport_pane(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if ui.button("⏮").clicked() {
-                let _ = self.sink.try_seek(Duration::ZERO);
-                self.seek_normalized = 0.0;
-                self.seek_target = None;
+            // Previous track button (⏮) - goes to previous in playlist/shuffle order
+            let prev_enabled = self.has_prev_track();
+            if ui.add_enabled(prev_enabled, egui::Button::new("⏮")).clicked() {
+                if let Some(prev_idx) = self.prev_track_index() {
+                    let path = self.playlist[prev_idx].clone();
+                    self.current_index = Some(prev_idx);
+                    self.load_file(path);
+                }
             }
 
             let is_paused = self.sink.is_paused();
@@ -243,9 +469,18 @@ impl TPlayApp {
                     } else if let Some(path) = self.current_path.clone() {
                         self.load_file(path);
                     } else if !self.playlist.is_empty() {
-                        let path = self.playlist[0].clone();
-                        self.current_index = Some(0);
-                        self.load_file(path);
+                        if self.shuffle {
+                            self.ensure_shuffle_order();
+                            let first_idx = self.shuffle_order[0];
+                            let path = self.playlist[first_idx].clone();
+                            self.current_index = Some(first_idx);
+                            self.shuffle_pos = 1;
+                            self.load_file(path);
+                        } else {
+                            let path = self.playlist[0].clone();
+                            self.current_index = Some(0);
+                            self.load_file(path);
+                        }
                     } else {
                         self.open_file();
                     }
@@ -261,14 +496,13 @@ impl TPlayApp {
                 self.seek_target = None;
             }
 
-            let has_next = self.current_index
-                .map(|i| i + 1 < self.playlist.len())
-                .unwrap_or(false);
-            if ui.add_enabled(has_next, egui::Button::new("⏭")).clicked() {
-                let next = self.current_index.unwrap() + 1;
-                let path = self.playlist[next].clone();
-                self.current_index = Some(next);
-                self.load_file(path);
+            let next_enabled = self.has_next_track();
+            if ui.add_enabled(next_enabled && !self.playlist.is_empty(), egui::Button::new("⏭")).clicked() {
+                if let Some(next_idx) = self.next_track_index() {
+                    let path = self.playlist[next_idx].clone();
+                    self.current_index = Some(next_idx);
+                    self.load_file(path);
+                }
             }
 
             ui.label("🔊");
@@ -279,12 +513,28 @@ impl TPlayApp {
     }
 
     fn playlist_pane(&mut self, ui: &mut egui::Ui) {
-        if ui.button("Add Files").clicked() {
-            let paths = Self::audio_dialog().pick_files();
-            if let Some(paths) = paths {
-                self.add_to_playlist(paths);
+        ui.horizontal(|ui| {
+            if ui.button("Add Files").clicked() {
+                let paths = Self::audio_dialog().pick_files();
+                if let Some(paths) = paths {
+                    self.add_to_playlist(paths);
+                }
             }
-        }
+
+            let shuffle_changed = ui.checkbox(&mut self.shuffle, "🔀 Shuffle").changed();
+            ui.checkbox(&mut self.repeat, "🔁 Repeat");
+            if shuffle_changed {
+                self.regenerate_shuffle_order();
+                self.shuffle_pos = 0;
+            }
+
+            if ui.button("Save Playlist").clicked() {
+                self.save_playlist();
+            }
+            if ui.button("Load Playlist").clicked() {
+                self.load_playlist();
+            }
+        });
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -343,6 +593,7 @@ impl TPlayApp {
                         if label_resp.clicked() {
                             let path = self.playlist[i].clone();
                             self.current_index = Some(i);
+                            self.reset_shuffle();
                             self.load_file(path);
                         }
 
@@ -383,6 +634,9 @@ impl TPlayApp {
                                         ci
                                     }
                                 });
+                                // Playlist order changed, regenerate shuffle
+                                self.regenerate_shuffle_order();
+                                self.shuffle_pos = 0;
                             }
                         }
                         self.drag_from = None;
@@ -411,6 +665,9 @@ impl TPlayApp {
                     if self.current_index.is_none() {
                         self.current_path = None;
                     }
+                    // Playlist changed, regenerate shuffle
+                    self.regenerate_shuffle_order();
+                    self.shuffle_pos = 0;
                 }
             });
     }
@@ -420,13 +677,11 @@ impl TPlayApp {
         if !self.sink.empty() || self.sink.is_paused() || self.current_path.is_none() {
             return;
         }
-        let next = match self.current_index {
-            Some(i) if i + 1 < self.playlist.len() => i + 1,
-            _ => return,
-        };
-        let path = self.playlist[next].clone();
-        self.current_index = Some(next);
-        self.load_file(path);
+        if let Some(next) = self.next_track_index() {
+            let path = self.playlist[next].clone();
+            self.current_index = Some(next);
+            self.load_file(path);
+        }
     }
 }
 

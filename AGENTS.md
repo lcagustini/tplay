@@ -14,11 +14,18 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 
 - `playlist: Vec<PathBuf>` — ordered list of tracks; no duplicates (checked on add)
 - `current_index: Option<usize>` — index of currently playing track in playlist; `None` = not playing from playlist
+- `shuffle: bool` — shuffle mode enabled
+- `repeat: bool` — repeat mode enabled
+- `shuffle_order: Vec<usize>` — shuffled indices for shuffle playback
+- `shuffle_pos: usize` — current position in shuffle_order
 - `drag_from`, `drag_hover: Option<usize>` — drag-and-drop reorder state (persisted across frames)
 - **Add Files** button opens native multi-select dialog; skipped if already in playlist
 - Click track name to play; drag track name to reorder; ✕ button removes track
-- ▶ plays `playlist[0]` when nothing loaded; ⏭ advances to next playlist entry
+- **Shuffle** (🔀) — plays each track once in random order; new tracks added go into unplayed pool; clicking a track resets shuffle
+- **Repeat** (🔁) — loops playlist (sequential) or shuffle cycle
+- ▶ plays first track (or first shuffled track if shuffle on); ⏮ previous track; ⏭ next track
 - Auto-advance (`advance_playlist`) fires on natural track end (sink empty, unpaused, `current_path` set)
+- **Save Playlist** / **Load Playlist** buttons — manual save/load to `~/.config/tplay/playlist.json`
 
 ## Non-obvious machinery
 
@@ -28,6 +35,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 - **Sink replacement on load/seek**: replacing the `Sink` drops the old decoder and releases the file handle (required on Windows while the background thread writes the seektable).
 - **Playlist auto-advance** (`advance_playlist` in gui/mod.rs): runs every frame; fires only when a track drained naturally — sink empty, unpaused, and `current_path` set. The `current_path.is_none()` guard is what stops a failed load from cascading through the whole list one entry per frame.
 - **Drag-and-drop reorder**: `drag_from` / `drag_hover` track the drag across frames. On drop, item is removed from `from` and inserted at `to` (no `-1` adjustment), so dragging item 1 over item 3 puts it at position 3. `current_index` updated to follow the moved track.
+- **Shuffle order**: `shuffle_order` is a Fisher-Yates shuffled permutation of playlist indices. `shuffle_pos` tracks progress. New tracks are inserted randomly into the unplayed portion. Clicking a track directly resets shuffle. Reordering/deleting regenerates shuffle order.
 
 ## Dependencies — each one is load-bearing
 
@@ -37,10 +45,13 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 | rodio (`symphonia-all`) | decode + playback: mp3, flac, ogg, wav, m4a |
 | symphonia (direct) | MP3 duration probing rodio can't do; FLAC frame walking in the seektable builder |
 | rfd | native file dialog |
+| serde / serde_json | playlist save/load (JSON) |
+| dirs | cross-platform config directory (`~/.config/tplay/`) |
+| fastrand | fast RNG for shuffle (zero-dep) |
 
 `[profile.release] opt-level` is deliberately absent — 3 is Cargo's default.
 
 ## Build / verify
 
 - `cargo check` — compiles fast with cached target/.
-- No test suite, no linter configured. It is a GUI app: verify behavior by running `cargo run`.
+- Remember to update this file after every significant change
