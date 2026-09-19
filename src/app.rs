@@ -9,15 +9,15 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 // Docking panes (egui_dock) - used by GUI layer only
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Pane { NowPlaying, Playlist }
+pub enum Pane { NowPlaying, Playlist, Equalizer }
 
 impl Pane {
-    pub const ALL: [Pane; 2] = [Pane::NowPlaying, Pane::Playlist];
+    pub const ALL: [Pane; 3] = [Pane::NowPlaying, Pane::Playlist, Pane::Equalizer];
 }
 
 pub struct TPlayApp {
@@ -55,6 +55,13 @@ pub struct TPlayApp {
     shuffle_order: Vec<usize>,
     /// Current position in shuffle_order.
     shuffle_pos: usize,
+
+    /// Equalizer state
+    eq_enabled: bool,
+    /// 10-band gains in dB (-12 to +12), default 0
+    eq_gains: [f32; 10],
+    /// Active EQ settings shared with the running EqSource (live, no rebuild)
+    eq_shared: Arc<Mutex<audio::eq::EqShared>>,
 }
 
 impl TPlayApp {
@@ -64,7 +71,7 @@ impl TPlayApp {
             OutputStream::try_default().expect("No audio output device found");
         let sink = Sink::try_new(&stream_handle).expect("Failed to create audio sink");
 
-        Self {
+        let mut app = Self {
             _stream,
             stream_handle,
             sink,
@@ -80,7 +87,16 @@ impl TPlayApp {
             repeat: false,
             shuffle_order: Vec::new(),
             shuffle_pos: 0,
-        }
+            eq_enabled: false,
+            eq_gains: [0.0; 10],
+            eq_shared: Arc::new(Mutex::new(audio::eq::EqShared {
+                gains: [0.0; 10],
+                enabled: false,
+            })),
+        };
+        app.load_eq();
+        app.sync_eq_shared();
+        app
     }
 
     pub(crate) fn audio_dialog() -> rfd::FileDialog {
@@ -142,7 +158,9 @@ impl TPlayApp {
                 Ok(source) => {
                     self.total_duration = source.total_duration()
                         .or_else(|| audio::probe_duration(&path));
-                    self.sink.append(source);
+                    let source = source.convert_samples::<f32>();
+                    let eq_source = audio::eq::EqSource::new(source, Arc::clone(&self.eq_shared));
+                    self.sink.append(eq_source);
                     self.current_path = Some(path);
                 }
                 Err(e) => {
@@ -263,13 +281,15 @@ impl TPlayApp {
 
         let file   = match File::open(&path)             { Ok(f) => f, Err(e) => { eprintln!("seek open: {e}");   return; } };
         let source = match Decoder::new(BufReader::new(file)) { Ok(s) => s, Err(e) => { eprintln!("seek decode: {e}"); return; } };
+        let source = source.convert_samples::<f32>();
 
         match Sink::try_new(&self.stream_handle) {
             Ok(s) => self.sink = s,
             Err(e) => { eprintln!("seek sink: {e}"); return; }
         }
         self.sink.set_volume(self.volume);
-        self.sink.append(source.skip_duration(target));
+        let eq_source = audio::eq::EqSource::new(source.skip_duration(target), Arc::clone(&self.eq_shared));
+        self.sink.append(eq_source);
         if was_paused { self.sink.pause(); }
     }
 
@@ -332,6 +352,63 @@ impl TPlayApp {
     pub fn set_volume(&mut self, volume: f32) {
         self.volume = volume;
         self.sink.set_volume(volume);
+    }
+
+    /// Set gain for one EQ band (0-9), in dB (-12 to +12). Applies live to the
+    /// running source — no sink rebuild, no audio restart.
+    pub fn set_eq_gain(&mut self, band: usize, gain_db: f32) {
+        if band >= 10 { return; }
+        self.eq_gains[band] = gain_db.clamp(-12.0, 12.0);
+        self.eq_shared.lock().unwrap().gains[band] = self.eq_gains[band];
+        self.save_eq();
+    }
+
+    /// Toggle EQ on/off. Applies live — the source starts/stops filtering in place.
+    pub fn toggle_eq(&mut self) {
+        self.eq_enabled = !self.eq_enabled;
+        self.eq_shared.lock().unwrap().enabled = self.eq_enabled;
+        self.save_eq();
+    }
+
+    /// Publish current EQ settings to the running source (used after loading).
+    fn sync_eq_shared(&self) {
+        let mut shared = self.eq_shared.lock().unwrap();
+        shared.gains = self.eq_gains;
+        shared.enabled = self.eq_enabled;
+    }
+
+    /// Path to EQ settings file
+    fn eq_path() -> Option<PathBuf> {
+        dirs::config_dir().map(|d| d.join("tplay").join("eq.json"))
+    }
+
+    /// Save EQ settings to disk
+    fn save_eq(&self) {
+        if let Some(path) = Self::eq_path() {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            #[derive(Serialize)]
+            struct EqData { enabled: bool, gains: [f32; 10] }
+            let data = EqData { enabled: self.eq_enabled, gains: self.eq_gains };
+            if let Ok(json) = serde_json::to_string_pretty(&data) {
+                let _ = std::fs::write(&path, json);
+            }
+        }
+    }
+
+    /// Load EQ settings from disk
+    fn load_eq(&mut self) {
+        if let Some(path) = Self::eq_path() {
+            if let Ok(json) = std::fs::read_to_string(&path) {
+                #[derive(Deserialize)]
+                struct EqData { enabled: bool, gains: [f32; 10] }
+                if let Ok(data) = serde_json::from_str::<EqData>(&json) {
+                    self.eq_enabled = data.enabled;
+                    self.eq_gains = data.gains;
+                }
+            }
+        }
     }
 
     pub fn next_track(&mut self) {
@@ -461,6 +538,9 @@ impl TPlayApp {
     pub fn current_index(&self) -> Option<usize> { self.current_index }
     pub fn shuffle(&self) -> bool { self.shuffle }
     pub fn repeat(&self) -> bool { self.repeat }
+
+    pub fn eq_enabled(&self) -> bool { self.eq_enabled }
+    pub fn eq_gains(&self) -> &[f32; 10] { &self.eq_gains }
 
     pub fn has_next_track(&self) -> bool {
         if self.playlist.is_empty() {

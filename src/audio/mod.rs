@@ -1,5 +1,7 @@
 //! Audio file handling — duration probing and format-specific processing.
 
+pub mod eq;
+
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;

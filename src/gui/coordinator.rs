@@ -22,6 +22,7 @@ fn pane_title(pane: Pane) -> egui::WidgetText {
     match pane {
         Pane::NowPlaying => "Now Playing".into(),
         Pane::Playlist => "Playlist".into(),
+        Pane::Equalizer => "Equalizer".into(),
     }
 }
 
@@ -40,11 +41,21 @@ impl TabViewer for PaneViewer<'_> {
         match pane {
             Pane::NowPlaying => panes::now_playing::now_playing_pane(self.app, ui),
             Pane::Playlist => panes::playlist::playlist_pane(self.app, ui),
+            Pane::Equalizer => panes::equalizer::equalizer_pane(self.app, ui),
         }
     }
 
     fn closeable(&mut self, _tab: &mut Pane) -> bool {
         true
+    }
+
+    // The EQ pane sizes its bands to fit the pane width; hide the tab-level
+    // scrollbars (egui_dock wraps tab bodies in a ScrollArea by default).
+    fn scroll_bars(&self, tab: &Pane) -> [bool; 2] {
+        match tab {
+            Pane::Equalizer => [false, false],
+            _ => [true, true],
+        }
     }
 
     fn add_popup(&mut self, ui: &mut egui::Ui, _surface: egui_dock::SurfaceIndex, _node: egui_dock::NodeIndex) {
