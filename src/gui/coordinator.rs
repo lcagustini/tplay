@@ -4,10 +4,13 @@ use crate::app::{TPlayApp, Pane};
 use crate::gui::panes;
 use eframe::egui;
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 const DOCK_LAYOUT_FILE: &str = "dock_layout.ron";
 const DOCK_ID: &str = "tplay.dock_state";
+const DOCK_OPEN_ID: &str = "tplay.dock_open";
+const DOCK_PENDING_ADD_ID: &str = "tplay.dock_pending_add";
 
 fn default_tree() -> DockState<Pane> {
     let mut d = DockState::new(vec![Pane::NowPlaying]);
@@ -46,17 +49,29 @@ impl TabViewer for PaneViewer<'_> {
 
     fn add_popup(&mut self, ui: &mut egui::Ui, _surface: egui_dock::SurfaceIndex, _node: egui_dock::NodeIndex) {
         ui.set_min_width(160.0);
+        let ctx = ui.ctx().clone();
+        let dock_open = ctx.data_mut(|d| {
+            d.get_temp::<HashSet<Pane>>(egui::Id::new(DOCK_OPEN_ID))
+                .unwrap_or_else(|| Pane::ALL.into_iter().collect())
+        });
         let mut to_add: Option<Pane> = None;
         for pane in Pane::ALL {
-            if !self.app.dock_open.contains(&pane) {
+            if !dock_open.contains(&pane) {
                 if ui.button(pane_title(pane).text()).clicked() {
                     to_add = Some(pane);
                 }
             }
         }
         if let Some(pane) = to_add {
-            self.app.dock_open.insert(pane);
-            self.app.dock_state.main_surface_mut().push_to_first_leaf(pane);
+            ctx.data_mut(|d| {
+                let mut set = d.get_temp::<HashSet<Pane>>(egui::Id::new(DOCK_OPEN_ID))
+                    .unwrap_or_else(|| Pane::ALL.into_iter().collect());
+                set.insert(pane);
+                d.insert_temp(egui::Id::new(DOCK_OPEN_ID), set);
+            });
+            ctx.data_mut(|d| {
+                d.insert_temp(egui::Id::new(DOCK_PENDING_ADD_ID), pane);
+            });
             ui.close_menu();
         }
     }
@@ -76,8 +91,10 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
         })
         .unwrap_or_else(default_tree);
 
-    // Sync hidden panes with actual tree state
-    app.dock_open = tree.iter_all_tabs().map(|(_, t)| *t).collect();
+    // Load/set dock_open from egui memory
+    let dock_open = ctx.data_mut(|d| d.get_temp::<HashSet<Pane>>(egui::Id::new(DOCK_OPEN_ID)))
+        .unwrap_or_else(|| Pane::ALL.into_iter().collect());
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new(DOCK_OPEN_ID), dock_open.clone()));
 
     let mut viewer = PaneViewer { app };
     DockArea::new(&mut tree)
@@ -85,6 +102,20 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
         .show_add_popup(true)
         .style(Style::from_egui(ctx.style().as_ref()))
         .show(ctx, &mut viewer);
+
+    // Apply pending pane addition (from + popup) to the tree
+    if let Some(pane) = ctx.data_mut(|d| d.get_temp::<Pane>(egui::Id::new(DOCK_PENDING_ADD_ID))) {
+        ctx.data_mut(|d| d.remove::<Pane>(egui::Id::new(DOCK_PENDING_ADD_ID)));
+        let mut dock_open = ctx.data_mut(|d| d.get_temp::<HashSet<Pane>>(egui::Id::new(DOCK_OPEN_ID)))
+            .unwrap_or_else(|| Pane::ALL.into_iter().collect());
+        dock_open.insert(pane);
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new(DOCK_OPEN_ID), dock_open));
+        tree.main_surface_mut().push_to_first_leaf(pane);
+    }
+
+    // Sync dock_open with actual tree state for next frame
+    let actual_open: HashSet<Pane> = tree.iter_all_tabs().map(|(_, t)| *t).collect();
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new(DOCK_OPEN_ID), actual_open));
 
     // Persist to egui memory (session) + disk
     ctx.data_mut(|d| d.insert_temp(egui::Id::new(DOCK_ID), tree.clone()));

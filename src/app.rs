@@ -2,11 +2,9 @@
 
 use crate::audio;
 use eframe::egui;
-use egui_dock::{DockState, NodeIndex};
 use fastrand;
 use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
@@ -14,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-// Docking panes (egui_dock)
+// Docking panes (egui_dock) - used by GUI layer only
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Pane { NowPlaying, Playlist }
 
@@ -57,11 +55,6 @@ pub struct TPlayApp {
     shuffle_order: Vec<usize>,
     /// Current position in shuffle_order.
     shuffle_pos: usize,
-
-    /// Docking state
-    pub dock_state: DockState<Pane>,
-    /// Which panes are currently open (docked)
-    pub dock_open: HashSet<Pane>,
 }
 
 impl TPlayApp {
@@ -70,13 +63,6 @@ impl TPlayApp {
         let (_stream, stream_handle) =
             OutputStream::try_default().expect("No audio output device found");
         let sink = Sink::try_new(&stream_handle).expect("Failed to create audio sink");
-
-        let dock_state = {
-            let mut d = DockState::new(vec![Pane::NowPlaying]);
-            d.main_surface_mut().split_below(NodeIndex::root(), 0.25, vec![Pane::Playlist]);
-            d
-        };
-        let dock_open = Pane::ALL.into_iter().collect();
 
         Self {
             _stream,
@@ -94,8 +80,6 @@ impl TPlayApp {
             repeat: false,
             shuffle_order: Vec::new(),
             shuffle_pos: 0,
-            dock_state,
-            dock_open,
         }
     }
 

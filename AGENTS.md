@@ -5,7 +5,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 ## Layout
 
 - `src/main.rs` — bootstrap: window options (680x460 default, resizable), hands off to `app::TPlayApp`.
-- `src/app.rs` — `TPlayApp`: ALL app state + logic, zero UI code. Owns the rodio stream/sink. The GUI calls in through pub methods; read-only getters sit at the bottom. Also owns docking state: `dock_state: DockState<Pane>`, `dock_open: HashSet<Pane>`.
+- `src/app.rs` — `TPlayApp`: ALL app state + logic, zero UI code. Owns the rodio stream/sink. The GUI calls in through pub methods; read-only getters sit at the bottom. **No docking state** — that lives in GUI layer.
 - `src/gui/mod.rs` — declares `coordinator` + `panes`.
 - `src/gui/coordinator.rs` — `update_ui(app, ctx)`: one frame's `DockArea` (egui_dock). Implements `TabViewer` for `Pane` enum; calls the four pane functions in `ui()`. Loads/saves dock layout from egui memory + `~/.config/tplay/dock_layout.ron`. The `+` tab-bar button re-adds closed panes.
 - `src/gui/panes/{title,seekbar,transport,playlist}.rs` — one free function per pane, each taking `(app: &mut TPlayApp, ui: &mut egui::Ui)`. Position-independent — work identically docked anywhere.
@@ -49,7 +49,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 - **Per-frame UI state in egui Memory**: `TPlayApp` has zero UI state. The seek slider position (`SEEK_ID` in seekbar.rs) and the drag-and-drop state (`tplay.drag_from` / `tplay.drag_hover` in playlist.rs) are stored via `ui.ctx().memory_mut` so they survive across frames and between panes.
 - **Drag-and-drop reorder**: `drag_from` / `drag_hover` live in egui Memory and persist across frames. On drop, item is removed from `from` and inserted at `to` (no `-1` adjustment), so dragging item 1 over item 3 puts it at position 3. `current_index` updated to follow the moved track.
 - **Shuffle order**: `shuffle_order` is a Fisher-Yates shuffled permutation of playlist indices. `shuffle_pos` tracks progress. New tracks inserted randomly into the unplayed portion. Clicking a track directly resets shuffle. Reordering/deleting regenerates shuffle order.
-- **Dock state in egui Memory**: `DockState<Pane>` lives in `ctx.data()` under `tplay.dock_state`, so layout survives across frames and between panes. Also persisted to disk each frame.
+- **Dock state in egui Memory**: `DockState<Pane>` + `dock_open` + `dock_pending_add` live in `ctx.data()` under `tplay.dock_state`, `tplay.dock_open`, `tplay.dock_pending_add`. Pure UI state — not in `TPlayApp`. Layout persists to disk each frame.
 
 ## Dependencies — each one is load-bearing
 
