@@ -1,32 +1,21 @@
 use crate::app::TPlayApp;
+use crate::gui::theme::{self, Icon};
 use eframe::egui;
 
 pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        if ui.button("Add Files").clicked() {
-            if let Some(paths) = TPlayApp::audio_dialog().pick_files() {
-                app.add_files(paths);
-            }
-        }
+    // Owned Arc copy — panes call &mut app while using theme data.
+    let theme = app.theme().clone();
+    let p = theme.palette;
 
-        let mut shuffle = app.shuffle();
-        let shuffle_changed = ui.checkbox(&mut shuffle, "🔀 Shuffle").changed();
-        if shuffle_changed {
-            app.toggle_shuffle();
-        }
-
-        let mut repeat = app.repeat();
-        ui.checkbox(&mut repeat, "🔁 Repeat");
-        if repeat != app.repeat() {
-            app.toggle_repeat();
-        }
-
-        if ui.button("Save Playlist").clicked() {
-            app.save_playlist();
-        }
-        if ui.button("Load Playlist").clicked() {
-            app.load_playlist();
-        }
+    // Header — centered, like the reference's WINAMP PLAYLIST banner.
+    ui.vertical_centered(|ui| {
+        ui.label(
+            egui::RichText::new("PLAYLIST")
+                .strong()
+                .size(13.0)
+                .color(p.accent)
+                .font(egui::FontId::new(13.0, theme.metadata_font.clone())),
+        );
     });
 
     let drag_from_id = egui::Id::new("tplay.drag_from");
@@ -36,10 +25,17 @@ pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
     let mut drag_from = ui.ctx().memory_mut(|m| m.data.get_temp::<Option<usize>>(drag_from_id).unwrap_or(None));
     let mut drag_hover = ui.ctx().memory_mut(|m| m.data.get_temp::<Option<usize>>(drag_hover_id).unwrap_or(None));
 
+    // The inner ScrollArea would otherwise consume every free pixel
+    // (auto_shrink(false, false) sizes to the full available rect), leaving
+    // zero height for the footer row below and clipping it invisible.
+    let footer_h = 30.0;
+    let scroll_h = (ui.available_height() - footer_h).max(40.0);
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
+        .max_height(scroll_h)
         .show(ui, |ui| {
             let mut to_delete: Option<usize> = None;
+            let row_h = 24.0;
 
             for i in 0..app.playlist().len() {
                 let is_current = app.current_index() == Some(i);
@@ -47,54 +43,91 @@ pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                     .file_name()
                     .unwrap_or_default()
                     .to_string_lossy().into_owned();
-                let track_num = format!("{}.", i + 1);
+                let fmt = app.playlist()[i]
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_ascii_uppercase())
+                    .unwrap_or_default();
 
-                let row_response = ui.horizontal(|ui| {
-                    ui.label(track_num);
-
-                    let label_resp = ui.add(
-                        egui::Label::new(egui::RichText::new(&name).color(
-                            if is_current { ui.style().visuals.strong_text_color() } else { ui.style().visuals.text_color() }
-                        ))
-                        .selectable(is_current)
-                        .sense(egui::Sense::click_and_drag()),
+                // Fixed-height row rect; background + accent stripe go under the widgets.
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), row_h),
+                    egui::Sense::hover(),
+                );
+                let bg = if i % 2 == 0 { p.row_even } else { p.row_odd };
+                ui.painter().rect_filled(rect, 2.0, bg);
+                if is_current {
+                    ui.painter().rect_filled(
+                        egui::Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height())),
+                        0.0,
+                        p.accent,
                     );
+                }
 
-                    if label_resp.drag_started() {
-                        drag_from = Some(i);
-                        drag_hover = None;
-                    }
+                let mut row = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(rect)
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                );
+                row.spacing_mut().item_spacing.x = 8.0;
 
-                    if label_resp.dragged() {
-                        ui.painter().text(
-                            label_resp.rect.center(),
-                            egui::Align2::CENTER_CENTER,
-                            &name,
-                            egui::FontId::proportional(14.0),
-                            ui.style().visuals.hyperlink_color,
-                        );
-                    }
+                row.label(
+                    egui::RichText::new(format!("{:>2}.", i + 1))
+                        .color(p.text_secondary)
+                        .font(egui::FontId::new(12.0, theme.metadata_font.clone())),
+                );
 
-                    if drag_hover == Some(i) || is_current {
-                        ui.painter().rect_filled(
-                            label_resp.rect.expand(4.0),
-                            4.0,
-                            ui.style().visuals.hyperlink_color.gamma_multiply(0.15),
-                        );
-                    }
+                // Title fills the remaining width (fmt + ✕ are right-aligned).
+                let title_resp = row.add_sized(
+                    egui::vec2((rect.width() - 130.0).max(40.0), row_h),
+                    egui::Label::new(
+                        egui::RichText::new(&name).color(if is_current { p.text_primary } else { p.text_primary.gamma_multiply(0.85) })
+                    )
+                    .truncate()
+                    .sense(egui::Sense::click_and_drag()),
+                );
 
-                    if label_resp.clicked() {
-                        app.play_track(i);
-                    }
+                if title_resp.drag_started() {
+                    drag_from = Some(i);
+                    drag_hover = None;
+                }
 
-                    if ui.button("✕").clicked() {
+                if title_resp.dragged() {
+                    ui.painter().text(
+                        title_resp.rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        &name,
+                        egui::FontId::proportional(14.0),
+                        p.accent,
+                    );
+                }
+
+                if drag_hover == Some(i) || is_current {
+                    ui.painter().rect_filled(
+                        title_resp.rect.expand(4.0),
+                        4.0,
+                        p.accent.gamma_multiply(0.15),
+                    );
+                }
+
+                if title_resp.clicked() {
+                    app.play_track(i);
+                }
+
+                row.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::icon_button(ui, app.theme_icon(Icon::Remove), Icon::Remove, 13.0, true).clicked() {
                         to_delete = Some(i);
                     }
+                    if !fmt.is_empty() {
+                        ui.label(
+                            egui::RichText::new(fmt.clone())
+                                .color(p.text_secondary)
+                                .font(egui::FontId::new(12.0, theme.metadata_font.clone())),
+                        );
+                    }
+                });
 
-                    label_resp
-                }).inner;
-
-                let row_rect = row_response.rect;
+                let row_rect = rect;
                 if let Some(pointer_pos) = ui.input(|i| i.pointer.hover_pos()) {
                     if drag_from.is_some() && drag_from != Some(i) {
                         if row_rect.contains(pointer_pos) {
@@ -103,7 +136,7 @@ pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                     }
                 }
 
-                if row_response.drag_stopped() {
+                if title_resp.drag_stopped() {
                     if let (Some(from), Some(to)) = (drag_from, drag_hover) {
                         app.move_track(from, to);
                     }
@@ -127,5 +160,33 @@ pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
     ui.ctx().memory_mut(|m| {
         m.data.insert_temp(drag_from_id, drag_from);
         m.data.insert_temp(drag_hover_id, drag_hover);
+    });
+
+    // Bottom actions — the reference's ADD/REM/SEL/LIST strip.
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        if ui.button("Add Files").clicked() {
+            if let Some(paths) = TPlayApp::audio_dialog().pick_files() {
+                app.add_files(paths);
+            }
+        }
+        if ui.button("Save Playlist").clicked() {
+            app.save_playlist();
+        }
+        if ui.button("Load Playlist").clicked() {
+            app.load_playlist();
+        }
+
+        ui.separator();
+
+        let mut shuffle = app.shuffle();
+        if ui.checkbox(&mut shuffle, "Shuffle").changed() {
+            app.toggle_shuffle();
+        }
+
+        let mut repeat = app.repeat();
+        if ui.checkbox(&mut repeat, "Repeat").changed() {
+            app.toggle_repeat();
+        }
     });
 }

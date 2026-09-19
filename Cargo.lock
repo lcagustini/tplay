@@ -3687,6 +3687,7 @@ dependencies = [
  "eframe",
  "egui_dock",
  "fastrand",
+ "image",
  "rfd",
  "rodio",
  "ron",

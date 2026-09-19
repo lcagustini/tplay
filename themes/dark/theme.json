@@ -1,0 +1,22 @@
+{
+  "id": "dark",
+  "name": "Dark",
+  "base": "dark",
+  "metadata_font": "proportional",
+  "palette": {
+    "bg": "#141414",
+    "panel_bg": "#1d1d1d",
+    "text_primary": "#e0e0e0",
+    "text_secondary": "#8c8c8c",
+    "accent": "#2ea3f0",
+    "border": "#383838",
+    "progress_fill": "#2ea3f0",
+    "slider_track": "#2b2b2b",
+    "slider_handle": "#9a9a9a",
+    "row_even": "#171717",
+    "row_odd": "#202020",
+    "btn_hover": "#2a2a2a",
+    "focus_ring": "#2ea3f0",
+    "disabled_text": "#555555"
+  }
+}

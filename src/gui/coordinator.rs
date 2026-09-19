@@ -2,6 +2,7 @@
 
 use crate::app::{TPlayApp, Pane};
 use crate::gui::panes;
+use crate::gui::theme;
 use eframe::egui;
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use std::collections::HashSet;
@@ -94,6 +95,9 @@ fn layout_path() -> Option<PathBuf> {
 
 /// Update the UI for one frame. Called from TPlayApp::update().
 pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
+    // Theme tokens -> egui visuals, every frame so a mid-session switch lands instantly.
+    theme::apply(ctx, app.theme());
+
     // Load DockState from egui memory (per-session) or disk (first run)
     let mut tree = ctx.data_mut(|d| d.get_temp::<DockState<Pane>>(egui::Id::new(DOCK_ID)))
         .or_else(|| {

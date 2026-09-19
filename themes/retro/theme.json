@@ -1,0 +1,22 @@
+{
+  "id": "retro",
+  "name": "Retro",
+  "base": "light",
+  "metadata_font": "monospace",
+  "palette": {
+    "bg": "#c8c8c8",
+    "panel_bg": "#bcbcbc",
+    "text_primary": "#161616",
+    "text_secondary": "#464646",
+    "accent": "#2b6fd4",
+    "border": "#9a9a9a",
+    "progress_fill": "#2b6fd4",
+    "slider_track": "#ababab",
+    "slider_handle": "#333333",
+    "row_even": "#c8c8c8",
+    "row_odd": "#d6d6d6",
+    "btn_hover": "#e0e0e0",
+    "focus_ring": "#2b6fd4",
+    "disabled_text": "#8a8a8a"
+  }
+}

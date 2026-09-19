@@ -7,8 +7,9 @@ use rodio::Source;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-const EQ_FREQUENCIES: [f32; 10] = [
-    31.0, 62.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0,
+/// 10 equalizer band frequencies, matching the reference UI labels (20..16K).
+pub const EQ_FREQUENCIES: [f32; 10] = [
+    20.0, 100.0, 300.0, 600.0, 1000.0, 3000.0, 5000.0, 8000.0, 12000.0, 16000.0,
 ];
 
 /// Live-controllable EQ state, shared between `TPlayApp` (writer) and `EqSource` (reader).

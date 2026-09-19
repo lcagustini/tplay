@@ -16,4 +16,6 @@ dirs      = "5.0"
 fastrand  = "2.0"
 # Docking layout: tab drag/split/tear-off; serde for layout persistence
 egui_dock = { version = "0.15", features = ["serde"] }
+# PNG decode for theme icons (loaded synchronously into egui textures at startup)
+image     = { version = "0.25", default-features = false, features = ["png"] }
 ron       = "0.8"

@@ -1,6 +1,7 @@
 //! App state and logic — no UI code here.
 
 use crate::audio;
+use crate::gui::theme::{self, Theme, Themes};
 use eframe::egui;
 use fastrand;
 use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
@@ -19,6 +20,20 @@ pub enum Pane { NowPlaying, Playlist, Equalizer }
 impl Pane {
     pub const ALL: [Pane; 3] = [Pane::NowPlaying, Pane::Playlist, Pane::Equalizer];
 }
+
+/// Equalizer presets — index 0 is Flat (the reset). A manually tweaked slider
+/// switches the selection to `EQ_PRESET_CUSTOM`.
+pub const EQ_PRESETS: [(&str, [f32; 10]); 7] = [
+    ("Flat", [0.0; 10]),
+    ("Rock", [2.0, 3.0, 4.0, 4.0, 3.0, 2.5, 2.0, 1.0, 0.5, 0.0]),
+    ("Pop", [0.0, 1.0, 2.5, 3.5, 2.5, 0.5, -1.0, -1.5, -1.0, -0.5]),
+    ("Jazz", [2.0, 1.5, 1.0, 0.5, -1.0, -1.5, -2.0, -2.0, -1.5, -1.0]),
+    ("Classical", [2.5, 2.0, 1.0, 0.5, -0.5, -1.0, -1.5, -1.5, -1.0, -0.5]),
+    ("Electronic", [3.0, 1.0, -1.0, 0.0, 0.0, 2.0, 3.0, 3.0, 2.0, 0.0]),
+    ("Vocal", [-1.0, -1.0, 0.0, 2.0, 3.0, 2.5, 1.5, 0.0, 0.0, 0.0]),
+];
+/// Sentinel index meaning "gains were hand-edited, not a named preset".
+pub const EQ_PRESET_CUSTOM: usize = EQ_PRESETS.len();
 
 pub struct TPlayApp {
     _stream: OutputStream,
@@ -62,14 +77,34 @@ pub struct TPlayApp {
     eq_gains: [f32; 10],
     /// Active EQ settings shared with the running EqSource (live, no rebuild)
     eq_shared: Arc<Mutex<audio::eq::EqShared>>,
+    /// Index into `EQ_PRESETS`, or `EQ_PRESET_CUSTOM` after a manual tweak.
+    eq_preset: usize,
+    /// Auto mode: re-apply the selected preset on every new track.
+    eq_auto: bool,
+
+    /// Theme (loaded from themes/ dirs), applied to egui visuals by the GUI layer.
+    theme: Arc<Theme>,
+    /// All loadable themes (Skin dropdown + icon fallback).
+    themes: Themes,
+    /// Current theme's icons, one `Option` per `Icon::ALL` slot (None → glyph).
+    icons: Vec<Option<egui::TextureHandle>>,
+    /// Needed to (re)load icon textures on theme switch.
+    ctx: egui::Context,
 }
 
 impl TPlayApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        cc.egui_ctx.set_visuals(egui::Visuals::dark());
+        let ctx = cc.egui_ctx.clone();
         let (_stream, stream_handle) =
             OutputStream::try_default().expect("No audio output device found");
         let sink = Sink::try_new(&stream_handle).expect("Failed to create audio sink");
+
+        let themes = Themes::load();
+        let theme = themes
+            .get(&theme::selection())
+            .cloned()
+            .unwrap_or_else(|| themes.default().clone());
+        let icons = theme::load_icons(&ctx, &themes, &theme);
 
         let mut app = Self {
             _stream,
@@ -93,6 +128,12 @@ impl TPlayApp {
                 gains: [0.0; 10],
                 enabled: false,
             })),
+            eq_preset: 0,
+            eq_auto: false,
+            theme,
+            themes,
+            icons,
+            ctx,
         };
         app.load_eq();
         app.sync_eq_shared();
@@ -134,6 +175,12 @@ impl TPlayApp {
             .to_string_lossy().to_string();
         self.seek_target     = None;
         self.seektable_ready = None;
+
+        // Auto EQ: re-apply the selected preset on every new track (Winamp-style).
+        if self.eq_auto && self.eq_preset < EQ_PRESETS.len() {
+            self.eq_gains = EQ_PRESETS[self.eq_preset].1;
+            self.eq_shared.lock().unwrap().gains = self.eq_gains;
+        }
 
         match Sink::try_new(&self.stream_handle) {
             Ok(s) => { self.sink = s; self.sink.set_volume(self.volume); }
@@ -355,12 +402,67 @@ impl TPlayApp {
     }
 
     /// Set gain for one EQ band (0-9), in dB (-12 to +12). Applies live to the
-    /// running source — no sink rebuild, no audio restart.
+    /// running source — no sink rebuild, no audio restart. Marks the selection
+    /// as Custom (no preset name applies anymore).
     pub fn set_eq_gain(&mut self, band: usize, gain_db: f32) {
         if band >= 10 { return; }
         self.eq_gains[band] = gain_db.clamp(-12.0, 12.0);
         self.eq_shared.lock().unwrap().gains[band] = self.eq_gains[band];
+        self.eq_preset = EQ_PRESET_CUSTOM;
         self.save_eq();
+    }
+
+    /// Select an EQ preset by index (see `EQ_PRESETS`), or `EQ_PRESET_CUSTOM`.
+    pub fn set_eq_preset(&mut self, idx: usize) {
+        if idx > EQ_PRESET_CUSTOM { return; }
+        self.eq_preset = idx;
+        if idx < EQ_PRESETS.len() {
+            self.eq_gains = EQ_PRESETS[idx].1;
+            self.eq_shared.lock().unwrap().gains = self.eq_gains;
+        }
+        self.save_eq();
+    }
+
+    pub fn eq_preset(&self) -> usize { self.eq_preset }
+
+    pub fn eq_preset_name(&self) -> &'static str {
+        if self.eq_preset < EQ_PRESETS.len() {
+            EQ_PRESETS[self.eq_preset].0
+        } else {
+            "Custom"
+        }
+    }
+
+    pub fn toggle_eq_auto(&mut self) {
+        self.eq_auto = !self.eq_auto;
+        self.save_eq();
+    }
+
+    pub fn eq_auto(&self) -> bool { self.eq_auto }
+
+    /// Switch theme by id (from the Skin dropdown); persisted, applied the
+    /// same frame by the GUI layer, icons re-decoded for the new palette.
+    pub fn set_theme(&mut self, id: &str) {
+        if let Some(theme) = self.themes.get(id) {
+            self.theme = Arc::clone(theme);
+            self.icons = theme::load_icons(&self.ctx, &self.themes, &self.theme);
+            theme::save_selection(id);
+        }
+    }
+
+    pub fn theme(&self) -> &Arc<Theme> {
+        &self.theme
+    }
+
+    /// All loadable themes, for the Skin dropdown.
+    pub fn themes(&self) -> &[Arc<Theme>] {
+        self.themes.list()
+    }
+
+    /// Texture for a pane icon in the current theme (falls back to the
+    /// default theme's), or `None` → the pane renders a unicode glyph.
+    pub fn theme_icon(&self, icon: theme::Icon) -> Option<&egui::TextureHandle> {
+        self.icons.get(icon.index()).and_then(|t| t.as_ref())
     }
 
     /// Toggle EQ on/off. Applies live — the source starts/stops filtering in place.
@@ -389,23 +491,39 @@ impl TPlayApp {
                 let _ = std::fs::create_dir_all(parent);
             }
             #[derive(Serialize)]
-            struct EqData { enabled: bool, gains: [f32; 10] }
-            let data = EqData { enabled: self.eq_enabled, gains: self.eq_gains };
+            struct EqData { enabled: bool, gains: [f32; 10], preset: usize, auto: bool }
+            let data = EqData {
+                enabled: self.eq_enabled,
+                gains: self.eq_gains,
+                preset: self.eq_preset,
+                auto: self.eq_auto,
+            };
             if let Ok(json) = serde_json::to_string_pretty(&data) {
                 let _ = std::fs::write(&path, json);
             }
         }
     }
 
-    /// Load EQ settings from disk
+    /// Load EQ settings from disk (old files without preset/auto still load).
     fn load_eq(&mut self) {
         if let Some(path) = Self::eq_path() {
             if let Ok(json) = std::fs::read_to_string(&path) {
                 #[derive(Deserialize)]
-                struct EqData { enabled: bool, gains: [f32; 10] }
+                struct EqData {
+                    enabled: bool,
+                    gains: [f32; 10],
+                    preset: Option<usize>,
+                    auto: Option<bool>,
+                }
                 if let Ok(data) = serde_json::from_str::<EqData>(&json) {
                     self.eq_enabled = data.enabled;
                     self.eq_gains = data.gains;
+                    self.eq_preset = data.preset.unwrap_or_else(|| {
+                        EQ_PRESETS.iter()
+                            .position(|(_, g)| *g == data.gains)
+                            .unwrap_or(EQ_PRESET_CUSTOM)
+                    });
+                    self.eq_auto = data.auto.unwrap_or(false);
                 }
             }
         }
@@ -532,6 +650,7 @@ impl TPlayApp {
     // Read-only getters
 
     pub fn track_title(&self) -> &str { &self.track_title }
+    pub fn current_path(&self) -> Option<&std::path::Path> { self.current_path.as_deref() }
     pub fn total_duration(&self) -> Option<Duration> { self.total_duration }
     pub fn volume(&self) -> f32 { self.volume }
     pub fn playlist(&self) -> &[PathBuf] { &self.playlist }
@@ -585,6 +704,11 @@ impl TPlayApp {
 
     pub fn playback_position_secs(&self) -> Duration {
         self.sink.get_pos()
+    }
+
+    /// Time left on the current track (clamped at zero).
+    pub fn time_remaining(&self) -> Option<Duration> {
+        self.total_duration.map(|tot| tot.saturating_sub(self.sink.get_pos()))
     }
 
     pub fn is_empty(&self) -> bool {
