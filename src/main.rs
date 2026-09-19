@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod app;
 mod audio;
 mod gui;
 
@@ -17,6 +18,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "TPlay",
         native_options,
-        Box::new(|cc| Ok(Box::new(gui::TPlayApp::new(cc)))),
+        Box::new(|cc| Ok(Box::new(app::TPlayApp::new(cc)))),
     )
 }
