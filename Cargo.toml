@@ -10,6 +10,3 @@ rodio     = { version = "0.19", features = ["symphonia-all"] }
 rfd       = "0.14"
 # Direct symphonia access so we can probe MP3 duration ourselves
 symphonia = { version = "0.5", features = ["all"] }
-
-[profile.release]
-opt-level = 3

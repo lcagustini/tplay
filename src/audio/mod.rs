@@ -54,13 +54,6 @@ pub fn flac_has_seektable(path: &Path) -> bool {
 /// large FLAC but is called from a background thread so it never blocks the UI.
 /// On subsequent loads `flac_has_seektable` returns true and this is skipped.
 pub fn build_flac_seektable(path: &Path) -> io::Result<()> {
-    if !path.extension().and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("flac")).unwrap_or(false)
-    {
-        return Ok(());
-    }
-    if flac_has_seektable(path) { return Ok(()); }
-
     // ── Phase 1: read STREAMINFO and find PADDING block ────────────────────
     let (sample_rate, pad_hdr_pos, pad_data_len, pad_is_last) = {
         let mut f = File::open(path)?;
