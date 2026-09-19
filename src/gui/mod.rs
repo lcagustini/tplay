@@ -31,6 +31,17 @@ pub struct TPlayApp {
     /// The flag flips to true when the thread finishes. None means the file
     /// either already had a seektable or is not a FLAC.
     seektable_ready: Option<Arc<AtomicBool>>,
+
+    playlist: Vec<PathBuf>,
+    /// Index into `playlist` of the track currently loaded, set when playback
+    /// starts from the pane (row click, auto-advance). None = direct open,
+    /// which breaks the sequential flow.
+    current_index: Option<usize>,
+
+    /// Index of the item being dragged, if any.
+    drag_from: Option<usize>,
+    /// Index of the item being hovered as a drop target.
+    drag_hover: Option<usize>,
 }
 
 impl TPlayApp {
@@ -48,15 +59,28 @@ impl TPlayApp {
             seek_normalized: 0.0,
             seek_target: None,
             seektable_ready: None,
+            playlist: Vec::new(),
+            current_index: None,
+            drag_from: None,
+            drag_hover: None,
         }
     }
 
+    fn audio_dialog() -> rfd::FileDialog {
+        rfd::FileDialog::new().add_filter("Audio", &["mp3", "wav", "ogg", "flac", "m4a"])
+    }
+
     fn open_file(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("Audio", &["mp3", "wav", "ogg", "flac", "m4a"])
-            .pick_file()
-        {
-            self.load_file(path);
+        if let Some(path) = Self::audio_dialog().pick_file() {
+            self.add_to_playlist(vec![path]);
+        }
+    }
+
+    fn add_to_playlist(&mut self, paths: Vec<PathBuf>) {
+        for path in paths {
+            if !self.playlist.iter().any(|p| p == &path) {
+                self.playlist.push(path);
+            }
         }
     }
 
@@ -158,7 +182,6 @@ impl TPlayApp {
 
     fn title_pane(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if ui.button("📂").clicked() { self.open_file(); }
             ui.label(&self.track_title);
         });
     }
@@ -219,6 +242,10 @@ impl TPlayApp {
                         self.sink.play();
                     } else if let Some(path) = self.current_path.clone() {
                         self.load_file(path);
+                    } else if !self.playlist.is_empty() {
+                        let path = self.playlist[0].clone();
+                        self.current_index = Some(0);
+                        self.load_file(path);
                     } else {
                         self.open_file();
                     }
@@ -234,13 +261,172 @@ impl TPlayApp {
                 self.seek_target = None;
             }
 
-            ui.add_enabled(false, egui::Button::new("⏭"));
+            let has_next = self.current_index
+                .map(|i| i + 1 < self.playlist.len())
+                .unwrap_or(false);
+            if ui.add_enabled(has_next, egui::Button::new("⏭")).clicked() {
+                let next = self.current_index.unwrap() + 1;
+                let path = self.playlist[next].clone();
+                self.current_index = Some(next);
+                self.load_file(path);
+            }
 
             ui.label("🔊");
             if ui.add(egui::Slider::new(&mut self.volume, 0.0..=1.0).show_value(false)).changed() {
                 self.sink.set_volume(self.volume);
             }
         });
+    }
+
+    fn playlist_pane(&mut self, ui: &mut egui::Ui) {
+        if ui.button("Add Files").clicked() {
+            let paths = Self::audio_dialog().pick_files();
+            if let Some(paths) = paths {
+                self.add_to_playlist(paths);
+            }
+        }
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let mut to_delete: Option<usize> = None;
+
+                for i in 0..self.playlist.len() {
+                    let is_current = Some(i) == self.current_index;
+                    let name = self.playlist[i]
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy().into_owned();
+                    let track_num = format!("{}.", i + 1);
+
+                    // We need the full row rect for drag hover detection, so build the row first
+                    let row_response = ui.horizontal(|ui| {
+                        // Track number (not draggable, just for display)
+                        ui.label(track_num);
+
+                        // Track name (click to play, drag to reorder)
+                        let label_resp = ui.add(
+                            egui::Label::new(egui::RichText::new(&name).color(
+                                if is_current { ui.style().visuals.strong_text_color() } else { ui.style().visuals.text_color() }
+                            ))
+                            .selectable(is_current)
+                            .sense(egui::Sense::click_and_drag()),
+                        );
+
+                        // Drag started on the label
+                        if label_resp.drag_started() {
+                            self.drag_from = Some(i);
+                            self.drag_hover = None;
+                        }
+
+                        // Dragging - show visual feedback
+                        if label_resp.dragged() {
+                            ui.painter().text(
+                                label_resp.rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                &name,
+                                egui::FontId::proportional(14.0),
+                                ui.style().visuals.hyperlink_color,
+                            );
+                        }
+
+                        // Visual indicator for drop target (highlight the label)
+                        if self.drag_hover == Some(i) || is_current {
+                            // Re-paint with highlight
+                            ui.painter().rect_filled(
+                                label_resp.rect.expand(4.0),
+                                4.0,
+                                ui.style().visuals.hyperlink_color.gamma_multiply(0.15),
+                            );
+                        }
+
+                        if label_resp.clicked() {
+                            let path = self.playlist[i].clone();
+                            self.current_index = Some(i);
+                            self.load_file(path);
+                        }
+
+                        // Delete button
+                        if ui.button("✕").clicked() {
+                            to_delete = Some(i);
+                        }
+
+                        label_resp
+                    }).inner;
+
+                    // Now we have the full row rect, do hover detection
+                    let row_rect = row_response.rect;
+                    if let Some(pointer_pos) = ui.input(|i| i.pointer.hover_pos()) {
+                        if self.drag_from.is_some() && self.drag_from != Some(i) {
+                            if row_rect.contains(pointer_pos) {
+                                self.drag_hover = Some(i);
+                            }
+                        }
+                    }
+
+                    // Drag stopped - handle the move
+                    if row_response.drag_stopped() {
+                        if let (Some(from), Some(to)) = (self.drag_from, self.drag_hover) {
+                            if from != to {
+                                let item = self.playlist.remove(from);
+                                let insert_at = to;
+                                self.playlist.insert(insert_at, item);
+                                // Update current_index
+                                self.current_index = self.current_index.map(|ci| {
+                                    if ci == from {
+                                        insert_at
+                                    } else if from < ci && ci <= insert_at {
+                                        ci - 1
+                                    } else if insert_at <= ci && ci < from {
+                                        ci + 1
+                                    } else {
+                                        ci
+                                    }
+                                });
+                            }
+                        }
+                        self.drag_from = None;
+                        self.drag_hover = None;
+                    }
+                }
+
+                // Reset drag state if drag ended outside any item
+                if self.drag_from.is_some() && ui.input(|i| i.pointer.any_released()) {
+                    self.drag_from = None;
+                    self.drag_hover = None;
+                }
+
+                if let Some(idx) = to_delete {
+                    self.playlist.remove(idx);
+                    self.current_index = self.current_index.and_then(|ci| {
+                        if ci == idx {
+                            None
+                        } else if ci > idx {
+                            Some(ci - 1)
+                        } else {
+                            Some(ci)
+                        }
+                    });
+                    // If we deleted the currently playing track, clear current_path
+                    if self.current_index.is_none() {
+                        self.current_path = None;
+                    }
+                }
+            });
+    }
+
+    /// Auto-advance to the next playlist track once the current one ends.
+    fn advance_playlist(&mut self) {
+        if !self.sink.empty() || self.sink.is_paused() || self.current_path.is_none() {
+            return;
+        }
+        let next = match self.current_index {
+            Some(i) if i + 1 < self.playlist.len() => i + 1,
+            _ => return,
+        };
+        let path = self.playlist[next].clone();
+        self.current_index = Some(next);
+        self.load_file(path);
     }
 }
 
@@ -252,7 +438,11 @@ impl eframe::App for TPlayApp {
             self.seekbar_pane(ui);
             ui.separator();
             self.transport_pane(ui);
+            ui.separator();
+            self.playlist_pane(ui);
         });
+
+        self.advance_playlist();
 
         if !self.sink.empty() && !self.sink.is_paused() {
             ctx.request_repaint();
