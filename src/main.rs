@@ -10,7 +10,7 @@ fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("TPlay")
-            .with_inner_size([340.0, 520.0])
+            .with_inner_size([680.0, 460.0])
             .with_resizable(true)
             .with_min_inner_size([320.0, 160.0]),
         ..Default::default()
