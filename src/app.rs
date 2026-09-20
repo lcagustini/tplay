@@ -23,14 +23,17 @@ impl Pane {
 
 /// Equalizer presets — index 0 is Flat (the reset). A manually tweaked slider
 /// switches the selection to `EQ_PRESET_CUSTOM`.
+/// Curves follow sfxengine.com/blog/best-equalizer-settings-for-music:
+/// Flat ⇐ Flat, Rock ⇐ Rock/Metal, Pop ⇐ V-Shape, Jazz ⇐ Treble Boost,
+/// Classical ⇐ gentle V-Shape, Electronic ⇐ Bass Boost, Vocal ⇐ Vocal Enhancement.
 pub const EQ_PRESETS: [(&str, [f32; 10]); 7] = [
     ("Flat", [0.0; 10]),
-    ("Rock", [2.0, 3.0, 4.0, 4.0, 3.0, 2.5, 2.0, 1.0, 0.5, 0.0]),
-    ("Pop", [0.0, 1.0, 2.5, 3.5, 2.5, 0.5, -1.0, -1.5, -1.0, -0.5]),
-    ("Jazz", [2.0, 1.5, 1.0, 0.5, -1.0, -1.5, -2.0, -2.0, -1.5, -1.0]),
-    ("Classical", [2.5, 2.0, 1.0, 0.5, -0.5, -1.0, -1.5, -1.5, -1.0, -0.5]),
-    ("Electronic", [3.0, 1.0, -1.0, 0.0, 0.0, 2.0, 3.0, 3.0, 2.0, 0.0]),
-    ("Vocal", [-1.0, -1.0, 0.0, 2.0, 3.0, 2.5, 1.5, 0.0, 0.0, 0.0]),
+    ("Rock", [2.0, 2.5, 3.0, -1.0, 0.0, 3.0, 2.0, 0.5, 0.5, 0.0]),
+    ("Pop", [3.0, 2.5, 1.0, -0.5, -0.5, -1.5, 1.0, 2.0, 2.5, 2.0]),
+    ("Jazz", [0.0, 0.5, 0.5, 0.0, 0.5, 1.0, 2.5, 2.0, 1.5, 1.0]),
+    ("Classical", [2.5, 2.0, 0.5, 0.0, -0.5, -1.0, 0.5, 1.5, 2.0, 1.5]),
+    ("Electronic", [4.0, 5.0, -2.0, -1.0, 0.0, 0.0, 0.5, 1.0, 1.0, 0.5]),
+    ("Vocal", [0.0, -2.0, -1.0, 0.0, 0.5, 3.0, 1.5, -1.0, 0.0, 0.0]),
 ];
 /// Sentinel index meaning "gains were hand-edited, not a named preset".
 pub const EQ_PRESET_CUSTOM: usize = EQ_PRESETS.len();
