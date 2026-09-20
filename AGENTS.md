@@ -23,19 +23,23 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 ## Playlist
 
 - `playlist: Vec<PathBuf>` — ordered list of tracks; no duplicates (checked on add)
+- `playlist_file: Option<PathBuf>` — the `.tplay` file this playlist was saved to / loaded from; `Some` → Save overwrites it, `None` → Save opens the dialog (see Playlist)
+- `playlist_dirty: bool` — edited since the last save/load; set on add/remove/move, cleared on save/load/new. Drives whether New/Load ask a confirm.
 - `current_index: Option<usize>` — index of currently playing track in playlist; `None` = not playing from playlist
 - `shuffle: bool` — shuffle mode enabled
 - `repeat: bool` — repeat mode enabled
 - `shuffle_order: Vec<usize>` — shuffled indices for shuffle playback
 - `shuffle_pos: usize` — current position in shuffle_order
-- **Add Files** button opens native multi-select dialog (`TPlayApp::audio_dialog()`, pub(crate)); skipped if already in playlist
+- **Add Files / track additions come from the Library** — the `+` row button and the **Add All** header button call `add_files` (dedup checks); the old Add Files dialog button in the pane footer is gone
+- **Header**: the pane shows the current playlist's name at the top — the tracked file's stem when saved/loaded, else "Untitled", via the single `app.playlist_name()` getter (no pane-side derivation; follows New/Save/Load live)
 - Click track name to play; drag track name to reorder; ✕ icon button removes track (✕ and the right-aligned FORMAT column sit in a fixed 24px row; rows alternate `--row-even`/`--row-odd`, the active row gets a full-row `--accent` tint plus a 3px `--accent` left stripe; row content is inset 6px so the leading number clears the stripe; rows show the tagged **title** — filenames render without their extension until the tag scan lands — and a truncated `artist · album` secondary block, with FORMAT carrying the type)
 - **Shuffle** — plays each track once in random order; new tracks added go into unplayed pool; clicking a track resets shuffle
 - **Repeat** — loops playlist (sequential) or shuffle cycle
 - Transport (play/prev/next/stop) uses the theme's icon textures; the shuffle/repeat mode toggles sit beside them (same icon set, lit via egui's selected visuals while active)
 - Auto-advance (`advance`) fires on natural track end (sink empty, unpaused, `current_path` set), called from `TPlayApp::update()` every frame
-- **Save Playlist** / **Load Playlist** buttons — manual save/load to `~/.config/tplay/playlist.json`
-- Action buttons (Add Files / Save / Load) live in a `horizontal_wrapped` row at the bottom of the pane.
+- **Save Playlist** — first save opens a native save dialog (defaults to the Library's current folder, suggested `playlist.tplay`) and writes the current playlist as a `.tplay` file (`{"paths": [...]}` only — shuffle/repeat are appwide, never playlist content; `library::write_playlist`). The pane remembers the file (`playlist_file`), so later saves overwrite it directly — no dialog. Loading a `.tplay` from the Library also sets the tracked file (save writes back to the source); **New Playlist** clears it so a fresh playlist asks where to go. Button hover shows the overwrite target.
+- **New Playlist** — clears the current playlist (replaced the old Load button); loading now happens in the Library by clicking a `.tplay` file. New and Load confirm (native Yes/No, `TPlayApp::confirm`) only when the playlist has unsaved edits (`playlist_dirty`) — a clean switch is silent. The ✕ per-row remove always confirms.
+- Action buttons (New Playlist / Save Playlist) live in a `horizontal_wrapped` row at the bottom of the pane.
 
 ## Equalizer
 
@@ -45,6 +49,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 ## Library
 
 - Filesystem browser (`TPlayApp::navigate_to`): the current folder's subfolders + audio files rendered as one combined row list (`library::Entry::Dir`/`File`), `..` row to move up. Subfolders are `📁` rows, audio files are tag-table rows. Dot-prefixed (hidden) subfolders are skipped by default — a "Show hidden folders" checkbox in the ☰ menu toggles it (`TPlayApp::show_hidden`/`set_show_hidden`, persisted in `library.json`).
+- **Playlist files as rows**: `.tplay` files (see Playlist) are listed interleaved with the songs (`library::is_playlist` widens `list_dir`'s filter). A playlist row shows its full filename plus a right-aligned "Playlist" tag, no tag cells and no `+`. Click → confirm (only if the current playlist has unsaved edits) → `load_playlist_from`, dumping the saved tracks into the Playlist pane for editing. Playlists are **not** tag-scanned (`navigate_to`/`library_scanning` exclude them, or "Scanning…" would stick) and **Add All** skips them — a playlist file isn't audio.
 - **Favorites** ★ toggles the current folder; persisted with the last browsed dir to `~/.config/tplay/library.json` (`{favorites, last_dir}`), restored on startup.
 - Each file row is a fixed-column table: track-no title (flexible), then Artist/Album/Year/Genre/Duration cells mirroring the header, with a `+` button — all from the **background tag scan** — `library::scan_files` (a thread per scan) tag-reads every file with `lofty` (ID3v2 / Vorbis comments / MP4 ilst / RIFF INFO) and sends `(path, TrackInfo)` over an mpsc channel that `TPlayApp::update()` drains into the shared `tag_cache` each frame. Revisits are instant (cache check skips the scan); filenames stand in until the scan lands; a "Scanning…" label shows while any current-folder file is missing from the cache.
 - **Sortable header**: the file list has a clickable column header (Title / Artist / Album / Year / Genre / Duration) above the ScrollArea — one column per row cell (no separate Name column). Click picks that column ascending; clicking the active column flips direction (`TPlayApp::set_library_sort` → `apply_library_sort`, comparator `library::cmp_entries` keyed by `SORT_OPTIONS` index). **Folders participate**: they're untagged entries, so Title sorts them by their own name (interleaved with files) and the tag columns sink them below the files. The active column shows ▾/▴ and accent color. Untagged fields sort last (empty strings, missing durations).
@@ -86,7 +91,9 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 - **Drag-and-drop reorder**: `drag_from` / `drag_hover` live in egui Memory and persist across frames. On drop, item is removed from `from` and inserted at `to` (no `-1` adjustment), so dragging item 1 over item 3 puts it at position 3. `current_index` updated to follow the moved track.
 - **Shuffle order**: `shuffle_order` is a Fisher-Yates shuffled permutation of playlist indices. `shuffle_pos` tracks progress. New tracks inserted randomly into the unplayed portion. Clicking a track directly resets shuffle. Reordering/deleting regenerates shuffle order.
 - **Dock state in egui Memory**: `DockState<Pane>` + `dock_open` + `dock_pending_add` live in `ctx.data()` under `tplay.dock_state`, `tplay.dock_open`, `tplay.dock_pending_add`. Pure UI state — not in `TPlayApp`. Layout persists to disk each frame.
-- **Shared tag scan**: one cache (`tag_cache`) + one background `scan_files` thread serve every pane. `TPlayApp::ensure_tags(paths)` starts the scan for whatever's missing from the cache (dropping any in-flight receiver — per-path cache means a dropped scan just restarts next request); results drain per frame in `drain_tag_scan`, the app's only other thread besides the FLAC seektable builder. Triggers: library `navigate_to`, playlist `add_files`, `load_playlist`. `load_file` reads the playing track's tags inline (one file) so Now Playing shows title · artist immediately. `library_scanning()` recomputes as "any current-folder file missing from the cache".
+- **Shared tag scan**: one cache (`tag_cache`) + one background `scan_files` thread serve every pane. `TPlayApp::ensure_tags(paths)` starts the scan for whatever's missing from the cache (dropping any in-flight receiver — per-path cache means a dropped scan just restarts next request); results drain per frame in `drain_tag_scan`, the app's only other thread besides the FLAC seektable builder. Triggers: library `navigate_to`, playlist `add_files`, `load_playlist_from`. `load_file` reads the playing track's tags inline (one file) so Now Playing shows title · artist immediately. `library_scanning()` recomputes as "any current-folder file missing from the cache".
+- **Appwide settings**: shuffle/repeat persist to `~/.config/tplay/settings.json` (same pattern as `eq.json`), saved on toggle, loaded in `new()`. They are global playback modes — loading a playlist never touches them.
+- **Confirm dialogs**: `TPlayApp::confirm(title, desc, at_risk)` wraps `rfd::MessageDialog` (Yes/No). Used for New Playlist, loading a playlist over the current one, and per-track ✕ removal. `at_risk = false` (e.g. an empty playlist) skips the dialog. Save-overwrite is already confirmed by the native save dialog.
 
 ## Dependencies — each one is load-bearing
 

@@ -6,6 +6,7 @@
 
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::tag::ItemKey;
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
@@ -13,11 +14,62 @@ use std::time::Duration;
 
 /// The audio extensions this player can play (mirrors the file dialog filter).
 const AUDIO_EXTENSIONS: [&str; 5] = ["mp3", "wav", "ogg", "flac", "m4a"];
+/// Playlist files: JSON (`{"paths": [...]}`), saved/loaded from the Library
+/// like any other file. Shuffle/repeat are appwide settings, not content.
+const PLAYLIST_EXTENSIONS: [&str; 1] = ["tplay"];
 
 pub fn is_audio(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| AUDIO_EXTENSIONS.iter().any(|a| e.eq_ignore_ascii_case(a)))
+}
+
+pub fn is_playlist(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| PLAYLIST_EXTENSIONS.iter().any(|a| e.eq_ignore_ascii_case(a)))
+}
+
+/// Write the given tracks as a `.tplay` playlist file (paths only). Returns
+/// false when the file couldn't be written or serialized.
+pub fn write_playlist(path: &Path, tracks: &[PathBuf]) -> bool {
+    #[derive(Serialize)]
+    struct PlaylistData {
+        paths: Vec<String>,
+    }
+    let data = PlaylistData {
+        paths: tracks
+            .iter()
+            .filter_map(|p| p.to_str().map(str::to_owned))
+            .collect(),
+    };
+    match serde_json::to_string_pretty(&data) {
+        Ok(json) => std::fs::write(path, json).is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// Read a `.tplay` playlist file. `None` = not a parseable playlist (callers
+/// leave the current playlist alone); relative paths resolve against the
+/// playlist's own directory, like real players. Existence filtering happens
+/// in `TPlayApp::load_playlist_from`.
+pub fn read_playlist(path: &Path) -> Option<Vec<PathBuf>> {
+    let json = std::fs::read_to_string(path).ok()?;
+    #[derive(Deserialize)]
+    struct PlaylistData {
+        paths: Vec<String>,
+    }
+    let data: PlaylistData = serde_json::from_str(&json).ok()?;
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    Some(
+        data.paths
+            .into_iter()
+            .map(|s| {
+                let p = PathBuf::from(s);
+                if p.is_relative() { dir.join(p) } else { p }
+            })
+            .collect(),
+    )
 }
 
 /// Tags + duration read from one audio file. Missing fields stay blank —
@@ -96,7 +148,7 @@ pub fn list_dir(dir: &Path, show_hidden: bool) -> (Vec<PathBuf>, Vec<PathBuf>) {
                 if !hidden || show_hidden {
                     dirs.push(path);
                 }
-            } else if is_audio(&path) {
+            } else if is_audio(&path) || is_playlist(&path) {
                 files.push(path);
             }
         }
@@ -344,5 +396,28 @@ mod tests {
         assert!(cmp_entries(&dir, &a, 0, None, Some(&info_b)).is_gt()); // "z-folder" > "Bravo"
         assert!(cmp_entries(&a, &dir, 1, Some(&info_b), None).is_lt()); // Amy < (no artist)
         assert!(cmp_entries(&a, &dir, 5, Some(&info_a), None).is_lt()); // present < missing
+    }
+
+    #[test]
+    fn playlist_files_round_trip() {
+        let dir = std::env::temp_dir().join(format!("tplay-pl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("chill.tplay");
+        assert!(is_playlist(&file));
+        assert!(!is_playlist(&dir.join("chill.mp3")));
+
+        let tracks = vec![dir.join("a.mp3"), PathBuf::from("sub/b.ogg")];
+        assert!(write_playlist(&file, &tracks));
+        let back = read_playlist(&file).expect("read playlist");
+        // Absolute paths come back as-is; relative ones resolve against the
+        // playlist's own directory.
+        assert_eq!(back, vec![dir.join("a.mp3"), dir.join("sub/b.ogg")]);
+
+        // Garbage files read as None — callers leave the current playlist
+        // alone, never panic or wipe.
+        std::fs::write(&file, "not json").unwrap();
+        assert!(read_playlist(&file).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

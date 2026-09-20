@@ -90,6 +90,42 @@ fn draw_dir_row(ui: &mut egui::Ui, theme: &theme::Theme, row_h: f32, i: usize, n
     resp.clicked()
 }
 
+/// A saved playlist file row: full filename (extension visible) + a
+/// right-aligned "Playlist" tag — no tag cells, no `+`. Click loads it into
+/// the playlist pane (the caller adds the replace-confirm).
+fn draw_playlist_row(ui: &mut egui::Ui, theme: &theme::Theme, row_h: f32, i: usize, path: &Path) -> bool {
+    let p = theme.palette;
+    let rect = row_bg(ui, i, p, row_h);
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    let mut row = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(egui::Rect::from_min_max(rect.min + egui::vec2(6.0, 0.0), rect.max))
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    row.spacing_mut().item_spacing.x = 4.0;
+
+    let title_resp = row
+        .add_sized(
+            egui::vec2((rect.width() - ROW_FIXED_W - 6.0).max(40.0), row_h),
+            egui::Label::new(
+                egui::RichText::new(&name).color(p.text_primary.gamma_multiply(0.85)),
+            )
+            .truncate()
+            .sense(egui::Sense::click()),
+        )
+        .on_hover_text("Load playlist");
+
+    row.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.label(egui::RichText::new("Playlist").small().color(p.accent));
+    });
+
+    title_resp.clicked()
+}
+
 fn draw_file_row(
     app: &TPlayApp,
     ui: &mut egui::Ui,
@@ -210,7 +246,7 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                 let files: Vec<PathBuf> = app
                     .library_entries()
                     .iter()
-                    .filter(|e| !e.is_dir())
+                    .filter(|e| !e.is_dir() && !library::is_playlist(e.path()))
                     .map(|e| e.path().to_path_buf())
                     .collect();
                 app.add_files(files);
@@ -315,6 +351,7 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                     let mut i = 0usize;
                     let mut nav: Option<PathBuf> = None;
                     let mut action: Option<(fn(&mut TPlayApp, PathBuf), PathBuf)> = None;
+                    let mut load: Option<PathBuf> = None;
 
                     // Parent dir row, then the sorted folder + file rows.
                     if let Some(up) = app.library_dir().parent() {
@@ -335,22 +372,45 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                                 }
                             }
                             library::Entry::File(file) => {
-                                let info = app.track_info(file);
-                                let stem = file
-                                    .file_stem()
-                                    .map(|s| s.to_string_lossy().into_owned())
-                                    .unwrap_or_default();
-                                let hay = format!(
-                                    "{} {} {} {stem}",
-                                    info.map(|i| i.title.as_str()).unwrap_or_default(),
-                                    info.map(|i| i.artist.as_str()).unwrap_or_default(),
-                                    info.map(|i| i.album.as_str()).unwrap_or_default(),
-                                );
-                                if !query.is_empty() && !hay.to_lowercase().contains(&query) {
-                                    continue;
-                                }
-                                if let Some(f) = draw_file_row(app, ui, &theme, row_h, i, file, info) {
-                                    action = Some((f, file.clone()));
+                                if library::is_playlist(file) {
+                                    let name = file
+                                        .file_name()
+                                        .map(|s| s.to_string_lossy().into_owned())
+                                        .unwrap_or_default();
+                                    if !query.is_empty() && !name.to_lowercase().contains(&query) {
+                                        continue;
+                                    }
+                                    if draw_playlist_row(ui, &theme, row_h, i, file) {
+                                        let stem = file
+                                            .file_stem()
+                                            .map(|s| s.to_string_lossy().into_owned())
+                                            .unwrap_or_default();
+                                        if TPlayApp::confirm(
+                                            "Load playlist",
+                                            &format!("Replace the current playlist with '{stem}'?"),
+                                            app.playlist_dirty(),
+                                        ) {
+                                            load = Some(file.clone());
+                                        }
+                                    }
+                                } else {
+                                    let info = app.track_info(file);
+                                    let stem = file
+                                        .file_stem()
+                                        .map(|s| s.to_string_lossy().into_owned())
+                                        .unwrap_or_default();
+                                    let hay = format!(
+                                        "{} {} {} {stem}",
+                                        info.map(|i| i.title.as_str()).unwrap_or_default(),
+                                        info.map(|i| i.artist.as_str()).unwrap_or_default(),
+                                        info.map(|i| i.album.as_str()).unwrap_or_default(),
+                                    );
+                                    if !query.is_empty() && !hay.to_lowercase().contains(&query) {
+                                        continue;
+                                    }
+                                    if let Some(f) = draw_file_row(app, ui, &theme, row_h, i, file, info) {
+                                        action = Some((f, file.clone()));
+                                    }
                                 }
                             }
                         }
@@ -362,6 +422,9 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                     }
                     if let Some((f, path)) = action {
                         f(app, path);
+                    }
+                    if let Some(path) = load {
+                        app.load_playlist_from(path);
                     }
                     if i == 0 {
                         ui.label(egui::RichText::new("No audio files").small().color(p.text_secondary));

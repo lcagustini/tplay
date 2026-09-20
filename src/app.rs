@@ -65,6 +65,14 @@ pub struct TPlayApp {
     /// starts from the pane (row click, auto-advance). None = direct open,
     /// which breaks the sequential flow.
     current_index: Option<usize>,
+    /// The `.tplay` file this playlist was saved to / loaded from. `Some` →
+    /// Save Playlist overwrites it directly; `None` → Save opens the dialog.
+    /// Cleared by New Playlist (a fresh playlist has no file to replace yet).
+    playlist_file: Option<PathBuf>,
+    /// Whether the in-memory playlist differs from its saved/loaded file —
+    /// i.e. New/Load risk losing unsaved edits. Set on content changes,
+    /// cleared on save/load/new (shuffle/repeat don't count; they're appwide).
+    playlist_dirty: bool,
 
     /// Shuffle mode: play tracks in random order
     shuffle: bool,
@@ -145,6 +153,8 @@ impl TPlayApp {
             seektable_ready: None,
             playlist: Vec::new(),
             current_index: None,
+            playlist_file: None,
+            playlist_dirty: false,
             shuffle: false,
             repeat: false,
             shuffle_order: Vec::new(),
@@ -171,6 +181,7 @@ impl TPlayApp {
         };
         app.load_eq();
         app.sync_eq_shared();
+        app.load_settings();
         app.load_library();
         app
     }
@@ -179,8 +190,21 @@ impl TPlayApp {
         rfd::FileDialog::new().add_filter("Audio", &["mp3", "wav", "ogg", "flac", "m4a"])
     }
 
-    fn playlist_path() -> Option<PathBuf> {
-        dirs::config_dir().map(|d| d.join("tplay").join("playlist.json"))
+    /// Native Yes/No confirm for actions that lose state (New Playlist, Load
+    /// playlist, remove track). `at_risk` false → no dialog, caller proceeds.
+    pub(crate) fn confirm(title: &str, description: &str, at_risk: bool) -> bool {
+        if !at_risk {
+            return true;
+        }
+        match rfd::MessageDialog::new()
+            .set_title(title)
+            .set_description(description)
+            .set_buttons(rfd::MessageButtons::YesNo)
+            .show()
+        {
+            rfd::MessageDialogResult::Yes => true,
+            _ => false,
+        }
     }
 
     pub fn add_files(&mut self, paths: Vec<PathBuf>) {
@@ -192,6 +216,7 @@ impl TPlayApp {
             }
         }
         if added_count > 0 {
+            self.playlist_dirty = true;
             let new_len = self.playlist.len();
             let old_len = new_len - added_count;
             let mut new_indices: Vec<usize> = (old_len..new_len).collect();
@@ -580,6 +605,7 @@ impl TPlayApp {
     }
 
     pub fn remove_track(&mut self, index: usize) {
+        self.playlist_dirty = true;
         self.playlist.remove(index);
         self.current_index = self.current_index.and_then(|ci| {
             if ci == index {
@@ -599,6 +625,7 @@ impl TPlayApp {
 
     pub fn move_track(&mut self, from: usize, to: usize) {
         if from != to {
+            self.playlist_dirty = true;
             let item = self.playlist.remove(from);
             self.playlist.insert(to, item);
             self.current_index = self.current_index.map(|ci| {
@@ -628,25 +655,94 @@ impl TPlayApp {
         self.shuffle = !self.shuffle;
         self.regenerate_shuffle_order();
         self.shuffle_pos = 0;
+        self.save_settings();
     }
 
     pub fn toggle_repeat(&mut self) {
         self.repeat = !self.repeat;
+        self.save_settings();
     }
 
-    pub fn save_playlist(&self) {
-        if let Some(path) = Self::playlist_path() {
+    // ── Playlists — plain `.tplay` files on disk, found in the Library like
+    //    any other file. Shuffle/repeat are appwide settings (settings.json),
+    //    never playlist content.
+
+    /// Write the current playlist to a `.tplay` file (paths only) and record
+    /// it as the file future saves overwrite without re-opening the dialog.
+    pub fn save_playlist_to(&mut self, path: PathBuf) {
+        if !library::write_playlist(&path, &self.playlist) {
+            eprintln!("tplay: could not write playlist {}", path.display());
+        }
+        self.playlist_file = Some(path);
+        self.playlist_dirty = false;
+    }
+
+    /// Replace the current playlist from a `.tplay` file. Tracks that no
+    /// longer exist are dropped; unparseable files leave the playlist alone.
+    pub fn load_playlist_from(&mut self, path: PathBuf) {
+        let Some(paths) = library::read_playlist(&path) else { return };
+        self.playlist = paths
+            .into_iter()
+            .filter_map(|p| p.canonicalize().ok())
+            .collect();
+        self.current_index = None;
+        self.current_path = None;
+        self.regenerate_shuffle_order();
+        self.shuffle_pos = 0;
+        self.ensure_tags(self.playlist.clone());
+        self.playlist_file = Some(path);
+        self.playlist_dirty = false;
+    }
+
+    /// Clear the playlist for a fresh build (confirm dialog lives in the GUI).
+    /// Unsets the tracked file — a new playlist must ask where it's saved.
+    pub fn new_playlist(&mut self) {
+        self.stop();
+        self.playlist.clear();
+        self.shuffle_order.clear();
+        self.playlist_file = None;
+        self.playlist_dirty = false;
+    }
+
+    /// The `.tplay` file this playlist is saved to / was loaded from, if any.
+    pub fn playlist_file(&self) -> Option<&std::path::Path> {
+        self.playlist_file.as_deref()
+    }
+
+    /// Whether the in-memory playlist has edits not yet written to its file
+    /// (or no file yet at all). The GUI confirms New/Load only when true.
+    pub fn playlist_dirty(&self) -> bool {
+        self.playlist_dirty
+    }
+
+    /// Display name of the current playlist: the tracked file's stem when
+    /// saved/loaded, else "Untitled". Single source — no pane re-derives it.
+    pub fn playlist_name(&self) -> String {
+        self.playlist_file
+            .as_ref()
+            .and_then(|f| f.file_stem())
+            .and_then(|s| s.to_str())
+            .map(str::to_owned)
+            .unwrap_or_else(|| "Untitled".to_string())
+    }
+
+    // ── Appwide settings (shuffle/repeat — not per-playlist) ────────────────
+
+    fn settings_path() -> Option<PathBuf> {
+        dirs::config_dir().map(|d| d.join("tplay").join("settings.json"))
+    }
+
+    fn save_settings(&self) {
+        if let Some(path) = Self::settings_path() {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
             #[derive(Serialize)]
-            struct PlaylistData {
-                paths: Vec<String>,
+            struct SettingsData {
                 shuffle: bool,
                 repeat: bool,
             }
-            let data = PlaylistData {
-                paths: self.playlist.iter().filter_map(|p| p.to_str().map(|s| s.to_string())).collect(),
+            let data = SettingsData {
                 shuffle: self.shuffle,
                 repeat: self.repeat,
             };
@@ -656,27 +752,18 @@ impl TPlayApp {
         }
     }
 
-    pub fn load_playlist(&mut self) {
-        if let Some(path) = Self::playlist_path() {
+    /// Load appwide settings from disk (missing file → defaults off).
+    fn load_settings(&mut self) {
+        if let Some(path) = Self::settings_path() {
             if let Ok(json) = std::fs::read_to_string(&path) {
                 #[derive(Deserialize)]
-                struct PlaylistData {
-                    paths: Vec<String>,
+                struct SettingsData {
                     shuffle: Option<bool>,
                     repeat: Option<bool>,
                 }
-                if let Ok(data) = serde_json::from_str::<PlaylistData>(&json) {
-                    self.playlist = data.paths.into_iter()
-                        .filter_map(|s| PathBuf::from(s).canonicalize().ok())
-                        .filter(|p| p.exists())
-                        .collect();
+                if let Ok(data) = serde_json::from_str::<SettingsData>(&json) {
                     self.shuffle = data.shuffle.unwrap_or(false);
                     self.repeat = data.repeat.unwrap_or(false);
-                    self.current_index = None;
-                    self.current_path = None;
-                    self.regenerate_shuffle_order();
-                    self.shuffle_pos = 0;
-                    self.ensure_tags(self.playlist.clone());
                 }
             }
         }
@@ -706,7 +793,7 @@ impl TPlayApp {
         self.ensure_tags(
             self.library_entries
                 .iter()
-                .filter(|e| !e.is_dir())
+                .filter(|e| !e.is_dir() && !library::is_playlist(e.path()))
                 .map(|e| e.path().to_path_buf())
                 .collect(),
         );
@@ -888,7 +975,7 @@ impl TPlayApp {
     pub fn library_scanning(&self) -> bool {
         self.library_entries
             .iter()
-            .any(|e| !e.is_dir() && !self.tag_cache.contains_key(e.path()))
+            .any(|e| !e.is_dir() && !library::is_playlist(e.path()) && !self.tag_cache.contains_key(e.path()))
     }
     pub fn favorite_dirs(&self) -> &[PathBuf] { &self.favorite_dirs }
     pub fn is_favorite(&self, dir: &std::path::Path) -> bool {

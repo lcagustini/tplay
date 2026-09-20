@@ -1,11 +1,20 @@
 use crate::app::TPlayApp;
 use crate::gui::theme::{self, Icon};
 use eframe::egui;
+use std::path::PathBuf;
 
 pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
     // Owned Arc copy — panes call &mut app while using theme data.
     let theme = app.theme().clone();
     let p = theme.palette;
+
+    // Header: the current playlist's name (single source — app.playlist_name;
+    // follows New/Save/Load live).
+    let pl_name = app.playlist_name();
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(pl_name).strong().color(p.text_primary));
+    });
+    ui.add_space(4.0);
 
     let drag_from_id = egui::Id::new("tplay.drag_from");
     let drag_hover_id = egui::Id::new("tplay.drag_hover");
@@ -166,7 +175,21 @@ pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
             }
 
             if let Some(idx) = to_delete {
-                app.remove_track(idx);
+                let name = app
+                    .playlist()
+                    .get(idx)
+                    .and_then(|p| app.track_info(p))
+                    .and_then(|i| (!i.title.is_empty()).then_some(i.title.clone()))
+                    .unwrap_or_else(|| {
+                        app.playlist()
+                            .get(idx)
+                            .and_then(|p| p.file_stem())
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    });
+                if TPlayApp::confirm("Remove track", &format!("Remove '{name}' from the playlist?"), true) {
+                    app.remove_track(idx);
+                }
             }
         });
 
@@ -176,19 +199,37 @@ pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
         m.data.insert_temp(drag_hover_id, drag_hover);
     });
 
-    // Bottom actions — the reference's ADD/REM/SEL/LIST strip.
+    // Bottom actions: New Playlist (confirm only when there are unsaved edits —
+    // tracks are added from the Library now), Save Playlist (native save
+    // dialog, defaults to the Library's current folder; later saves overwrite
+    // the tracked file directly).
     ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
-        if ui.button("Add Files").clicked() {
-            if let Some(paths) = TPlayApp::audio_dialog().pick_files() {
-                app.add_files(paths);
+        if ui.button("New Playlist").clicked() {
+            if TPlayApp::confirm(
+                "New playlist",
+                "Discard unsaved changes and start a new playlist?",
+                app.playlist_dirty(),
+            ) {
+                app.new_playlist();
             }
         }
-        if ui.button("Save Playlist").clicked() {
-            app.save_playlist();
-        }
-        if ui.button("Load Playlist").clicked() {
-            app.load_playlist();
+        let save_hover = app
+            .playlist_file()
+            .map(|p| format!("Overwrite {}", p.display()))
+            .unwrap_or_else(|| "Save to a .tplay file".into());
+        if ui.button("Save Playlist").on_hover_text(save_hover).clicked() {
+            if let Some(path) = app.playlist_file().map(PathBuf::from) {
+                // Already saved once this session: overwrite, no dialog.
+                app.save_playlist_to(path);
+            } else if let Some(path) = rfd::FileDialog::new()
+                .add_filter("TPlay playlist", &["tplay"])
+                .set_directory(app.library_dir())
+                .set_file_name("playlist.tplay")
+                .save_file()
+            {
+                app.save_playlist_to(path);
+            }
         }
     });
 }
