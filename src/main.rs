@@ -3,6 +3,7 @@
 mod app;
 mod audio;
 mod gui;
+mod library;
 
 use eframe::egui;
 

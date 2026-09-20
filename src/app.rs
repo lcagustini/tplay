@@ -2,23 +2,26 @@
 
 use crate::audio;
 use crate::gui::theme::{self, Theme, Themes};
+use crate::library;
 use eframe::egui;
 use fastrand;
 use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 // Docking panes (egui_dock) - used by GUI layer only
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Pane { NowPlaying, Playlist, Equalizer }
+pub enum Pane { NowPlaying, Playlist, Equalizer, Library }
 
 impl Pane {
-    pub const ALL: [Pane; 3] = [Pane::NowPlaying, Pane::Playlist, Pane::Equalizer];
+    pub const ALL: [Pane; 4] = [Pane::NowPlaying, Pane::Playlist, Pane::Equalizer, Pane::Library];
 }
 
 /// Equalizer presets — index 0 is Flat (the reset). A manually tweaked slider
@@ -91,6 +94,30 @@ pub struct TPlayApp {
     icons: Vec<Option<egui::TextureHandle>>,
     /// Needed to (re)load icon textures on theme switch.
     ctx: egui::Context,
+
+    // ── Library pane ──────────────────────────────────────────────────────
+    /// Directory currently browsed in the Library pane.
+    library_dir: PathBuf,
+    /// Rows of `library_dir`: subfolders + audio files in one list, sorted by
+    /// `library_sort`. Folders are untagged — Title treats them by name, the
+    /// tag columns sink them last.
+    library_entries: Vec<library::Entry>,
+    /// Shared tag/duration cache — any path ever scanned or played, used by
+    /// the Library, Playlist, and Now Playing panes. Filenames stand in until
+    /// a track's entry lands.
+    tag_cache: HashMap<PathBuf, library::TrackInfo>,
+    /// Receiver for the background tag scan. `Some` while a scan is running;
+    /// a new request replaces it (one scan at a time).
+    tag_scan_rx: Option<Receiver<(PathBuf, library::TrackInfo)>>,
+    /// Bookmarked folders shown in the Library pane, persisted to disk.
+    favorite_dirs: Vec<PathBuf>,
+    /// Whether the Library lists dot-prefixed (hidden) subfolders. Default
+    /// off; toggled from the ☰ menu, persisted in library.json.
+    show_hidden: bool,
+    /// Library list sort: index into `library::SORT_OPTIONS` (0 = Title, the
+    /// default), plus direction. Set by header clicks.
+    library_sort: usize,
+    library_asc: bool,
 }
 
 impl TPlayApp {
@@ -133,9 +160,18 @@ impl TPlayApp {
             themes,
             icons,
             ctx,
+            library_dir: dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")),
+            library_entries: Vec::new(),
+            tag_cache: HashMap::new(),
+            tag_scan_rx: None,
+            favorite_dirs: Vec::new(),
+            show_hidden: false,
+            library_sort: 0,
+            library_asc: true,
         };
         app.load_eq();
         app.sync_eq_shared();
+        app.load_library();
         app
     }
 
@@ -165,6 +201,8 @@ impl TPlayApp {
             }
             let insert_at = self.shuffle_pos.min(self.shuffle_order.len());
             self.shuffle_order.splice(insert_at..insert_at, new_indices);
+            // Tag the new tracks in the background (dedup handles repeats).
+            self.ensure_tags(self.playlist.clone());
         }
     }
 
@@ -190,6 +228,12 @@ impl TPlayApp {
             });
         }
 
+        // Tag the loaded track up front so Now Playing shows title · artist
+        // immediately instead of waiting on a scan (one file, negligible cost).
+        if let Some(info) = library::read_info(&path) {
+            self.tag_cache.insert(path.clone(), info);
+        }
+
         match File::open(&path) {
             Ok(file) => match Decoder::new(BufReader::new(file)) {
                 Ok(source) => {
@@ -212,6 +256,7 @@ impl TPlayApp {
                 self.total_duration = None;
             }
         }
+
     }
 
     fn next_track_index(&mut self) -> Option<usize> {
@@ -631,6 +676,188 @@ impl TPlayApp {
                     self.current_path = None;
                     self.regenerate_shuffle_order();
                     self.shuffle_pos = 0;
+                    self.ensure_tags(self.playlist.clone());
+                }
+            }
+        }
+    }
+
+    // ── Library ────────────────────────────────────────────────────────────
+
+    /// Path to library settings (favorites + last browsed dir).
+    fn library_path() -> Option<PathBuf> {
+        dirs::config_dir().map(|d| d.join("tplay").join("library.json"))
+    }
+
+    /// List the given directory and start tagging its audio files in the
+    /// background. Persists the last browsed dir on the way.
+    pub fn navigate_to(&mut self, dir: PathBuf) {
+        if !dir.is_dir() {
+            return;
+        }
+        self.library_dir = dir;
+        let (dirs, files) = library::list_dir(&self.library_dir, self.show_hidden);
+        self.library_entries = dirs
+            .into_iter()
+            .map(library::Entry::Dir)
+            .chain(files.into_iter().map(library::Entry::File))
+            .collect();
+        self.apply_library_sort();
+        self.ensure_tags(
+            self.library_entries
+                .iter()
+                .filter(|e| !e.is_dir())
+                .map(|e| e.path().to_path_buf())
+                .collect(),
+        );
+        self.save_library();
+    }
+
+    /// Sort the browsed folder's rows by the active header sort. Missing
+    /// tags sort last (empty artist/album/year/genre, missing duration);
+    /// folders are untagged entries, so the tag columns sink them below the
+    /// files.
+    fn apply_library_sort(&mut self) {
+        let key = self.library_sort;
+        let asc = self.library_asc;
+        let cache = &self.tag_cache;
+        self.library_entries.sort_by(|a, b| {
+            let ord = library::cmp_entries(a, b, key, cache.get(a.path()), cache.get(b.path()));
+            if asc { ord } else { ord.reverse() }
+        });
+    }
+
+    /// Header click: pick a new column (ascending) or flip the active one and
+    /// re-sort the current folder in place.
+    pub fn set_library_sort(&mut self, key: usize) {
+        if key >= library::SORT_OPTIONS.len() {
+            return;
+        }
+        if self.library_sort == key {
+            self.library_asc = !self.library_asc;
+        } else {
+            self.library_sort = key;
+            self.library_asc = true;
+        }
+        self.apply_library_sort();
+    }
+
+    /// Ensure the given audio files have tag info in the cache: any path
+    /// missing from `tag_cache` goes to a background `scan_files` thread.
+    /// One scan runs at a time — a new request replaces the in-flight one
+    /// (the cache is per-path, so a dropped scan simply restarts the next
+    /// time its paths are requested; nothing is corrupted).
+    pub fn ensure_tags(&mut self, paths: Vec<PathBuf>) {
+        let missing: Vec<PathBuf> = paths
+            .into_iter()
+            .filter(|p| !self.tag_cache.contains_key(p))
+            .collect();
+        if missing.is_empty() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || library::scan_files(missing, tx));
+        self.tag_scan_rx = Some(rx);
+        self.ctx.request_repaint();
+    }
+
+    /// Drain the background tag scan into the cache (called every frame).
+    /// Drops the receiver once the thread finishes so "Scanning…" clears.
+    pub fn drain_tag_scan(&mut self) {
+        let mut ended = false;
+        let mut new = false;
+        if let Some(rx) = &self.tag_scan_rx {
+            loop {
+                match rx.try_recv() {
+                    Ok((path, info)) => {
+                        self.tag_cache.insert(path, info);
+                        new = true;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        ended = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if ended {
+            self.tag_scan_rx = None;
+        }
+        if new || ended {
+            self.ctx.request_repaint();
+        }
+    }
+
+    /// Play a library file directly. `current_index = None` is the "direct
+    /// open" semantics: the playlist's sequential flow isn't touched and
+    /// auto-advance won't cascade off it.
+    pub fn play_file(&mut self, path: PathBuf) {
+        self.current_index = None;
+        self.load_file(path);
+    }
+
+    pub fn toggle_favorite(&mut self, dir: PathBuf) {
+        if let Some(i) = self.favorite_dirs.iter().position(|d| d == &dir) {
+            self.favorite_dirs.remove(i);
+        } else {
+            self.favorite_dirs.push(dir);
+        }
+        self.save_library();
+    }
+
+    fn save_library(&self) {
+        if let Some(path) = Self::library_path() {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            #[derive(Serialize)]
+            struct LibraryData {
+                favorites: Vec<String>,
+                last_dir: String,
+                show_hidden: bool,
+            }
+            let data = LibraryData {
+                favorites: self
+                    .favorite_dirs
+                    .iter()
+                    .filter_map(|d| d.to_str().map(str::to_string))
+                    .collect(),
+                last_dir: self.library_dir.to_string_lossy().into_owned(),
+                show_hidden: self.show_hidden,
+            };
+            if let Ok(json) = serde_json::to_string_pretty(&data) {
+                let _ = std::fs::write(&path, json);
+            }
+        }
+    }
+
+    fn load_library(&mut self) {
+        if let Some(path) = Self::library_path() {
+            if let Ok(json) = std::fs::read_to_string(&path) {
+                #[derive(Deserialize)]
+                struct LibraryData {
+                    favorites: Option<Vec<String>>,
+                    last_dir: Option<String>,
+                    show_hidden: Option<bool>,
+                }
+                if let Ok(data) = serde_json::from_str::<LibraryData>(&json) {
+                    if let Some(favs) = data.favorites {
+                        self.favorite_dirs = favs
+                            .into_iter()
+                            .map(PathBuf::from)
+                            .filter(|d| d.is_dir())
+                            .collect();
+                    }
+                    if let Some(last) = data.last_dir {
+                        let p = PathBuf::from(last);
+                        if p.is_dir() {
+                            self.library_dir = p;
+                        }
+                    }
+                    if let Some(show) = data.show_hidden {
+                        self.show_hidden = show;
+                    }
                 }
             }
         }
@@ -648,6 +875,40 @@ impl TPlayApp {
 
     pub fn eq_enabled(&self) -> bool { self.eq_enabled }
     pub fn eq_gains(&self) -> &[f32; 10] { &self.eq_gains }
+
+    pub fn library_dir(&self) -> &std::path::Path { &self.library_dir }
+    pub fn library_entries(&self) -> &[library::Entry] { &self.library_entries }
+    /// Tags/duration for any previously scanned or played track — the shared
+    /// cache behind the Library, Playlist, and Now Playing panes.
+    pub fn track_info(&self, path: &std::path::Path) -> Option<&library::TrackInfo> {
+        self.tag_cache.get(path)
+    }
+    /// Whether any file in the browsed folder is still missing from the tag
+    /// cache (i.e. its scan is pending or underway).
+    pub fn library_scanning(&self) -> bool {
+        self.library_entries
+            .iter()
+            .any(|e| !e.is_dir() && !self.tag_cache.contains_key(e.path()))
+    }
+    pub fn favorite_dirs(&self) -> &[PathBuf] { &self.favorite_dirs }
+    pub fn is_favorite(&self, dir: &std::path::Path) -> bool {
+        self.favorite_dirs.iter().any(|d| d == dir)
+    }
+
+    pub fn show_hidden(&self) -> bool { self.show_hidden }
+
+    pub fn library_sort(&self) -> usize { self.library_sort }
+    pub fn library_sort_asc(&self) -> bool { self.library_asc }
+
+    /// Toggle hidden-folder display in the Library and re-list the current
+    /// dir so the change lands immediately (also persists it).
+    pub fn set_show_hidden(&mut self, show: bool) {
+        if self.show_hidden == show {
+            return;
+        }
+        self.show_hidden = show;
+        self.navigate_to(self.library_dir.clone());
+    }
 
     pub fn has_next_track(&self) -> bool {
         if self.playlist.is_empty() {
@@ -715,6 +976,7 @@ impl eframe::App for TPlayApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         crate::gui::coordinator::update_ui(self, ctx);
         self.advance();
+        self.drain_tag_scan();
         if !self.sink.empty() && !self.sink.is_paused() {
             ctx.request_repaint();
         }

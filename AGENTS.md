@@ -1,6 +1,6 @@
 # tplay
 
-Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no network. 12 source files (~1300 lines) + `themes/` data folder; read all of them before changing anything — there is nothing else to explore.
+Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no network. 13 source files (~3100 lines) + `themes/` data folder; read all of them before changing anything — there is nothing else to explore.
 
 ## Rules
 
@@ -29,7 +29,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 - `shuffle_order: Vec<usize>` — shuffled indices for shuffle playback
 - `shuffle_pos: usize` — current position in shuffle_order
 - **Add Files** button opens native multi-select dialog (`TPlayApp::audio_dialog()`, pub(crate)); skipped if already in playlist
-- Click track name to play; drag track name to reorder; ✕ icon button removes track (✕ and the right-aligned FORMAT column sit in a fixed 24px row; rows alternate `--row-even`/`--row-odd`, the active row gets a full-row `--accent` tint plus a 3px `--accent` left stripe; row content is inset 6px so the leading number clears the stripe; filenames render without their extension — the FORMAT column carries the type)
+- Click track name to play; drag track name to reorder; ✕ icon button removes track (✕ and the right-aligned FORMAT column sit in a fixed 24px row; rows alternate `--row-even`/`--row-odd`, the active row gets a full-row `--accent` tint plus a 3px `--accent` left stripe; row content is inset 6px so the leading number clears the stripe; rows show the tagged **title** — filenames render without their extension until the tag scan lands — and a truncated `artist · album` secondary block, with FORMAT carrying the type)
 - **Shuffle** — plays each track once in random order; new tracks added go into unplayed pool; clicking a track resets shuffle
 - **Repeat** — loops playlist (sequential) or shuffle cycle
 - Transport (play/prev/next/stop) uses the theme's icon textures; the shuffle/repeat mode toggles sit beside them (same icon set, lit via egui's selected visuals while active)
@@ -42,6 +42,16 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 - 10 bands at `audio::eq::EQ_FREQUENCIES` (20, 100, 300, 600, 1K, 3K, 5K, 8K, 12K, 16K — the reference UI's labels; the same constant drives the filters *and* the pane labels, so they can't drift).
 - Pane header: left `ON` toggle, then `Reset` button and preset dropdown — all three grouped in one row with matching button chrome. Presets: `EQ_PRESETS` in app.rs — Flat, Rock, Pop, Jazz, Classical, Electronic, Vocal. Curves follow sfxengine.com/blog/best-equalizer-settings-for-music (Rock ⇐ Rock/Metal, Pop ⇐ V-Shape, Jazz ⇐ Treble Boost, Electronic ⇐ Bass Boost, Vocal ⇐ Vocal Enhancement). Selecting one applies its gains immediately; any manual slider tweak switches the selection to `EQ_PRESET_CUSTOM`. Preset is persisted in `~/.config/tplay/eq.json`.
 
+## Library
+
+- Filesystem browser (`TPlayApp::navigate_to`): the current folder's subfolders + audio files rendered as one combined row list (`library::Entry::Dir`/`File`), `..` row to move up. Subfolders are `📁` rows, audio files are tag-table rows. Dot-prefixed (hidden) subfolders are skipped by default — a "Show hidden folders" checkbox in the ☰ menu toggles it (`TPlayApp::show_hidden`/`set_show_hidden`, persisted in `library.json`).
+- **Favorites** ★ toggles the current folder; persisted with the last browsed dir to `~/.config/tplay/library.json` (`{favorites, last_dir}`), restored on startup.
+- Each file row is a fixed-column table: track-no title (flexible), then Artist/Album/Year/Genre/Duration cells mirroring the header, with a `+` button — all from the **background tag scan** — `library::scan_files` (a thread per scan) tag-reads every file with `lofty` (ID3v2 / Vorbis comments / MP4 ilst / RIFF INFO) and sends `(path, TrackInfo)` over an mpsc channel that `TPlayApp::update()` drains into the shared `tag_cache` each frame. Revisits are instant (cache check skips the scan); filenames stand in until the scan lands; a "Scanning…" label shows while any current-folder file is missing from the cache.
+- **Sortable header**: the file list has a clickable column header (Title / Artist / Album / Year / Genre / Duration) above the ScrollArea — one column per row cell (no separate Name column). Click picks that column ascending; clicking the active column flips direction (`TPlayApp::set_library_sort` → `apply_library_sort`, comparator `library::cmp_entries` keyed by `SORT_OPTIONS` index). **Folders participate**: they're untagged entries, so Title sorts them by their own name (interleaved with files) and the tag columns sink them below the files. The active column shows ▾/▴ and accent color. Untagged fields sort last (empty strings, missing durations).
+- Click a song row → `play_file` — a **direct open**: `current_index = None`, the playlist's sequential flow and shuffle state are untouched, and auto-advance won't cascade off it. The `+` row button and the **Add All** header button add tracks to the current playlist via the existing `add_files` dedup.
+- Search box filters the current folder's rows by title/artist/album (filename pre-scan).
+- Row styling reuses the playlist pattern: `--row-even/odd` banding, 3px accent stripe + tint on the currently playing row. No new theme tokens or icons — text glyphs only.
+
 ## Themes (data-driven, dark / retro / neon)
 
 - All colors flow from each theme's JSON `Palette` tokens mirroring the reference CSS custom properties. Panes paint rows/labels/metadata straight from tokens via `app.theme().palette` (the `Skin` metadata font from `app.theme().metadata_font`).
@@ -53,8 +63,8 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 
 ## Docking (egui_dock)
 
-- Three panes as tabs: **Now Playing**, **Playlist**, **Equalizer**
-- **Pane sizing**: per-pane `PaneSizing` policy in coordinator.rs — `Fill` panes (Playlist, Equalizer) take their dock share and resize via separator drag; `Fixed` panes (Now Playing) are pinned to their measured content height each frame (the Now Playing pane records its scope height to egui memory under `tplay.pane_content_h`, and `apply_pane_sizes` rewrites the enclosing split's `fraction` before `DockArea::show`, so the separator snaps back — no empty dead zone below the controls). Minimum floors are enforced twice per frame: `apply_pane_sizes` runs before `DockArea::show`, and again **after** it (the splitter drag and floating-window resize happen inside `show()` and ignore the floors), then `ctx.request_repaint()` lands the corrected fractions next frame - so dragging below the EQ sliders' minimum height snaps back instead of sticking.
+- Three panes as tabs: **Now Playing**, **Playlist**, **Equalizer**, **Library**
+- **Pane sizing**: per-pane `PaneSizing` policy in coordinator.rs — `Fill` panes (Playlist, Equalizer, Library) take their dock share and resize via separator drag; `Fixed` panes (Now Playing) are pinned to their measured content height each frame (the Now Playing pane records its scope height to egui memory under `tplay.pane_content_h`, and `apply_pane_sizes` rewrites the enclosing split's `fraction` before `DockArea::show`, so the separator snaps back — no empty dead zone below the controls). Minimum floors are enforced twice per frame: `apply_pane_sizes` runs before `DockArea::show`, and again **after** it (the splitter drag and floating-window resize happen inside `show()` and ignore the floors), then `ctx.request_repaint()` lands the corrected fractions next frame - so dragging below the EQ sliders' minimum height snaps back instead of sticking.
 - Default layout: top row (Now Playing tab) ~25%, bottom (Playlist) ~75%
 - Drag tabs to reorder; drag onto split overlays to dock left/right/top/bottom/center
 - Resize panes via draggable splitters
@@ -76,6 +86,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 - **Drag-and-drop reorder**: `drag_from` / `drag_hover` live in egui Memory and persist across frames. On drop, item is removed from `from` and inserted at `to` (no `-1` adjustment), so dragging item 1 over item 3 puts it at position 3. `current_index` updated to follow the moved track.
 - **Shuffle order**: `shuffle_order` is a Fisher-Yates shuffled permutation of playlist indices. `shuffle_pos` tracks progress. New tracks inserted randomly into the unplayed portion. Clicking a track directly resets shuffle. Reordering/deleting regenerates shuffle order.
 - **Dock state in egui Memory**: `DockState<Pane>` + `dock_open` + `dock_pending_add` live in `ctx.data()` under `tplay.dock_state`, `tplay.dock_open`, `tplay.dock_pending_add`. Pure UI state — not in `TPlayApp`. Layout persists to disk each frame.
+- **Shared tag scan**: one cache (`tag_cache`) + one background `scan_files` thread serve every pane. `TPlayApp::ensure_tags(paths)` starts the scan for whatever's missing from the cache (dropping any in-flight receiver — per-path cache means a dropped scan just restarts next request); results drain per frame in `drain_tag_scan`, the app's only other thread besides the FLAC seektable builder. Triggers: library `navigate_to`, playlist `add_files`, `load_playlist`. `load_file` reads the playing track's tags inline (one file) so Now Playing shows title · artist immediately. `library_scanning()` recomputes as "any current-folder file missing from the cache".
 
 ## Dependencies — each one is load-bearing
 
@@ -90,6 +101,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 | fastrand | fast RNG for shuffle (zero-dep) |
 | egui_dock | docking layout: tab drag/split/tear-off; serde for layout persistence |
 | image (png-only) | decodes theme icons (PNG → egui texture) synchronously at startup / skin switch |
+| lofty | audio tag reading for every pane's track display — ID3v2, Vorbis comments, MP4 ilst, RIFF INFO (artist/album/year/genre/track + duration) |
 | ron | RON serialization for dock layout (human-readable, no schema needed) |
 
 `[profile.release] opt-level` is deliberately absent — 3 is Cargo's default.

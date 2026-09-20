@@ -28,15 +28,33 @@ pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
 
             for i in 0..app.playlist().len() {
                 let is_current = app.current_index() == Some(i);
-                let name = app.playlist()[i]
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy().into_owned();
-                let fmt = app.playlist()[i]
+                let path = &app.playlist()[i];
+                // Tagged title (filename stands in until the scan lands; the
+                // cache is shared with the Library, so already-visited folders
+                // show tags instantly).
+                let info = app.track_info(path);
+                let name = info
+                    .and_then(|i| (!i.title.is_empty()).then_some(i.title.clone()))
+                    .unwrap_or_else(|| {
+                        path.file_stem().unwrap_or_default().to_string_lossy().into_owned()
+                    });
+                let fmt = path
                     .extension()
                     .and_then(|e| e.to_str())
                     .map(|e| e.to_ascii_uppercase())
                     .unwrap_or_default();
+                // Secondary artist · album block (right of the title, before FORMAT).
+                let meta = {
+                    let mut parts: Vec<&str> = Vec::new();
+                    if let Some(i) = info {
+                        for s in [i.artist.as_str(), i.album.as_str()] {
+                            if !s.is_empty() {
+                                parts.push(s);
+                            }
+                        }
+                    }
+                    parts.join(" · ")
+                };
 
                 // Fixed-height row rect; background, full-row highlight and the
                 // accent stripe all go under the widgets.
@@ -74,9 +92,10 @@ pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                         .font(egui::FontId::new(12.0, theme.metadata_font.clone())),
                 );
 
-                // Title fills the remaining width (fmt + ✕ are right-aligned).
+                // Title fills the remaining width (meta + fmt + ✕ right-aligned).
+                let right_w = 130.0 + if meta.is_empty() { 0.0 } else { 158.0 };
                 let title_resp = row.add_sized(
-                    egui::vec2((rect.width() - 130.0).max(40.0), row_h),
+                    egui::vec2((rect.width() - right_w).max(40.0), row_h),
                     egui::Label::new(
                         egui::RichText::new(&name).color(if is_current { p.text_primary } else { p.text_primary.gamma_multiply(0.85) })
                     )
@@ -112,6 +131,12 @@ pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                             egui::RichText::new(fmt.clone())
                                 .color(p.text_secondary)
                                 .font(egui::FontId::new(12.0, theme.metadata_font.clone())),
+                        );
+                    }
+                    if !meta.is_empty() {
+                        ui.add_sized(
+                            egui::vec2(150.0, row_h),
+                            egui::Label::new(egui::RichText::new(meta.clone()).color(p.text_secondary)).truncate(),
                         );
                     }
                 });

@@ -118,19 +118,22 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
 
             ui.separator();
 
-            // Track info: name · FORMAT
-            let fmt = app
-                .current_path()
-                .and_then(|p| p.extension())
-                .and_then(|e| e.to_str())
-                .map(|e| e.to_ascii_uppercase())
-                .unwrap_or_default();
-            let stem = app
-                .current_path()
+            // Track info: title · artist (tagged; filename stands in until the tag
+            // scan lands — `load_file` reads the playing track up front, so
+            // this is already filled the moment a track starts).
+            let cur = app.current_path().map(|p| p.to_path_buf());
+            let info = cur.as_deref().and_then(|p| app.track_info(p));
+            let stem = cur
+                .as_deref()
                 .and_then(|p| p.file_stem())
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            ui.label(meta(if fmt.is_empty() { stem } else { format!("{stem} · {fmt}") }, &theme, 12.0));
+            let title = info
+                .and_then(|i| (!i.title.is_empty()).then_some(i.title.clone()))
+                .unwrap_or(stem);
+            let artist = info.map(|i| i.artist.as_str()).unwrap_or_default();
+            let label = if artist.is_empty() { title } else { format!("{title} · {artist}") };
+            ui.label(meta(label, &theme, 12.0));
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Volume

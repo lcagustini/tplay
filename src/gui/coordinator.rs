@@ -31,7 +31,7 @@ enum PaneSizing {
 fn pane_sizing(pane: Pane) -> PaneSizing {
     match pane {
         Pane::NowPlaying => PaneSizing::Fixed,
-        Pane::Playlist | Pane::Equalizer => PaneSizing::Fill,
+        Pane::Playlist | Pane::Equalizer | Pane::Library => PaneSizing::Fill,
     }
 }
 
@@ -142,6 +142,7 @@ fn pane_title(pane: Pane) -> egui::WidgetText {
         Pane::NowPlaying => "Now Playing".into(),
         Pane::Playlist => "Playlist".into(),
         Pane::Equalizer => "Equalizer".into(),
+        Pane::Library => "Library".into(),
     }
 }
 
@@ -188,6 +189,7 @@ impl TabViewer for PaneViewer<'_> {
             Pane::NowPlaying => panes::now_playing::now_playing_pane(self.app, ui),
             Pane::Playlist => panes::playlist::playlist_pane(self.app, ui),
             Pane::Equalizer => panes::equalizer::equalizer_pane(self.app, ui),
+            Pane::Library => panes::library::library_pane(self.app, ui),
         }
     }
 
@@ -274,6 +276,12 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
                 if sel != app.theme().id {
                     app.set_theme(&sel);
                     ui.close_menu();
+                }
+                ui.separator();
+                ui.label("Library");
+                let mut show_hidden = app.show_hidden();
+                if ui.checkbox(&mut show_hidden, "Show hidden folders").changed() {
+                    app.set_show_hidden(show_hidden);
                 }
             };
             ui.horizontal(|ui| {
