@@ -41,7 +41,6 @@ pub struct TPlayApp {
     sink: Sink,
 
     current_path: Option<PathBuf>,
-    track_title: String,
     total_duration: Option<Duration>,
 
     volume: f32,
@@ -79,8 +78,7 @@ pub struct TPlayApp {
     eq_shared: Arc<Mutex<audio::eq::EqShared>>,
     /// Index into `EQ_PRESETS`, or `EQ_PRESET_CUSTOM` after a manual tweak.
     eq_preset: usize,
-    /// Auto mode: re-apply the selected preset on every new track.
-    eq_auto: bool,
+
 
     /// Theme (loaded from themes/ dirs), applied to egui visuals by the GUI layer.
     theme: Arc<Theme>,
@@ -111,7 +109,6 @@ impl TPlayApp {
             stream_handle,
             sink,
             current_path: None,
-            track_title: String::from("No track loaded"),
             total_duration: None,
             volume: 1.0,
             seek_target: None,
@@ -129,7 +126,6 @@ impl TPlayApp {
                 enabled: false,
             })),
             eq_preset: 0,
-            eq_auto: false,
             theme,
             themes,
             icons,
@@ -170,21 +166,12 @@ impl TPlayApp {
     }
 
     fn load_file(&mut self, path: PathBuf) {
-        self.track_title = path
-            .file_name().unwrap_or_default()
-            .to_string_lossy().to_string();
         self.seek_target     = None;
         self.seektable_ready = None;
 
-        // Auto EQ: re-apply the selected preset on every new track (Winamp-style).
-        if self.eq_auto && self.eq_preset < EQ_PRESETS.len() {
-            self.eq_gains = EQ_PRESETS[self.eq_preset].1;
-            self.eq_shared.lock().unwrap().gains = self.eq_gains;
-        }
-
         match Sink::try_new(&self.stream_handle) {
             Ok(s) => { self.sink = s; self.sink.set_volume(self.volume); }
-            Err(e) => { self.track_title = format!("Sink error: {e}"); return; }
+            Err(e) => { eprintln!("tplay: sink error: {e}"); return; }
         }
 
         let is_flac = path.extension().and_then(|e| e.to_str())
@@ -211,13 +198,13 @@ impl TPlayApp {
                     self.current_path = Some(path);
                 }
                 Err(e) => {
-                    self.track_title = format!("Decode error: {e}");
+                    eprintln!("tplay: decode error: {e}");
                     self.current_path = None;
                     self.total_duration = None;
                 }
             },
             Err(e) => {
-                self.track_title = format!("Open error: {e}");
+                eprintln!("tplay: open error: {e}");
                 self.current_path = None;
                 self.total_duration = None;
             }
@@ -433,13 +420,6 @@ impl TPlayApp {
         }
     }
 
-    pub fn toggle_eq_auto(&mut self) {
-        self.eq_auto = !self.eq_auto;
-        self.save_eq();
-    }
-
-    pub fn eq_auto(&self) -> bool { self.eq_auto }
-
     /// Switch theme by id (from the Skin dropdown); persisted, applied the
     /// same frame by the GUI layer, icons re-decoded for the new palette.
     pub fn set_theme(&mut self, id: &str) {
@@ -491,12 +471,11 @@ impl TPlayApp {
                 let _ = std::fs::create_dir_all(parent);
             }
             #[derive(Serialize)]
-            struct EqData { enabled: bool, gains: [f32; 10], preset: usize, auto: bool }
+            struct EqData { enabled: bool, gains: [f32; 10], preset: usize }
             let data = EqData {
                 enabled: self.eq_enabled,
                 gains: self.eq_gains,
                 preset: self.eq_preset,
-                auto: self.eq_auto,
             };
             if let Ok(json) = serde_json::to_string_pretty(&data) {
                 let _ = std::fs::write(&path, json);
@@ -504,7 +483,7 @@ impl TPlayApp {
         }
     }
 
-    /// Load EQ settings from disk (old files without preset/auto still load).
+    /// Load EQ settings from disk (old files without preset still load).
     fn load_eq(&mut self) {
         if let Some(path) = Self::eq_path() {
             if let Ok(json) = std::fs::read_to_string(&path) {
@@ -513,7 +492,6 @@ impl TPlayApp {
                     enabled: bool,
                     gains: [f32; 10],
                     preset: Option<usize>,
-                    auto: Option<bool>,
                 }
                 if let Ok(data) = serde_json::from_str::<EqData>(&json) {
                     self.eq_enabled = data.enabled;
@@ -523,7 +501,6 @@ impl TPlayApp {
                             .position(|(_, g)| *g == data.gains)
                             .unwrap_or(EQ_PRESET_CUSTOM)
                     });
-                    self.eq_auto = data.auto.unwrap_or(false);
                 }
             }
         }
@@ -649,7 +626,6 @@ impl TPlayApp {
 
     // Read-only getters
 
-    pub fn track_title(&self) -> &str { &self.track_title }
     pub fn current_path(&self) -> Option<&std::path::Path> { self.current_path.as_deref() }
     pub fn total_duration(&self) -> Option<Duration> { self.total_duration }
     pub fn volume(&self) -> f32 { self.volume }
@@ -704,11 +680,6 @@ impl TPlayApp {
 
     pub fn playback_position_secs(&self) -> Duration {
         self.sink.get_pos()
-    }
-
-    /// Time left on the current track (clamped at zero).
-    pub fn time_remaining(&self) -> Option<Duration> {
-        self.total_duration.map(|tot| tot.saturating_sub(self.sink.get_pos()))
     }
 
     pub fn is_empty(&self) -> bool {

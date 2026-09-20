@@ -62,6 +62,30 @@ pub struct Palette {
     pub disabled_text: Color32,
 }
 
+/// Per-theme UI layout/sizing tokens (all optional; sensible defaults in code).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Layout {
+    /// EQ slider minimum height (px). Below this, sliders become unusable.
+    pub eq_slider_min_h: f32,
+    /// EQ slider maximum height (px).
+    pub eq_slider_max_h: f32,
+    /// Gap between header and the first band row (px).
+    pub eq_header_gap: f32,
+    /// Gap between each band's slider and its frequency label (px).
+    pub eq_band_gap: f32,
+}
+
+impl Layout {
+    pub fn with_defaults(self) -> Self {
+        Layout {
+            eq_slider_min_h: if self.eq_slider_min_h > 0.0 { self.eq_slider_min_h } else { 60.0 },
+            eq_slider_max_h: if self.eq_slider_max_h > 0.0 { self.eq_slider_max_h } else { 220.0 },
+            eq_header_gap: if self.eq_header_gap > 0.0 { self.eq_header_gap } else { 6.0 },
+            eq_band_gap: if self.eq_band_gap > 0.0 { self.eq_band_gap } else { 2.0 },
+        }
+    }
+}
+
 /// One theme loaded from disk (or the built-in fallback).
 #[derive(Debug)]
 pub struct Theme {
@@ -73,6 +97,8 @@ pub struct Theme {
     /// Retro renders times/metadata in monospace (the pixel-era look).
     pub metadata_font: FontFamily,
     pub palette: Palette,
+    /// Per-theme UI layout/sizing tokens.
+    pub layout: Layout,
     /// `<theme_dir>/icons`, when the folder exists.
     pub icons_dir: Option<PathBuf>,
 }
@@ -98,7 +124,14 @@ impl Theme {
         let palette = Palette::from_json(v.get("palette")?)?;
         let icons_dir = dir.join("icons");
         let icons_dir = icons_dir.is_dir().then_some(icons_dir);
-        Some(Theme { id, name, base, metadata_font, palette, icons_dir })
+        let layout = v.get("layout").map_or(Layout::default(), |l| Layout {
+            eq_slider_min_h: l.get("eq_slider_min_h").and_then(|x| x.as_f64()).map(|x| x as f32).unwrap_or(0.0),
+            eq_slider_max_h: l.get("eq_slider_max_h").and_then(|x| x.as_f64()).map(|x| x as f32).unwrap_or(0.0),
+            eq_header_gap: l.get("eq_header_gap").and_then(|x| x.as_f64()).map(|x| x as f32).unwrap_or(0.0),
+            eq_band_gap: l.get("eq_band_gap").and_then(|x| x.as_f64()).map(|x| x as f32).unwrap_or(0.0),
+        }).with_defaults();
+
+        Some(Theme { id, name, base, layout, metadata_font, palette, icons_dir })
     }
 
     /// Hardcoded dark palette used only when no themes/ folder exists anywhere
@@ -127,6 +160,7 @@ impl Theme {
                 focus_ring: hex("#2ea3f0"),
                 disabled_text: hex("#555555"),
             },
+            layout: Layout::default().with_defaults(),
         }
     }
 }
@@ -281,6 +315,8 @@ pub fn load_icons(
 /// Pane icons. Each maps to a `<theme>/icons/<name>.png` and a fallback glyph.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Icon {
+    /// App logo — menu button in the top panel (per-theme PNG, fallback glyph).
+    Logo,
     Play,
     Pause,
     Stop,
@@ -297,7 +333,8 @@ pub enum Icon {
 }
 
 impl Icon {
-    pub const ALL: [Icon; 9] = [
+    pub const ALL: [Icon; 10] = [
+        Icon::Logo,
         Icon::Play,
         Icon::Pause,
         Icon::Stop,
@@ -315,6 +352,7 @@ impl Icon {
 
     fn file_name(self) -> &'static str {
         match self {
+            Icon::Logo => "logo.png",
             Icon::Play => "play.png",
             Icon::Pause => "pause.png",
             Icon::Stop => "stop.png",
@@ -330,6 +368,7 @@ impl Icon {
     /// Last-resort glyph when neither this theme nor the default ships the PNG.
     fn glyph(self) -> &'static str {
         match self {
+            Icon::Logo => "☰",
             Icon::Play => "▶",
             Icon::Pause => "⏸",
             Icon::Stop => "⏹",

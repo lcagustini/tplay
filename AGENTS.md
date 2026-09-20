@@ -9,7 +9,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 - `src/gui/mod.rs` — declares `coordinator` + `panes` + `theme`.
 - `src/gui/coordinator.rs` — `update_ui(app, ctx)`: applies the theme's egui visuals, then draws one frame's `DockArea` (egui_dock). Implements `TabViewer` for `Pane` enum; calls the three pane functions in `ui()`. Loads/saves dock layout from egui memory + `~/.config/tplay/dock_layout.ron`. The `+` tab-bar button re-adds closed panes.
 - `src/gui/theme.rs` — data-driven theme system. `Themes::load()` scans `~/.config/tplay/themes/` (user, wins on id clash), `<exe_dir>/themes/` (shipped with the app), `./themes/` (dev: `cargo run` from repo root) and merges by theme id. Each `themes/<id>/theme.json` carries `id`, `name`, `base` (dark/light), `metadata_font` (monospace/…), and the 14-token `Palette` (`--bg`, `--accent`, `--row-even`, …) as hex strings; invalid files are skipped with an eprintln, and a hardcoded dark fallback theme guarantees a non-empty list (broken install). `apply(ctx, &Theme)` maps tokens onto egui `Visuals` each frame so a mid-session switch lands instantly. Selection persists to `~/.config/tplay/theme.json` (`{"theme":"<id>"}`); missing config = `dark`.
-- `themes/<id>/icons/*.png` — per-theme icon set (play, pause, stop, prev, next, shuffle, repeat, volume, remove). Missing PNGs fall back to the default theme's (`dark`), then to unicode glyphs. `theme::load_icons` decodes them synchronously into egui textures at startup and on skin switch (NO egui async loader — the URI loader path showed pending/error placeholders and stretched buttons).
+- `themes/<id>/icons/*.png` — per-theme icon set (logo, play, pause, stop, prev, next, shuffle, repeat, volume, remove). Missing PNGs fall back to the default theme's (`dark`), then to unicode glyphs. `theme::load_icons` decodes them synchronously into egui textures at startup and on skin switch (NO egui async loader — the URI loader path showed pending/error placeholders and stretched buttons).
 - `src/gui/panes/{now_playing,playlist,equalizer}.rs` — one free function per pane, each taking `(app: &mut TPlayApp, ui: &mut egui::Ui)`. Position-independent — work identically docked anywhere.
 - `src/audio/mod.rs` — file-level helpers, no playback logic:
   - `probe_duration` — symphonia-based duration probe; fallback when rodio's `Decoder::total_duration()` is None (mainly MP3). This is why `symphonia` is a direct dep.
@@ -24,36 +24,37 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 - `shuffle_order: Vec<usize>` — shuffled indices for shuffle playback
 - `shuffle_pos: usize` — current position in shuffle_order
 - **Add Files** button opens native multi-select dialog (`TPlayApp::audio_dialog()`, pub(crate)); skipped if already in playlist
-- Click track name to play; drag track name to reorder; ✕ icon button removes track (✕ and the right-aligned FORMAT column sit in a fixed 24px row; rows alternate `--row-even`/`--row-odd`, the active row gets a 3px `--accent` left stripe)
+- Click track name to play; drag track name to reorder; ✕ icon button removes track (✕ and the right-aligned FORMAT column sit in a fixed 24px row; rows alternate `--row-even`/`--row-odd`, the active row gets a full-row `--accent` tint plus a 3px `--accent` left stripe; row content is inset 6px so the leading number clears the stripe; filenames render without their extension — the FORMAT column carries the type)
 - **Shuffle** — plays each track once in random order; new tracks added go into unplayed pool; clicking a track resets shuffle
 - **Repeat** — loops playlist (sequential) or shuffle cycle
 - Transport (play/prev/next/stop) uses the theme's icon textures
 - Auto-advance (`advance`) fires on natural track end (sink empty, unpaused, `current_path` set), called from `TPlayApp::update()` every frame
 - **Save Playlist** / **Load Playlist** buttons — manual save/load to `~/.config/tplay/playlist.json`
-- Action buttons (Add Files / Save / Load / Shuffle / Repeat) live in a `horizontal_wrapped` row at the bottom of the pane, under the `PLAYLIST` banner.
+- Action buttons (Add Files / Save / Load / Shuffle / Repeat) live in a `horizontal_wrapped` row at the bottom of the pane.
 
 ## Equalizer
 
 - 10 bands at `audio::eq::EQ_FREQUENCIES` (20, 100, 300, 600, 1K, 3K, 5K, 8K, 12K, 16K — the reference UI's labels; the same constant drives the filters *and* the pane labels, so they can't drift).
-- Pane header: `ON`/`AUTO` toggles (left), centered `EQUALIZER` title, preset dropdown (right).
-- Presets: `EQ_PRESETS` in app.rs — Flat, Rock, Pop, Jazz, Classical, Electronic, Vocal. Selecting one applies its gains immediately; any manual slider tweak switches the selection to `EQ_PRESET_CUSTOM`. `eq_auto` re-applies the selected preset on every new track (Winamp-style per-track EQ). Preset + auto are persisted in `~/.config/tplay/eq.json`.
+- Pane header: left `ON` toggle, then `Reset` button and preset dropdown — all three grouped in one row with matching button chrome. Presets: `EQ_PRESETS` in app.rs — Flat, Rock, Pop, Jazz, Classical, Electronic, Vocal. Selecting one applies its gains immediately; any manual slider tweak switches the selection to `EQ_PRESET_CUSTOM`. Preset is persisted in `~/.config/tplay/eq.json`.
 
 ## Themes (data-driven, dark / retro / neon)
 
 - All colors flow from each theme's JSON `Palette` tokens mirroring the reference CSS custom properties. Panes paint rows/labels/metadata straight from tokens via `app.theme().palette` (the `Skin` metadata font from `app.theme().metadata_font`).
 - Token → egui `Visuals` mapping (see docs on `theme::apply`): `--bg` → panel/window fill, `--text-primary` → `override_text_color`, `--progress-fill` → `selection.bg_fill` (the slider's trailing fill), `--slider-track` → `inactive.bg_fill` (rail), `--slider-handle` → `inactive.fg_stroke` (knob), `--focus-ring` → `selection.stroke`, `--accent` → hyperlink/active fill. `--row-even/odd` and `--text-secondary` can't be expressed in Visuals — panes use them directly.
 - Theme files are plain JSON + PNGs — creating/modifying a theme is drop-in editing, no rebuild. Theme selection persists in `~/.config/tplay/theme.json`; config absence or unknown id = `dark`.
-- Icons: `themes/<id>/icons/<name>.png` (9 fixed names). Resolution: own file → default theme's file → glyph. Preloaded synchronously into `egui::TextureHandle`s (`TPlayApp.icons`, one per `Icon::ALL` slot) at startup and in `set_theme`; `app.theme_icon(Icon)` hands them to `theme::icon_button`/`theme::icon`.
+- Icons: `themes/<id>/icons/<name>.png` (10 fixed names). Resolution: own file → default theme's file → glyph. Preloaded synchronously into `egui::TextureHandle`s (`TPlayApp.icons`, one per `Icon::ALL` slot) at startup and in `set_theme`; `app.theme_icon(Icon)` hands them to `theme::icon_button`/`theme::icon`.
 - Retro: light Winamp grays + blue, `metadata_font: monospace` for times/metadata. Neon: near-black blue + mint accent/pink progress.
+- **Layout tokens**: each theme may include a `layout` object with EQ sizing values (`eq_slider_min_h`, `eq_slider_max_h`, `eq_header_gap`, `eq_band_gap`). These drive the equalizer pane's minimum/maximum slider height and spacing, replacing hardcoded values. Defaults live in code (`Layout::with_defaults`).
 
 ## Docking (egui_dock)
 
 - Three panes as tabs: **Now Playing**, **Playlist**, **Equalizer**
+- **Pane sizing**: per-pane `PaneSizing` policy in coordinator.rs — `Fill` panes (Playlist, Equalizer) take their dock share and resize via separator drag; `Fixed` panes (Now Playing) are pinned to their measured content height each frame (the Now Playing pane records its scope height to egui memory under `tplay.pane_content_h`, and `apply_fixed_pane_sizes` rewrites the enclosing split's `fraction` before `DockArea::show`, so the separator snaps back — no empty dead zone below the controls)
 - Default layout: top row (Now Playing tab) ~25%, bottom (Playlist) ~75%
 - Drag tabs to reorder; drag onto split overlays to dock left/right/top/bottom/center
 - Resize panes via draggable splitters
 - Tear tabs off into floating windows
-- Close pane via tab X button; reopen via `+` dropdown on any tab bar
+- Close pane via tab X button; reopen via the ☰ menu button (app logo, per-theme `logo.png`) at top-left, which also lists the Skin selector (theme switcher)
 - Tab bodies are wrapped in a ScrollArea by egui_dock; the EQ pane disables both scrollbars (`scroll_bars` → `[false, false]`) and sizes its 10 bands to the pane width, so nothing can overflow
 - Layout auto-saves to `~/.config/tplay/dock_layout.ron` (RON via serde) and restores on startup
 

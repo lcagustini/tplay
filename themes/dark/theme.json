@@ -18,5 +18,11 @@
     "btn_hover": "#2a2a2a",
     "focus_ring": "#2ea3f0",
     "disabled_text": "#555555"
+  },
+  "layout": {
+    "eq_slider_min_h": 60,
+    "eq_slider_max_h": 220,
+    "eq_header_gap": 6,
+    "eq_band_gap": 2
   }
 }

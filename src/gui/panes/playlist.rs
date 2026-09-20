@@ -7,17 +7,6 @@ pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
     let theme = app.theme().clone();
     let p = theme.palette;
 
-    // Header — centered, like the reference's WINAMP PLAYLIST banner.
-    ui.vertical_centered(|ui| {
-        ui.label(
-            egui::RichText::new("PLAYLIST")
-                .strong()
-                .size(13.0)
-                .color(p.accent)
-                .font(egui::FontId::new(13.0, theme.metadata_font.clone())),
-        );
-    });
-
     let drag_from_id = egui::Id::new("tplay.drag_from");
     let drag_hover_id = egui::Id::new("tplay.drag_hover");
 
@@ -40,7 +29,7 @@ pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
             for i in 0..app.playlist().len() {
                 let is_current = app.current_index() == Some(i);
                 let name = app.playlist()[i]
-                    .file_name()
+                    .file_stem()
                     .unwrap_or_default()
                     .to_string_lossy().into_owned();
                 let fmt = app.playlist()[i]
@@ -49,13 +38,17 @@ pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                     .map(|e| e.to_ascii_uppercase())
                     .unwrap_or_default();
 
-                // Fixed-height row rect; background + accent stripe go under the widgets.
+                // Fixed-height row rect; background, full-row highlight and the
+                // accent stripe all go under the widgets.
                 let (rect, _) = ui.allocate_exact_size(
                     egui::vec2(ui.available_width(), row_h),
                     egui::Sense::hover(),
                 );
                 let bg = if i % 2 == 0 { p.row_even } else { p.row_odd };
                 ui.painter().rect_filled(rect, 2.0, bg);
+                if is_current || drag_hover == Some(i) {
+                    ui.painter().rect_filled(rect, 2.0, p.accent.gamma_multiply(0.15));
+                }
                 if is_current {
                     ui.painter().rect_filled(
                         egui::Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height())),
@@ -64,9 +57,13 @@ pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                     );
                 }
 
+                // Content inset 6px so the leading number clears the stripe.
                 let mut row = ui.new_child(
                     egui::UiBuilder::new()
-                        .max_rect(rect)
+                        .max_rect(egui::Rect::from_min_max(
+                            rect.min + egui::vec2(6.0, 0.0),
+                            rect.max,
+                        ))
                         .layout(egui::Layout::left_to_right(egui::Align::Center)),
                 );
                 row.spacing_mut().item_spacing.x = 8.0;
@@ -99,14 +96,6 @@ pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                         &name,
                         egui::FontId::proportional(14.0),
                         p.accent,
-                    );
-                }
-
-                if drag_hover == Some(i) || is_current {
-                    ui.painter().rect_filled(
-                        title_resp.rect.expand(4.0),
-                        4.0,
-                        p.accent.gamma_multiply(0.15),
                     );
                 }
 

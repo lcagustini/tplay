@@ -19,33 +19,9 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
     // the theme data; `meta` takes &Theme via deref.
     let theme = app.theme().clone();
 
-    ui.vertical(|ui| {
-        // Title row: current track (brand-ish, bold) + skin selector at right.
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(app.track_title())
-                    .strong()
-                    .size(16.0)
-                    .font(egui::FontId::new(16.0, theme.metadata_font.clone())),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let mut sel = theme.id.clone();
-                egui::ComboBox::from_id_salt("tplay.skin")
-                    .selected_text(format!("Skin: {}", theme.name))
-                    .show_ui(ui, |ui| {
-                        for t in app.themes() {
-                            ui.selectable_value(&mut sel, t.id.clone(), t.name.clone());
-                        }
-                    });
-                if sel != theme.id {
-                    app.set_theme(&sel);
-                }
-            });
-        });
-
-        ui.add_space(8.0);
-
-        // Progress row: elapsed | seek bar | total
+    let body = ui.scope(|ui| {
+        ui.vertical(|ui| {
+        // Progress row: elapsed | full-width seek bar | total.
         ui.horizontal(|ui| {
             let total_secs = app.total_duration().map(|d| d.as_secs_f32());
             let actual_ratio = app.playback_position();
@@ -57,14 +33,30 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
 
             let mut seek_normalized = ui.ctx().memory_mut(|m| m.data.get_temp::<f32>(seek_id()).unwrap_or(0.0));
 
+            // Measure both time labels so the bar between them takes exactly
+            // the leftover width. (available_width() read from nested
+            // right-to-left scopes under-sizes inside the dock's ScrollArea.)
+            let font = egui::FontId::new(13.0, theme.metadata_font.clone());
+            let label_w = |s: &str| {
+                ui.fonts(|f| f.layout_no_wrap(s.to_owned(), font.clone(), theme.palette.text_secondary).size().x)
+            };
+            let gaps = ui.spacing().item_spacing.x * 2.0;
+            let bar_w = (ui.available_width() - label_w(&pos_str) - label_w(&total_str) - gaps).max(40.0);
+
             ui.label(meta(pos_str, &theme, 13.0));
 
-            let bar = ui.add_enabled(
-                total_secs.is_some(),
-                egui::Slider::new(&mut seek_normalized, 0.0..=1.0)
-                    .show_value(false)
-                    .trailing_fill(true),
-            );
+            let bar = ui.add_enabled_ui(total_secs.is_some(), |ui| {
+                // A Slider ignores add_sized — it requests spacing().slider_width
+                // itself — so set that to span the leftover width.
+                ui.spacing_mut().slider_width = bar_w;
+                ui.add(
+                    egui::Slider::new(&mut seek_normalized, 0.0..=1.0)
+                        .show_value(false)
+                        .trailing_fill(true),
+                )
+            }).inner;
+
+            ui.label(meta(total_str, &theme, 13.0));
 
             if bar.dragged() {
                 // hold
@@ -80,15 +72,13 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                 }
             }
 
-            ui.label(meta(total_str, &theme, 13.0));
-
             ui.ctx().memory_mut(|m| m.data.insert_temp(seek_id(), seek_normalized));
         });
 
         ui.add_space(8.0);
 
-        // Controls row: transport + volume, with track info + time remaining
-        // sitting between them (mirrors the reference status-bar right group).
+        // Controls row: transport + volume, with track info sitting between
+        // them (mirrors the reference status-bar right group).
         ui.horizontal(|ui| {
             // Prev track
             let prev_enabled = app.has_prev_track();
@@ -133,13 +123,6 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                 .unwrap_or_default();
             ui.label(meta(if fmt.is_empty() { stem } else { format!("{stem} · {fmt}") }, &theme, 12.0));
 
-            // Time remaining (- M:SS)
-            let rem = app.time_remaining()
-                .map(TPlayApp::fmt_duration)
-                .map(|s| format!("-{s}"))
-                .unwrap_or_else(|| "--:--".into());
-            ui.label(meta(rem, &theme, 12.0));
-
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Volume
                 theme::icon(ui, app.theme_icon(Icon::Volume), Icon::Volume, 15.0);
@@ -149,5 +132,15 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                 }
             });
         });
+        });
+    });
+
+    // Record the natural content height so the coordinator can pin this pane
+    // to exactly its content (no empty dead space below the controls).
+    ui.ctx().data_mut(|d| {
+        d.insert_temp(
+            egui::Id::new("tplay.pane_content_h").with(crate::app::Pane::NowPlaying),
+            body.response.rect.height(),
+        );
     });
 }

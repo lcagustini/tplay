@@ -1,4 +1,4 @@
-use crate::app::{EQ_PRESETS, TPlayApp};
+use crate::app::{EQ_PRESETS, Pane, TPlayApp};
 use crate::audio::eq::EQ_FREQUENCIES;
 use eframe::egui;
 
@@ -15,62 +15,66 @@ pub fn equalizer_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
     let theme = app.theme().clone();
     let p = theme.palette;
     let gains = *app.eq_gains();
-    let has_track = app.total_duration().is_some();
+    let layout = theme.layout.with_defaults();
 
-    // Header — left: ON/AUTO toggles; center: title; right: preset selector.
-    let title_text = egui::RichText::new("EQUALIZER")
-        .strong()
-        .size(14.0)
-        .color(p.accent)
-        .font(egui::FontId::new(14.0, theme.metadata_font.clone()));
-    // Bound the header's height: ui.columns() spans the FULL remaining pane
-    // height, which would leave zero space for the band row below it.
-    ui.allocate_ui(egui::vec2(ui.available_width(), 24.0), |ui| {
-        ui.columns(3, |cols| {
-        cols[0].horizontal(|ui| {
-            let on = app.eq_enabled();
-            if ui.selectable_label(on, "ON").clicked() {
-                app.toggle_eq();
-            }
-            let auto = app.eq_auto();
-            if ui.selectable_label(auto, "AUTO").clicked() {
-                app.toggle_eq_auto();
-            }
-        });
-        cols[1].vertical_centered(|ui| {
-            ui.label(title_text.clone());
-        });
-        cols[2].with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let mut sel = app.eq_preset();
-            egui::ComboBox::from_id_salt("tplay.eq.preset")
-                .selected_text(app.eq_preset_name())
-                .show_ui(ui, |ui| {
-                    for (i, (name, _)) in EQ_PRESETS.iter().enumerate() {
-                        ui.selectable_value(&mut sel, i, *name);
-                    }
-                    ui.selectable_value(&mut sel, crate::app::EQ_PRESET_CUSTOM, "Custom");
-                });
-            if sel != app.eq_preset() {
-                app.set_eq_preset(sel);
-            }
-            if ui.button("Reset").clicked() {
-                for i in 0..10 {
-                    app.set_eq_gain(i, 0.0);
+    // Header — grouped controls; the tab already names the pane. Measured via
+    // a scope so `min_content_h` below is exact, not guessed.
+    let header_h = ui
+        .scope(|ui| {
+            ui.horizontal(|ui| {
+                let on = app.eq_enabled();
+                if ui.add(egui::Button::new("ON").selected(on)).clicked() {
+                    app.toggle_eq();
                 }
-            }
-        });
+                if ui.button("Reset").clicked() {
+                    for i in 0..10 {
+                        app.set_eq_gain(i, 0.0);
+                    }
+                }
+                let mut sel = app.eq_preset();
+                egui::ComboBox::from_id_salt("tplay.eq.preset")
+                    .selected_text(app.eq_preset_name())
+                    .show_ui(ui, |ui| {
+                        for (i, (name, _)) in EQ_PRESETS.iter().enumerate() {
+                            ui.selectable_value(&mut sel, i, *name);
+                        }
+                        ui.selectable_value(&mut sel, crate::app::EQ_PRESET_CUSTOM, "Custom");
+                    });
+                if sel != app.eq_preset() {
+                    app.set_eq_preset(sel);
+                }
+            });
+        })
+        .response
+        .rect
+        .height();
+
+    // This pane has no scrollbars (see `scroll_bars` in coordinator), so its
+    // content must always fit. Record the smallest height at which nothing
+    // clips — header + gaps + sliders at their floor + a band label — and the
+    // coordinator keeps the dock split at least this tall.
+    let label_h = ui.fonts(|f| {
+        f.layout_no_wrap(
+            format_freq(EQ_FREQUENCIES[0]),
+            egui::FontId::new(10.0, theme.metadata_font.clone()),
+            p.text_secondary,
+        )
+        .size()
+        .y
     });
+    ui.ctx().data_mut(|d| {
+        d.insert_temp(
+            egui::Id::new("tplay.pane_content_h").with(Pane::Equalizer),
+            header_h + layout.eq_header_gap + layout.eq_slider_min_h + layout.eq_band_gap + label_h,
+        );
     });
 
-    ui.add_space(6.0);
-    if !has_track {
-        ui.label("(No track loaded)");
-    }
+    ui.add_space(layout.eq_header_gap);
 
     // 10 bands with fixed inter-band spacing, centered in the pane.
     // The gap between sliders is constant; the margins to the pane edges
     // absorb all leftover width equally (dynamic centering).
-    let slider_h = (ui.available_height() - 30.0).clamp(60.0, 220.0);
+    let slider_h = (ui.available_height() - 30.0).clamp(layout.eq_slider_min_h, layout.eq_slider_max_h);
     // Fixed band width and spacing normally; shrink to fit narrow panes.
     let min_spacing = ui.spacing().item_spacing.x;
     let avail_w = ui.available_width();
@@ -111,7 +115,7 @@ pub fn equalizer_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                             app.set_eq_gain(i, gain);
                         }
                     });
-                    ui.add_space(2.0);
+                    ui.add_space(layout.eq_band_gap);
                     ui.label(
                         egui::RichText::new(format_freq(EQ_FREQUENCIES[i]))
                             .small()
