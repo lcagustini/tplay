@@ -1,10 +1,10 @@
 //! Equalizer Source — wraps a rodio Source (f32 samples) and applies 10-band graphic EQ.
-//! Gains live in `Arc<Mutex<EqShared>>`, shared with the GUI thread: dragging a slider
+//! Gains live in `Arc<RwLock<EqShared>>`, shared with the GUI thread: dragging a slider
 //! updates the shared gains and the running source swaps filter coefficients in `next()`
 //! — no sink rebuild, no audio restart.
 
 use rodio::Source;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 /// 10 equalizer band frequencies, matching the reference UI labels (20..16K).
@@ -71,7 +71,7 @@ where
     S: Source<Item = f32>,
 {
     inner: S,
-    shared: Arc<Mutex<EqShared>>,
+    shared: Arc<RwLock<EqShared>>,
     sample_rate: u32,
     bands: [Biquad; 10],
     cached_gains: [f32; 10],
@@ -82,10 +82,10 @@ impl<S> EqSource<S>
 where
     S: Source<Item = f32>,
 {
-    pub fn new(inner: S, shared: Arc<Mutex<EqShared>>) -> Self {
+    pub fn new(inner: S, shared: Arc<RwLock<EqShared>>) -> Self {
         let sample_rate = inner.sample_rate();
         let (gains, enabled) = {
-            let state = shared.lock().unwrap();
+            let state = shared.read().unwrap();
             (state.gains, state.enabled)
         };
         let bands = std::array::from_fn(|i| {
@@ -105,7 +105,7 @@ where
     /// fresh coefficients *and* fresh filter state (no click from stale history).
     /// Returns whether the EQ is currently enabled.
     fn refresh(&mut self) -> bool {
-        let state = self.shared.lock().unwrap();
+        let state = self.shared.read().unwrap();
         if state.enabled != self.cached_enabled {
             self.cached_enabled = state.enabled;
             self.bands = std::array::from_fn(|i| {

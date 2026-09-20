@@ -4,17 +4,27 @@ use crate::audio;
 use crate::gui::theme::{self, Theme, Themes};
 use crate::library;
 use eframe::egui;
-use fastrand;
 use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
+
+/// Tiny inline RNG (XorShift64) - replaces fastrand dependency.
+fn rand_u64(state: &mut u64) -> u64 {
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    *state
+}
+fn rand_usize(state: &mut u64, max: usize) -> usize {
+    (rand_u64(state) as usize) % max
+}
 
 // Docking panes (egui_dock) - used by GUI layer only
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -24,8 +34,65 @@ impl Pane {
     pub const ALL: [Pane; 4] = [Pane::NowPlaying, Pane::Playlist, Pane::Equalizer, Pane::Library];
 }
 
-/// Equalizer presets — index 0 is Flat (the reset). A manually tweaked slider
-/// switches the selection to `EQ_PRESET_CUSTOM`.
+/// Unified config — single JSON file. Dock layout stays separate.
+#[derive(Serialize, Deserialize, Default)]
+struct Config {
+    theme: String,
+    #[serde(default)]
+    eq: EqData,
+    #[serde(default)]
+    shuffle: bool,
+    #[serde(default)]
+    repeat: bool,
+    #[serde(default = "default_volume")]
+    volume: f32,
+    #[serde(default)]
+    last_playlist: Option<String>,
+    #[serde(default)]
+    library: LibraryData,
+}
+
+fn default_volume() -> f32 { 1.0 }
+
+#[derive(Serialize, Deserialize, Default)]
+struct EqData {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default = "default_gains")]
+    gains: [f32; 10],
+}
+
+fn default_gains() -> [f32; 10] { [0.0; 10] }
+
+#[derive(Serialize, Deserialize, Default)]
+struct LibraryData {
+    #[serde(default)]
+    favorites: Vec<String>,
+    #[serde(default)]
+    last_dir: String,
+    #[serde(default)]
+    show_hidden: bool,
+}
+
+/// Generic config persistence: create dir, serialize/deserialize JSON.
+fn config_path(name: &str) -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("tplay").join(name))
+}
+
+fn save_config<T: Serialize>(name: &str, data: &T) {
+    if let Some(path) = config_path(name) {
+        if let Some(parent) = path.parent() { let _ = fs::create_dir_all(parent); }
+        if let Ok(json) = serde_json::to_string_pretty(data) { let _ = fs::write(&path, json); }
+    }
+}
+
+fn load_config<T: for<'de> Deserialize<'de>>(name: &str) -> Option<T> {
+    config_path(name).and_then(|p| fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+}
+
+/// Equalizer presets — Flat is the reset. A manually tweaked slider
+/// switches the selection to Custom (None).
 /// Curves follow sfxengine.com/blog/best-equalizer-settings-for-music:
 /// Flat ⇐ Flat, Rock ⇐ Rock/Metal, Pop ⇐ V-Shape, Jazz ⇐ Treble Boost,
 /// Classical ⇐ gentle V-Shape, Electronic ⇐ Bass Boost, Vocal ⇐ Vocal Enhancement.
@@ -38,8 +105,6 @@ pub const EQ_PRESETS: [(&str, [f32; 10]); 7] = [
     ("Electronic", [4.0, 5.0, -2.0, -1.0, 0.0, 0.0, 0.5, 1.0, 1.0, 0.5]),
     ("Vocal", [0.0, -2.0, -1.0, 0.0, 0.5, 3.0, 1.5, -1.0, 0.0, 0.0]),
 ];
-/// Sentinel index meaning "gains were hand-edited, not a named preset".
-pub const EQ_PRESET_CUSTOM: usize = EQ_PRESETS.len();
 
 pub struct TPlayApp {
     _stream: OutputStream,
@@ -79,19 +144,13 @@ pub struct TPlayApp {
     /// Repeat mode: loop playlist (or random if shuffle also on)
     repeat: bool,
 
-    /// Shuffled playlist indices. Regenerated when playlist changes or shuffle toggled.
-    shuffle_order: Vec<usize>,
-    /// Current position in shuffle_order.
-    shuffle_pos: usize,
+    /// Indices already played in this shuffle cycle (history for prev/next).
+    played: Vec<usize>,
+    /// RNG state for shuffle (XorShift64).
+    rng_state: u64,
 
-    /// Equalizer state
-    eq_enabled: bool,
-    /// 10-band gains in dB (-12 to +12), default 0
-    eq_gains: [f32; 10],
-    /// Active EQ settings shared with the running EqSource (live, no rebuild)
-    eq_shared: Arc<Mutex<audio::eq::EqShared>>,
-    /// Index into `EQ_PRESETS`, or `EQ_PRESET_CUSTOM` after a manual tweak.
-    eq_preset: usize,
+    /// Equalizer state — single source of truth shared with EqSource.
+    eq_shared: Arc<RwLock<audio::eq::EqShared>>,
 
 
     /// Theme (loaded from themes/ dirs), applied to egui visuals by the GUI layer.
@@ -120,7 +179,7 @@ pub struct TPlayApp {
     /// Bookmarked folders shown in the Library pane, persisted to disk.
     favorite_dirs: Vec<PathBuf>,
     /// Whether the Library lists dot-prefixed (hidden) subfolders. Default
-    /// off; toggled from the ☰ menu, persisted in library.json.
+    /// off; toggled from the ☰ menu, persisted in config.json.
     show_hidden: bool,
     /// Library list sort: index into `library::SORT_OPTIONS` (0 = Title, the
     /// default), plus direction. Set by header clicks.
@@ -136,8 +195,11 @@ impl TPlayApp {
         let sink = Sink::try_new(&stream_handle).expect("Failed to create audio sink");
 
         let themes = Themes::load();
+
+        // Load unified config
+        let config = load_config::<Config>("config.json").unwrap_or_default();
         let theme = themes
-            .get(&theme::selection())
+            .get(&config.theme)
             .cloned()
             .unwrap_or_else(|| themes.default().clone());
         let icons = theme::load_icons(&ctx, &themes, &theme);
@@ -148,24 +210,21 @@ impl TPlayApp {
             sink,
             current_path: None,
             total_duration: None,
-            volume: 1.0,
+            volume: config.volume,
             seek_target: None,
             seektable_ready: None,
             playlist: Vec::new(),
             current_index: None,
             playlist_file: None,
             playlist_dirty: false,
-            shuffle: false,
-            repeat: false,
-            shuffle_order: Vec::new(),
-            shuffle_pos: 0,
-            eq_enabled: false,
-            eq_gains: [0.0; 10],
-            eq_shared: Arc::new(Mutex::new(audio::eq::EqShared {
-                gains: [0.0; 10],
-                enabled: false,
+            shuffle: config.shuffle,
+            repeat: config.repeat,
+            played: Vec::new(),
+            rng_state: 0xC0FFEE, // arbitrary seed
+            eq_shared: Arc::new(RwLock::new(audio::eq::EqShared {
+                gains: config.eq.gains,
+                enabled: config.eq.enabled,
             })),
-            eq_preset: 0,
             theme,
             themes,
             icons,
@@ -174,15 +233,30 @@ impl TPlayApp {
             library_entries: Vec::new(),
             tag_cache: HashMap::new(),
             tag_scan_rx: None,
-            favorite_dirs: Vec::new(),
-            show_hidden: false,
+            favorite_dirs: config.library.favorites.into_iter().map(PathBuf::from).filter(|d| d.is_dir()).collect(),
+            show_hidden: config.library.show_hidden,
             library_sort: 0,
             library_asc: true,
         };
-        app.load_eq();
-        app.sync_eq_shared();
-        app.load_settings();
-        app.load_library();
+
+        // Apply volume to sink
+        app.sink.set_volume(app.volume);
+
+        // Restore library directory
+        let p = PathBuf::from(&config.library.last_dir);
+        if p.is_dir() {
+            app.library_dir = p;
+        }
+
+        // Restore last playlist if exists
+        if let Some(pl_path) = config.last_playlist {
+            let path = PathBuf::from(pl_path);
+            if path.exists() {
+                app.load_playlist_from(path);
+            }
+        }
+        app.navigate_to(app.library_dir.clone());
+
         app
     }
 
@@ -207,6 +281,28 @@ impl TPlayApp {
         }
     }
 
+    /// Save all settings to unified config.json
+    fn save_config(&self) {
+        let eq_shared = self.eq_shared.read().unwrap();
+        let config = Config {
+            theme: self.theme.id.clone(),
+            eq: EqData {
+                enabled: eq_shared.enabled,
+                gains: eq_shared.gains,
+            },
+            shuffle: self.shuffle,
+            repeat: self.repeat,
+            volume: self.volume,
+            last_playlist: self.playlist_file.as_ref().and_then(|p| p.to_str()).map(str::to_owned),
+            library: LibraryData {
+                favorites: self.favorite_dirs.iter().filter_map(|d| d.to_str().map(str::to_owned)).collect(),
+                last_dir: self.library_dir.to_string_lossy().into_owned(),
+                show_hidden: self.show_hidden,
+            },
+        };
+        save_config("config.json", &config);
+    }
+
     pub fn add_files(&mut self, paths: Vec<PathBuf>) {
         let mut added_count = 0;
         for path in paths {
@@ -217,15 +313,6 @@ impl TPlayApp {
         }
         if added_count > 0 {
             self.playlist_dirty = true;
-            let new_len = self.playlist.len();
-            let old_len = new_len - added_count;
-            let mut new_indices: Vec<usize> = (old_len..new_len).collect();
-            for i in (1..new_indices.len()).rev() {
-                let j = fastrand::usize(..=i);
-                new_indices.swap(i, j);
-            }
-            let insert_at = self.shuffle_pos.min(self.shuffle_order.len());
-            self.shuffle_order.splice(insert_at..insert_at, new_indices);
             // Tag the new tracks in the background (dedup handles repeats).
             self.ensure_tags(self.playlist.clone());
         }
@@ -302,41 +389,25 @@ impl TPlayApp {
             };
         }
 
-        self.ensure_shuffle_order();
-
-        if self.shuffle_pos >= self.shuffle_order.len() {
+        // Shuffle mode: pick random from unplayed
+        let unplayed: Vec<usize> = (0..len).filter(|i| !self.played.contains(i)).collect();
+        if unplayed.is_empty() {
             if self.repeat {
-                self.regenerate_shuffle_order();
-                self.shuffle_pos = 0;
-            } else {
-                return None;
+                self.played.clear();
+                // Pick from all tracks
+                let idx = rand_usize(&mut self.rng_state, len);
+                self.played.push(idx);
+                return Some(idx);
             }
+            return None;
         }
-
-        let next = self.shuffle_order.get(self.shuffle_pos).copied();
-        self.shuffle_pos += 1;
-        next
-    }
-
-    fn ensure_shuffle_order(&mut self) {
-        if self.shuffle_order.len() != self.playlist.len() {
-            self.regenerate_shuffle_order();
-            self.shuffle_pos = 0;
-        }
-    }
-
-    fn regenerate_shuffle_order(&mut self) {
-        let len = self.playlist.len();
-        self.shuffle_order = (0..len).collect();
-        for i in (1..len).rev() {
-            let j = fastrand::usize(..=i);
-            self.shuffle_order.swap(i, j);
-        }
+        let idx = unplayed[rand_usize(&mut self.rng_state, unplayed.len())];
+        self.played.push(idx);
+        Some(idx)
     }
 
     fn reset_shuffle(&mut self) {
-        self.shuffle_order.clear();
-        self.shuffle_pos = 0;
+        self.played.clear();
     }
 
     fn prev_track_index(&mut self) -> Option<usize> {
@@ -357,12 +428,13 @@ impl TPlayApp {
             };
         }
 
-        if self.shuffle_pos > 1 {
-            self.shuffle_pos -= 1;
-            Some(self.shuffle_order[self.shuffle_pos - 1])
-        } else if self.repeat && !self.shuffle_order.is_empty() {
-            self.shuffle_pos = len;
-            Some(self.shuffle_order[len - 1])
+        // Shuffle mode: pop from history
+        if self.played.len() > 1 {
+            self.played.pop();
+            self.played.last().copied()
+        } else if self.repeat && !self.played.is_empty() {
+            // Loop back to last played
+            self.played.last().copied()
         } else {
             None
         }
@@ -405,15 +477,19 @@ impl TPlayApp {
             return;
         }
         if let Some(next) = self.next_track_index() {
-            let path = self.playlist[next].clone();
-            self.current_index = Some(next);
-            self.load_file(path);
+            self.start(next);
         }
     }
 
-    pub fn fmt_duration(d: Duration) -> String {
-        let s = d.as_secs();
-        format!("{:02}:{:02}", s / 60, s % 60)
+    pub fn fmt_duration(d: Option<Duration>) -> String {
+        d.map(|d| {
+            let s = d.as_secs();
+            format!("{:02}:{:02}", s / 60, s % 60)
+        }).unwrap_or_else(|| "--:--".into())
+    }
+
+    pub fn format_freq(f: f32) -> String {
+        if f >= 1000.0 { format!("{}K", (f / 1000.0) as i32) } else { format!("{}", f as i32) }
     }
 
     /// Public actions called by GUI layer
@@ -435,16 +511,13 @@ impl TPlayApp {
 
     fn play_first_track(&mut self) {
         if self.shuffle {
-            self.ensure_shuffle_order();
-            let first_idx = self.shuffle_order[0];
-            let path = self.playlist[first_idx].clone();
-            self.current_index = Some(first_idx);
-            self.shuffle_pos = 1;
-            self.load_file(path);
+            self.reset_shuffle();
+            let len = self.playlist.len();
+            let idx = rand_usize(&mut self.rng_state, len);
+            self.played.push(idx);
+            self.start(idx);
         } else {
-            let path = self.playlist[0].clone();
-            self.current_index = Some(0);
-            self.load_file(path);
+            self.start(0);
         }
     }
 
@@ -462,12 +535,13 @@ impl TPlayApp {
         self.total_duration = None;
         self.seek_target = None;
         self.seektable_ready = None;
-        self.shuffle_pos = 0;
+        self.reset_shuffle();
     }
 
     pub fn set_volume(&mut self, volume: f32) {
         self.volume = volume;
         self.sink.set_volume(volume);
+        self.save_config();
     }
 
     /// Set gain for one EQ band (0-9), in dB (-12 to +12). Applies live to the
@@ -475,31 +549,40 @@ impl TPlayApp {
     /// as Custom (no preset name applies anymore).
     pub fn set_eq_gain(&mut self, band: usize, gain_db: f32) {
         if band >= 10 { return; }
-        self.eq_gains[band] = gain_db.clamp(-12.0, 12.0);
-        self.eq_shared.lock().unwrap().gains[band] = self.eq_gains[band];
-        self.eq_preset = EQ_PRESET_CUSTOM;
-        self.save_eq();
+        {
+            let mut shared = self.eq_shared.write().unwrap();
+            shared.gains[band] = gain_db.clamp(-12.0, 12.0);
+        }
+        self.save_config();
     }
 
-    /// Select an EQ preset by index (see `EQ_PRESETS`), or `EQ_PRESET_CUSTOM`.
-    pub fn set_eq_preset(&mut self, idx: usize) {
-        if idx > EQ_PRESET_CUSTOM { return; }
-        self.eq_preset = idx;
-        if idx < EQ_PRESETS.len() {
-            self.eq_gains = EQ_PRESETS[idx].1;
-            self.eq_shared.lock().unwrap().gains = self.eq_gains;
+    /// Select an EQ preset by name (see `EQ_PRESETS`), or None for custom.
+    pub fn set_eq_preset(&mut self, name: Option<String>) {
+        if let Some(name) = name.as_ref() {
+            if let Some((_, gains)) = EQ_PRESETS.iter().find(|(n, _)| n == name) {
+                self.eq_shared.write().unwrap().gains = *gains;
+            }
         }
-        self.save_eq();
+        self.save_config();
     }
 
-    pub fn eq_preset(&self) -> usize { self.eq_preset }
+    pub fn eq_enabled(&self) -> bool {
+        self.eq_shared.read().unwrap().enabled
+    }
 
-    pub fn eq_preset_name(&self) -> &'static str {
-        if self.eq_preset < EQ_PRESETS.len() {
-            EQ_PRESETS[self.eq_preset].0
-        } else {
-            "Custom"
-        }
+    pub fn eq_gains(&self) -> [f32; 10] {
+        self.eq_shared.read().unwrap().gains
+    }
+
+    pub fn eq_preset(&self) -> Option<&str> {
+        let gains = self.eq_gains();
+        EQ_PRESETS.iter()
+            .find(|(_, g)| *g == gains)
+            .map(|(n, _)| *n)
+    }
+
+    pub fn eq_preset_name(&self) -> &str {
+        self.eq_preset().unwrap_or("Custom")
     }
 
     /// Switch theme by id (from the Skin dropdown); persisted, applied the
@@ -508,7 +591,7 @@ impl TPlayApp {
         if let Some(theme) = self.themes.get(id) {
             self.theme = Arc::clone(theme);
             self.icons = theme::load_icons(&self.ctx, &self.themes, &self.theme);
-            theme::save_selection(id);
+            self.save_config();
         }
     }
 
@@ -529,78 +612,22 @@ impl TPlayApp {
 
     /// Toggle EQ on/off. Applies live — the source starts/stops filtering in place.
     pub fn toggle_eq(&mut self) {
-        self.eq_enabled = !self.eq_enabled;
-        self.eq_shared.lock().unwrap().enabled = self.eq_enabled;
-        self.save_eq();
-    }
-
-    /// Publish current EQ settings to the running source (used after loading).
-    fn sync_eq_shared(&self) {
-        let mut shared = self.eq_shared.lock().unwrap();
-        shared.gains = self.eq_gains;
-        shared.enabled = self.eq_enabled;
-    }
-
-    /// Path to EQ settings file
-    fn eq_path() -> Option<PathBuf> {
-        dirs::config_dir().map(|d| d.join("tplay").join("eq.json"))
-    }
-
-    /// Save EQ settings to disk
-    fn save_eq(&self) {
-        if let Some(path) = Self::eq_path() {
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            #[derive(Serialize)]
-            struct EqData { enabled: bool, gains: [f32; 10], preset: usize }
-            let data = EqData {
-                enabled: self.eq_enabled,
-                gains: self.eq_gains,
-                preset: self.eq_preset,
-            };
-            if let Ok(json) = serde_json::to_string_pretty(&data) {
-                let _ = std::fs::write(&path, json);
-            }
+        {
+            let mut shared = self.eq_shared.write().unwrap();
+            shared.enabled = !shared.enabled;
         }
-    }
-
-    /// Load EQ settings from disk (old files without preset still load).
-    fn load_eq(&mut self) {
-        if let Some(path) = Self::eq_path() {
-            if let Ok(json) = std::fs::read_to_string(&path) {
-                #[derive(Deserialize)]
-                struct EqData {
-                    enabled: bool,
-                    gains: [f32; 10],
-                    preset: Option<usize>,
-                }
-                if let Ok(data) = serde_json::from_str::<EqData>(&json) {
-                    self.eq_enabled = data.enabled;
-                    self.eq_gains = data.gains;
-                    self.eq_preset = data.preset.unwrap_or_else(|| {
-                        EQ_PRESETS.iter()
-                            .position(|(_, g)| *g == data.gains)
-                            .unwrap_or(EQ_PRESET_CUSTOM)
-                    });
-                }
-            }
-        }
+        self.save_config();
     }
 
     pub fn next_track(&mut self) {
         if let Some(next_idx) = self.next_track_index() {
-            let path = self.playlist[next_idx].clone();
-            self.current_index = Some(next_idx);
-            self.load_file(path);
+            self.start(next_idx);
         }
     }
 
     pub fn prev_track(&mut self) {
         if let Some(prev_idx) = self.prev_track_index() {
-            let path = self.playlist[prev_idx].clone();
-            self.current_index = Some(prev_idx);
-            self.load_file(path);
+            self.start(prev_idx);
         }
     }
 
@@ -619,8 +646,7 @@ impl TPlayApp {
         if self.current_index.is_none() {
             self.current_path = None;
         }
-        self.regenerate_shuffle_order();
-        self.shuffle_pos = 0;
+        self.reset_shuffle();
     }
 
     pub fn move_track(&mut self, from: usize, to: usize) {
@@ -639,42 +665,39 @@ impl TPlayApp {
                     ci
                 }
             });
-            self.regenerate_shuffle_order();
-            self.shuffle_pos = 0;
+            self.reset_shuffle();
         }
     }
 
     pub fn play_track(&mut self, index: usize) {
-        let path = self.playlist[index].clone();
-        self.current_index = Some(index);
         self.reset_shuffle();
-        self.load_file(path);
+        self.start(index);
     }
 
     pub fn toggle_shuffle(&mut self) {
         self.shuffle = !self.shuffle;
-        self.regenerate_shuffle_order();
-        self.shuffle_pos = 0;
-        self.save_settings();
+        self.reset_shuffle();
+        self.save_config();
     }
 
     pub fn toggle_repeat(&mut self) {
         self.repeat = !self.repeat;
-        self.save_settings();
+        self.save_config();
     }
 
     // ── Playlists — plain `.tplay` files on disk, found in the Library like
-    //    any other file. Shuffle/repeat are appwide settings (settings.json),
+    //    any other file. Shuffle/repeat are appwide settings (config.json),
     //    never playlist content.
 
     /// Write the current playlist to a `.tplay` file (paths only) and record
     /// it as the file future saves overwrite without re-opening the dialog.
     pub fn save_playlist_to(&mut self, path: PathBuf) {
-        if !library::write_playlist(&path, &self.playlist) {
-            eprintln!("tplay: could not write playlist {}", path.display());
+        if let Err(e) = library::write_playlist(&path, &self.playlist) {
+            eprintln!("tplay: could not write playlist {}: {}", path.display(), e);
         }
         self.playlist_file = Some(path);
         self.playlist_dirty = false;
+        self.save_config();
     }
 
     /// Replace the current playlist from a `.tplay` file. Tracks that no
@@ -687,11 +710,11 @@ impl TPlayApp {
             .collect();
         self.current_index = None;
         self.current_path = None;
-        self.regenerate_shuffle_order();
-        self.shuffle_pos = 0;
+        self.reset_shuffle();
         self.ensure_tags(self.playlist.clone());
         self.playlist_file = Some(path);
         self.playlist_dirty = false;
+        self.save_config();
     }
 
     /// Clear the playlist for a fresh build (confirm dialog lives in the GUI).
@@ -699,9 +722,9 @@ impl TPlayApp {
     pub fn new_playlist(&mut self) {
         self.stop();
         self.playlist.clear();
-        self.shuffle_order.clear();
         self.playlist_file = None;
         self.playlist_dirty = false;
+        self.save_config();
     }
 
     /// The `.tplay` file this playlist is saved to / was loaded from, if any.
@@ -726,55 +749,7 @@ impl TPlayApp {
             .unwrap_or_else(|| "Untitled".to_string())
     }
 
-    // ── Appwide settings (shuffle/repeat — not per-playlist) ────────────────
-
-    fn settings_path() -> Option<PathBuf> {
-        dirs::config_dir().map(|d| d.join("tplay").join("settings.json"))
-    }
-
-    fn save_settings(&self) {
-        if let Some(path) = Self::settings_path() {
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            #[derive(Serialize)]
-            struct SettingsData {
-                shuffle: bool,
-                repeat: bool,
-            }
-            let data = SettingsData {
-                shuffle: self.shuffle,
-                repeat: self.repeat,
-            };
-            if let Ok(json) = serde_json::to_string_pretty(&data) {
-                let _ = std::fs::write(&path, json);
-            }
-        }
-    }
-
-    /// Load appwide settings from disk (missing file → defaults off).
-    fn load_settings(&mut self) {
-        if let Some(path) = Self::settings_path() {
-            if let Ok(json) = std::fs::read_to_string(&path) {
-                #[derive(Deserialize)]
-                struct SettingsData {
-                    shuffle: Option<bool>,
-                    repeat: Option<bool>,
-                }
-                if let Ok(data) = serde_json::from_str::<SettingsData>(&json) {
-                    self.shuffle = data.shuffle.unwrap_or(false);
-                    self.repeat = data.repeat.unwrap_or(false);
-                }
-            }
-        }
-    }
-
     // ── Library ────────────────────────────────────────────────────────────
-
-    /// Path to library settings (favorites + last browsed dir).
-    fn library_path() -> Option<PathBuf> {
-        dirs::config_dir().map(|d| d.join("tplay").join("library.json"))
-    }
 
     /// List the given directory and start tagging its audio files in the
     /// background. Persists the last browsed dir on the way.
@@ -786,8 +761,8 @@ impl TPlayApp {
         let (dirs, files) = library::list_dir(&self.library_dir, self.show_hidden);
         self.library_entries = dirs
             .into_iter()
-            .map(library::Entry::Dir)
-            .chain(files.into_iter().map(library::Entry::File))
+            .map(|p| library::Entry { path: p, is_dir: true })
+            .chain(files.into_iter().map(|p| library::Entry { path: p, is_dir: false }))
             .collect();
         self.apply_library_sort();
         self.ensure_tags(
@@ -797,7 +772,7 @@ impl TPlayApp {
                 .map(|e| e.path().to_path_buf())
                 .collect(),
         );
-        self.save_library();
+        self.save_config();
     }
 
     /// Sort the browsed folder's rows by the active header sort. Missing
@@ -808,10 +783,13 @@ impl TPlayApp {
         let key = self.library_sort;
         let asc = self.library_asc;
         let cache = &self.tag_cache;
-        self.library_entries.sort_by(|a, b| {
-            let ord = library::cmp_entries(a, b, key, cache.get(a.path()), cache.get(b.path()));
-            if asc { ord } else { ord.reverse() }
+        self.library_entries.sort_by_cached_key(|e| {
+            let info = cache.get(e.path());
+            library::sort_key(e, info, key)
         });
+        if !asc {
+            self.library_entries.reverse();
+        }
     }
 
     /// Header click: pick a new column (ascending) or flip the active one and
@@ -884,70 +862,20 @@ impl TPlayApp {
         self.load_file(path);
     }
 
+    /// Common playback start: set current_index and load the track.
+    fn start(&mut self, idx: usize) {
+        self.current_index = Some(idx);
+        let path = self.playlist[idx].clone();
+        self.load_file(path);
+    }
+
     pub fn toggle_favorite(&mut self, dir: PathBuf) {
         if let Some(i) = self.favorite_dirs.iter().position(|d| d == &dir) {
             self.favorite_dirs.remove(i);
         } else {
             self.favorite_dirs.push(dir);
         }
-        self.save_library();
-    }
-
-    fn save_library(&self) {
-        if let Some(path) = Self::library_path() {
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            #[derive(Serialize)]
-            struct LibraryData {
-                favorites: Vec<String>,
-                last_dir: String,
-                show_hidden: bool,
-            }
-            let data = LibraryData {
-                favorites: self
-                    .favorite_dirs
-                    .iter()
-                    .filter_map(|d| d.to_str().map(str::to_string))
-                    .collect(),
-                last_dir: self.library_dir.to_string_lossy().into_owned(),
-                show_hidden: self.show_hidden,
-            };
-            if let Ok(json) = serde_json::to_string_pretty(&data) {
-                let _ = std::fs::write(&path, json);
-            }
-        }
-    }
-
-    fn load_library(&mut self) {
-        if let Some(path) = Self::library_path() {
-            if let Ok(json) = std::fs::read_to_string(&path) {
-                #[derive(Deserialize)]
-                struct LibraryData {
-                    favorites: Option<Vec<String>>,
-                    last_dir: Option<String>,
-                    show_hidden: Option<bool>,
-                }
-                if let Ok(data) = serde_json::from_str::<LibraryData>(&json) {
-                    if let Some(favs) = data.favorites {
-                        self.favorite_dirs = favs
-                            .into_iter()
-                            .map(PathBuf::from)
-                            .filter(|d| d.is_dir())
-                            .collect();
-                    }
-                    if let Some(last) = data.last_dir {
-                        let p = PathBuf::from(last);
-                        if p.is_dir() {
-                            self.library_dir = p;
-                        }
-                    }
-                    if let Some(show) = data.show_hidden {
-                        self.show_hidden = show;
-                    }
-                }
-            }
-        }
+        self.save_config();
     }
 
     // Read-only getters
@@ -959,9 +887,6 @@ impl TPlayApp {
     pub fn current_index(&self) -> Option<usize> { self.current_index }
     pub fn shuffle(&self) -> bool { self.shuffle }
     pub fn repeat(&self) -> bool { self.repeat }
-
-    pub fn eq_enabled(&self) -> bool { self.eq_enabled }
-    pub fn eq_gains(&self) -> &[f32; 10] { &self.eq_gains }
 
     pub fn library_dir(&self) -> &std::path::Path { &self.library_dir }
     pub fn library_entries(&self) -> &[library::Entry] { &self.library_entries }
@@ -1011,7 +936,8 @@ impl TPlayApp {
                 _ => false,
             };
         }
-        self.shuffle_pos < self.shuffle_order.len() || self.repeat
+        let unplayed = (0..self.playlist.len()).filter(|i| !self.played.contains(i)).count();
+        unplayed > 0 || self.repeat
     }
 
     pub fn has_prev_track(&self) -> bool {
@@ -1028,7 +954,7 @@ impl TPlayApp {
                 _ => false,
             };
         }
-        self.shuffle_pos > 1 || self.repeat
+        self.played.len() > 1 || self.repeat
     }
 
     pub fn playback_position(&self) -> f32 {
@@ -1050,12 +976,8 @@ impl TPlayApp {
         self.sink.is_paused()
     }
 
-    pub fn seek_target_reached(&self) -> Option<bool> {
-        self.seek_target.map(|t| self.playback_position() >= t - 0.02)
-    }
-
-    pub fn clear_seek_target(&mut self) {
-        self.seek_target = None;
+    pub fn seek_target(&self) -> Option<f32> {
+        self.seek_target
     }
 }
 

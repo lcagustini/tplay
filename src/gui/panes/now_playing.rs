@@ -1,5 +1,6 @@
 use crate::app::TPlayApp;
 use crate::gui::theme::{self, Icon, Theme};
+use crate::library;
 use eframe::egui;
 
 /// egui Id for storing the seek slider position in memory
@@ -26,10 +27,8 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
             let total_secs = app.total_duration().map(|d| d.as_secs_f32());
             let actual_ratio = app.playback_position();
 
-            let pos_str = TPlayApp::fmt_duration(app.playback_position_secs());
-            let total_str = app.total_duration()
-                .map(TPlayApp::fmt_duration)
-                .unwrap_or_else(|| "--:--".into());
+            let pos_str = TPlayApp::fmt_duration(Some(app.playback_position_secs()));
+            let total_str = TPlayApp::fmt_duration(app.total_duration());
 
             let mut seek_normalized = ui.ctx().memory_mut(|m| m.data.get_temp::<f32>(seek_id()).unwrap_or(0.0));
 
@@ -62,13 +61,9 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                 // hold
             } else if bar.drag_stopped() || bar.clicked() {
                 app.seek(seek_normalized);
-            } else {
-                let target_reached = app.seek_target_reached().unwrap_or(true);
-                if target_reached {
-                    app.clear_seek_target();
-                    if total_secs.is_some() {
-                        seek_normalized = actual_ratio;
-                    }
+            } else if let Some(target) = app.seek_target() {
+                if total_secs.is_some() && app.playback_position() >= target - 0.02 {
+                    seek_normalized = actual_ratio;
                 }
             }
 
@@ -123,14 +118,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
             // this is already filled the moment a track starts).
             let cur = app.current_path().map(|p| p.to_path_buf());
             let info = cur.as_deref().and_then(|p| app.track_info(p));
-            let stem = cur
-                .as_deref()
-                .and_then(|p| p.file_stem())
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let title = info
-                .and_then(|i| (!i.title.is_empty()).then_some(i.title.clone()))
-                .unwrap_or(stem);
+            let title = cur.as_deref().map(|p| library::title_or_stem(p, info)).unwrap_or_default();
             let artist = info.map(|i| i.artist.as_str()).unwrap_or_default();
             let label = if artist.is_empty() { title } else { format!("{title} · {artist}") };
             ui.label(meta(label, &theme, 12.0));

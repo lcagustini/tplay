@@ -5,42 +5,18 @@ use crate::gui::panes;
 use crate::gui::theme;
 use eframe::egui;
 use egui_dock::{DockArea, DockState, Node, NodeIndex, Style, TabIndex, TabViewer};
+use serde_json;
 use std::path::PathBuf;
 
-const DOCK_LAYOUT_FILE: &str = "dock_layout.ron";
+const DOCK_LAYOUT_FILE: &str = "dock_layout.json";
 const DOCK_ID: &str = "tplay.dock_state";
 /// egui memory key: measured natural body height of a pane's content.
 const PANE_CONTENT_H: &str = "tplay.pane_content_h";
 /// egui memory key: measured minimum body width of a pane's content.
 const PANE_CONTENT_W: &str = "tplay.pane_content_w";
 
-/// How a pane is sized inside the dock.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PaneSizing {
-    /// Fills its dock share; the separator can drag it, but never below the
-    /// pane's recorded minimum content height (none recorded = scrollable
-    /// content, so it can shrink freely).
-    Fill,
-    /// Pinned to the pane's natural content height — the split fraction is
-    /// recomputed from the pane's measured content every frame, so the
-    /// separator snaps back and the pane can't grow an empty dead zone.
-    Fixed,
-}
-
-/// Per-pane sizing policy.
-fn pane_sizing(pane: Pane) -> PaneSizing {
-    match pane {
-        Pane::NowPlaying => PaneSizing::Fixed,
-        Pane::Playlist | Pane::Equalizer | Pane::Library => PaneSizing::Fill,
-    }
-}
-
-/// Enforce the per-pane size policy by rewriting split fractions (egui_dock
-/// has no per-pane size limits of its own). Returns true if any fraction was
-/// changed — callers repaint so the correction lands on the next frame.
-/// `border_v`/`border_h` are the tab bar + body frame margins that sit
-/// outside the pane's measured content (vertical and horizontal).
-fn apply_pane_sizes(
+/// Enforce minimum pane sizes by rewriting split fractions. Returns true if any fraction changed.
+fn apply_min_pane_sizes(
     tree: &mut DockState<Pane>,
     ctx: &egui::Context,
     border_v: f32,
@@ -50,16 +26,13 @@ fn apply_pane_sizes(
     for &pane in &Pane::ALL {
         let h_id = egui::Id::new(PANE_CONTENT_H).with(pane);
         let w_id = egui::Id::new(PANE_CONTENT_W).with(pane);
-        let no_min = ctx
-            .data(|d| d.get_temp::<f32>(h_id).is_some_and(|h| h > 0.0))
-            || ctx.data(|d| d.get_temp::<f32>(w_id).is_some_and(|w| w > 0.0));
-        if !no_min {
+        let min_h = ctx.data(|d| d.get_temp::<f32>(h_id)).unwrap_or(0.0);
+        let min_w = ctx.data(|d| d.get_temp::<f32>(w_id)).unwrap_or(0.0);
+        if min_h <= 0.0 && min_w <= 0.0 {
             continue;
         }
-
         let main = tree.main_surface_mut();
         let Some(leaf) = main.find_tab(&pane).map(|(node, _)| node) else { continue };
-
         for (i, node) in main.iter_mut().enumerate() {
             let parent = NodeIndex(i);
             let (vertical, fraction, rect) = match node {
@@ -68,65 +41,22 @@ fn apply_pane_sizes(
                 _ => continue,
             };
             let dim = if vertical { rect.height() } else { rect.width() };
-            if dim <= 0.0 {
-                continue; // not laid out yet — skip until the tree has rects
-            }
-            // Floor for this split orientation: a leaf is the content plus
-            // the tab bar + body frame (vertical) or inner side margins (horizontal).
-            let leaf_min = if vertical {
-                let content_h = ctx.data(|d| d.get_temp::<f32>(h_id)).unwrap_or(0.0);
-                (content_h > 0.0).then_some(content_h + border_v)
-            } else {
-                let content_w = ctx.data(|d| d.get_temp::<f32>(w_id)).unwrap_or(0.0);
-                (content_w > 0.0).then_some(content_w + border_h)
-            };
-            let Some(leaf_min) = leaf_min else { continue };
+            if dim <= 0.0 { continue; }
+            let leaf_min = if vertical { min_h + border_v } else { min_w + border_h };
             let min_frac = (leaf_min / dim).clamp(0.05, 0.95);
-            // `fraction` is always the top/left child's share.
             let (c0, c1) = (parent.left(), parent.right());
             let old = *fraction;
-            match (pane_sizing(pane), c0 == leaf, c1 == leaf) {
-                // Pinned: the leaf takes exactly its content size.
-                (PaneSizing::Fixed, true, _) => {
-                    *fraction = min_frac;
-                }
-                (PaneSizing::Fixed, _, true) => {
-                    *fraction = 1.0 - min_frac;
-                }
-                // Floor only: never smaller than its content, may grow.
-                (PaneSizing::Fill, true, _) => {
-                    *fraction = fraction.max(min_frac);
-                }
-                (PaneSizing::Fill, _, true) => {
-                    *fraction = fraction.min(1.0 - min_frac);
-                }
-                _ => {}
+            // NowPlaying is Fixed: pin to exact content height. Others are Fill: floor only.
+            let is_fixed = pane == Pane::NowPlaying && vertical;
+            if c0 == leaf {
+                *fraction = if is_fixed { min_frac } else { fraction.max(min_frac) };
+            } else if c1 == leaf {
+                *fraction = if is_fixed { 1.0 - min_frac } else { fraction.min(1.0 - min_frac) };
             }
             changed |= *fraction != old;
         }
     }
     changed
-}
-
-/// Minimum leaf size (content + border) for a pane, from the size its content
-/// recorded this frame (zero component = no floor in that dimension).
-fn pane_min_leaf(
-    tree: &DockState<Pane>,
-    ctx: &egui::Context,
-    pane: Pane,
-    border_v: f32,
-    border_h: f32,
-) -> egui::Vec2 {
-    if !pane_is_open(tree, pane) {
-        return egui::Vec2::ZERO;
-    }
-    let h = ctx
-        .data(|d| d.get_temp::<f32>(egui::Id::new(PANE_CONTENT_H).with(pane)))
-        .map_or(0.0, |h| h + border_v);
-    let w = ctx
-        .data(|d| d.get_temp::<f32>(egui::Id::new(PANE_CONTENT_W).with(pane)))
-        .map_or(0.0, |w| w + border_h);
-    egui::vec2(w, h)
 }
 
 fn default_tree() -> DockState<Pane> {
@@ -221,11 +151,11 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
 
     // Load DockState from egui memory (per-session) or disk (first run).
     // The tree is the single source of truth: which panes are open, their
-    // splits, and their order all live here and persist via dock_layout.ron.
+    // splits, and their order all live here and persist via dock_layout.json.
     let mut tree = ctx.data_mut(|d| d.get_temp::<DockState<Pane>>(egui::Id::new(DOCK_ID)))
         .or_else(|| {
             layout_path().and_then(|p| std::fs::read_to_string(p).ok())
-                .and_then(|s| ron::from_str(&s).ok())
+                .and_then(|s| serde_json::from_str(&s).ok())
         })
         .unwrap_or_else(default_tree);
 
@@ -340,14 +270,11 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
     let mut style = Style::from_egui(ctx.style().as_ref());
     style.tab_bar.fill_tab_bar = true;
 
-    // Pin fixed panes to their content size and floor fill panes (the EQ)
-    // to their minimum before the dock lays out (see apply_pane_sizes).
     let border_v = style.tab_bar.height
         + style.tab.tab_body.inner_margin.top
         + style.tab.tab_body.inner_margin.bottom;
     let border_h = style.tab.tab_body.inner_margin.left
         + style.tab.tab_body.inner_margin.right;
-    apply_pane_sizes(&mut tree, ctx, border_v, border_h);
 
     let mut viewer = PaneViewer { app };
     DockArea::new(&mut tree)
@@ -359,41 +286,29 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
         .style(style)
         .show(ctx, &mut viewer);
 
-    // The splitter drag inside DockArea::show() edits fractions without
-    // respecting pane minimums; a torn-off (floating) window can likewise be
-    // shrunk below its content. Re-enforce both after the fact: if anything
-    // was dragged below its floor, rewrite the fractions/size and repaint so
-    // the corrected tree is what's laid out next frame (one-frame snap, not a
-    // permanent resize below the minimum).
-    let mut corrected = apply_pane_sizes(&mut tree, ctx, border_v, border_h);
-    let min = pane_min_leaf(&tree, ctx, Pane::Equalizer, border_v, border_h);
-    if min.x > 0.0 || min.y > 0.0 {
-        let eq_surface = tree
-            .iter_all_tabs()
-            .find(|(_, t)| **t == Pane::Equalizer)
-            .map(|((surface, _), _)| surface);
+    // Enforce minimum pane sizes after layout (corrects splitter drag / floating window shrink).
+    let mut corrected = apply_min_pane_sizes(&mut tree, ctx, border_v, border_h);
+    // EQ pane minimum width: 10 bands at their minimum width.
+    let eq_min_w = ctx.data(|d| d.get_temp::<f32>(egui::Id::new(PANE_CONTENT_W).with(Pane::Equalizer))).unwrap_or(0.0);
+    if eq_min_w > 0.0 {
+        let eq_surface = tree.iter_all_tabs().find(|(_, t)| **t == Pane::Equalizer).map(|((s, _), _)| s);
         if let Some(surface) = eq_surface {
             if let Some(ws) = tree.get_window_state_mut(surface) {
                 let cur = ws.rect();
-                let new_w = cur.width().max(min.x.max(50.0));
-                let new_h = cur.height().max(min.y);
-                let shrank = (cur.width() > 0.0 && new_w > cur.width())
-                    || (cur.height() > 0.0 && new_h > cur.height());
-                if shrank {
-                    ws.set_size(egui::vec2(new_w, new_h));
+                let new_w = cur.width().max(eq_min_w + border_h);
+                if cur.width() > 0.0 && new_w > cur.width() {
+                    ws.set_size(egui::vec2(new_w, cur.height()));
                     corrected = true;
                 }
             }
         }
     }
-    if corrected {
-        ctx.request_repaint();
-    }
+    if corrected { ctx.request_repaint(); }
 
-    // Persist to egui memory (session) + disk
+    // Persist to egui memory (session) + disk (JSON, not RON)
     ctx.data_mut(|d| d.insert_temp(egui::Id::new(DOCK_ID), tree.clone()));
     if let Some(path) = layout_path() {
         if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
-        let _ = std::fs::write(path, ron::to_string(&tree).unwrap_or_default());
+        let _ = std::fs::write(path, serde_json::to_string(&tree).unwrap_or_default());
     }
 }

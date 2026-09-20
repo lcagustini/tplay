@@ -10,7 +10,6 @@ use crate::gui::theme;
 use crate::library;
 use eframe::egui;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 /// egui memory: has the pane listed `library_dir` at least once this session.
 const LIB_INIT: &str = "tplay.library.init";
@@ -25,19 +24,13 @@ fn dir_name(dir: &Path) -> String {
         .unwrap_or_else(|| dir.to_string_lossy().into_owned())
 }
 
-fn fmt_duration(d: Option<Duration>) -> String {
-    d.map(TPlayApp::fmt_duration).unwrap_or_else(|| "--:--".into())
-}
 
-/// Column widths shared by the sortable header and the file rows.
-const CELL_ARTIST: f32 = 90.0;
-const CELL_ALBUM: f32 = 100.0;
-const CELL_YEAR: f32 = 34.0;
-const CELL_GENRE: f32 = 64.0;
-const CELL_DUR: f32 = 44.0;
+
+/// Column widths shared by the sortable header and the file rows (matches SORT_OPTIONS).
+const CELL_WIDTHS: [f32; 6] = [0.0, 90.0, 100.0, 34.0, 64.0, 44.0]; // Title is flexible
 /// Fixed right-hand width per row: the five tag cells + the `+` button +
 /// inter-cell spacing, leaving the title column the flexible remainder.
-const ROW_FIXED_W: f32 = CELL_ARTIST + CELL_ALBUM + CELL_YEAR + CELL_GENRE + CELL_DUR + 40.0;
+const ROW_FIXED_W: f32 = CELL_WIDTHS[1] + CELL_WIDTHS[2] + CELL_WIDTHS[3] + CELL_WIDTHS[4] + CELL_WIDTHS[5] + 40.0;
 
 /// One clickable column header. Returns true when clicked; the caller picks
 /// the sort key. The active column is accent-colored with a ▾/▴ direction
@@ -69,17 +62,11 @@ fn header_cell(
     .clicked()
 }
 
-/// Cell background + interplay used for every library row.
-fn row_bg(ui: &mut egui::Ui, i: usize, p: theme::Palette, row_h: f32) -> egui::Rect {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h), egui::Sense::hover());
-    ui.painter().rect_filled(rect, 2.0, if i % 2 == 0 { p.row_even } else { p.row_odd });
-    rect
-}
-
 fn draw_dir_row(ui: &mut egui::Ui, theme: &theme::Theme, row_h: f32, i: usize, name: &str) -> bool {
     let p = theme.palette;
-    let rect = row_bg(ui, i, p, row_h);
-    ui.painter().text(
+    let (rect, mut row) = theme::row(ui, i, false, row_h, theme);
+    row.spacing_mut().item_spacing.x = 4.0;
+    row.painter().text(
         rect.min + egui::vec2(6.0, row_h / 2.0),
         egui::Align2::LEFT_CENTER,
         format!("📁  {name}"),
@@ -95,18 +82,13 @@ fn draw_dir_row(ui: &mut egui::Ui, theme: &theme::Theme, row_h: f32, i: usize, n
 /// the playlist pane (the caller adds the replace-confirm).
 fn draw_playlist_row(ui: &mut egui::Ui, theme: &theme::Theme, row_h: f32, i: usize, path: &Path) -> bool {
     let p = theme.palette;
-    let rect = row_bg(ui, i, p, row_h);
+    let (rect, mut row) = theme::row(ui, i, false, row_h, theme);
+    row.spacing_mut().item_spacing.x = 4.0;
+
     let name = path
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-
-    let mut row = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(egui::Rect::from_min_max(rect.min + egui::vec2(6.0, 0.0), rect.max))
-            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-    );
-    row.spacing_mut().item_spacing.x = 4.0;
 
     let title_resp = row
         .add_sized(
@@ -136,22 +118,11 @@ fn draw_file_row(
     info: Option<&library::TrackInfo>,
 ) -> Option<fn(&mut TPlayApp, PathBuf)> {
     let p = theme.palette;
-    let rect = row_bg(ui, i, p, row_h);
     let is_current = app.current_path().is_some_and(|c| c == path);
-    if is_current {
-        ui.painter().rect_filled(rect, 2.0, p.accent.gamma_multiply(0.15));
-        ui.painter().rect_filled(
-            egui::Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height())),
-            0.0,
-            p.accent,
-        );
-    }
+    let (rect, mut row) = theme::row(ui, i, is_current, row_h, theme);
+    row.spacing_mut().item_spacing.x = 4.0;
 
-    let stem = path
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let title = info.and_then(|i| (!i.title.is_empty()).then_some(i.title.clone())).unwrap_or(stem);
+    let title = library::title_or_stem(path, info);
     let display = match info.and_then(|i| i.track_no.clone()) {
         Some(n) => format!("{n}. {title}"),
         None => title,
@@ -161,13 +132,6 @@ fn draw_file_row(
     let year = info.and_then(|i| i.year.as_deref()).unwrap_or_default();
     let genre = info.map(|i| i.genre.as_str()).unwrap_or_default();
     let dur = info.and_then(|i| i.duration);
-
-    let mut row = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(egui::Rect::from_min_max(rect.min + egui::vec2(6.0, 0.0), rect.max))
-            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-    );
-    row.spacing_mut().item_spacing.x = 4.0;
 
     // Title takes the flexible remainder; the tag cells mirror the header.
     let title_w = (rect.width() - ROW_FIXED_W - 6.0).max(40.0);
@@ -188,14 +152,14 @@ fn draw_file_row(
             egui::Label::new(egui::RichText::new(text).color(p.text_secondary)).truncate(),
         );
     };
-    cell(&mut row, CELL_ARTIST, artist);
-    cell(&mut row, CELL_ALBUM, album);
-    cell(&mut row, CELL_YEAR, year);
-    cell(&mut row, CELL_GENRE, genre);
+    cell(&mut row, CELL_WIDTHS[1], artist);
+    cell(&mut row, CELL_WIDTHS[2], album);
+    cell(&mut row, CELL_WIDTHS[3], year);
+    cell(&mut row, CELL_WIDTHS[4], genre);
     row.add_sized(
-        egui::vec2(CELL_DUR, row_h),
+        egui::vec2(CELL_WIDTHS[5], row_h),
         egui::Label::new(
-            egui::RichText::new(fmt_duration(dur))
+            egui::RichText::new(TPlayApp::fmt_duration(dur))
                 .color(p.text_secondary)
                 .font(egui::FontId::new(12.0, theme.metadata_font.clone())),
         ),
@@ -325,17 +289,12 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                         .layout(egui::Layout::left_to_right(egui::Align::Center)),
                 );
                 h.spacing_mut().item_spacing.x = 4.0;
-                let title_w = (head.width() - ROW_FIXED_W).max(2.0);
-                if header_cell(&mut h, p, "Title", 0 == cur, asc, title_w, 22.0) {
-                    app.set_library_sort(0);
-                }
-                for (label, key, w) in [
-                    ("Artist", 1usize, CELL_ARTIST),
-                    ("Album", 2, CELL_ALBUM),
-                    ("Year", 3, CELL_YEAR),
-                    ("Genre", 4, CELL_GENRE),
-                    ("Duration", 5, CELL_DUR),
-                ] {
+                for (key, label) in library::SORT_OPTIONS.iter().enumerate() {
+                    let w = if key == 0 {
+                        (head.width() - ROW_FIXED_W).max(2.0)
+                    } else {
+                        CELL_WIDTHS[key]
+                    };
                     if header_cell(&mut h, p, label, key == cur, asc, w, 22.0) {
                         app.set_library_sort(key);
                     }
@@ -349,78 +308,75 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                 .show(ui, |ui| {
                     let row_h = 24.0;
                     let mut i = 0usize;
-                    let mut nav: Option<PathBuf> = None;
-                    let mut action: Option<(fn(&mut TPlayApp, PathBuf), PathBuf)> = None;
+                    enum Act { Nav(PathBuf), Action(fn(&mut TPlayApp, PathBuf), PathBuf) }
+                    let mut action: Option<Act> = None;
                     let mut load: Option<PathBuf> = None;
 
                     // Parent dir row, then the sorted folder + file rows.
                     if let Some(up) = app.library_dir().parent() {
                         if draw_dir_row(ui, &theme, row_h, i, "..") {
-                            nav = Some(up.to_path_buf());
+                            action = Some(Act::Nav(up.to_path_buf()));
                         }
                         i += 1;
                     }
                     for entry in app.library_entries() {
-                        match entry {
-                            library::Entry::Dir(dir) => {
-                                let name = dir_name(dir);
+                        if entry.is_dir {
+                            let name = dir_name(entry.path());
+                            if !query.is_empty() && !name.to_lowercase().contains(&query) {
+                                i += 1;
+                                continue;
+                            }
+                            if draw_dir_row(ui, &theme, row_h, i, &name) {
+                                action = Some(Act::Nav(entry.path().to_path_buf()));
+                            }
+                        } else {
+                            let file = entry.path();
+                            if library::is_playlist(file) {
+                                let name = file
+                                    .file_name()
+                                    .map(|s| s.to_string_lossy().into_owned())
+                                    .unwrap_or_default();
                                 if !query.is_empty() && !name.to_lowercase().contains(&query) {
+                                    i += 1;
                                     continue;
                                 }
-                                if draw_dir_row(ui, &theme, row_h, i, &name) {
-                                    nav = Some(dir.clone());
-                                }
-                            }
-                            library::Entry::File(file) => {
-                                if library::is_playlist(file) {
-                                    let name = file
-                                        .file_name()
-                                        .map(|s| s.to_string_lossy().into_owned())
-                                        .unwrap_or_default();
-                                    if !query.is_empty() && !name.to_lowercase().contains(&query) {
-                                        continue;
-                                    }
-                                    if draw_playlist_row(ui, &theme, row_h, i, file) {
-                                        let stem = file
-                                            .file_stem()
-                                            .map(|s| s.to_string_lossy().into_owned())
-                                            .unwrap_or_default();
-                                        if TPlayApp::confirm(
-                                            "Load playlist",
-                                            &format!("Replace the current playlist with '{stem}'?"),
-                                            app.playlist_dirty(),
-                                        ) {
-                                            load = Some(file.clone());
-                                        }
-                                    }
-                                } else {
-                                    let info = app.track_info(file);
+                                if draw_playlist_row(ui, &theme, row_h, i, file) {
                                     let stem = file
                                         .file_stem()
                                         .map(|s| s.to_string_lossy().into_owned())
                                         .unwrap_or_default();
-                                    let hay = format!(
-                                        "{} {} {} {stem}",
-                                        info.map(|i| i.title.as_str()).unwrap_or_default(),
-                                        info.map(|i| i.artist.as_str()).unwrap_or_default(),
-                                        info.map(|i| i.album.as_str()).unwrap_or_default(),
-                                    );
-                                    if !query.is_empty() && !hay.to_lowercase().contains(&query) {
-                                        continue;
+                                    if TPlayApp::confirm(
+                                        "Load playlist",
+                                        &format!("Replace the current playlist with '{stem}'?"),
+                                        app.playlist_dirty(),
+                                    ) {
+                                        load = Some(file.to_path_buf());
                                     }
-                                    if let Some(f) = draw_file_row(app, ui, &theme, row_h, i, file, info) {
-                                        action = Some((f, file.clone()));
-                                    }
+                                }
+                            } else {
+                                let info = app.track_info(file);
+                                let title = library::title_or_stem(file, info);
+                                let hay = format!(
+                                    "{} {} {} {title}",
+                                    info.map(|i| i.title.as_str()).unwrap_or_default(),
+                                    info.map(|i| i.artist.as_str()).unwrap_or_default(),
+                                    info.map(|i| i.album.as_str()).unwrap_or_default(),
+                                );
+                                if !query.is_empty() && !hay.to_lowercase().contains(&query) {
+                                    i += 1;
+                                    continue;
+                                }
+                                if let Some(f) = draw_file_row(app, ui, &theme, row_h, i, file, info) {
+                                    action = Some(Act::Action(f, file.to_path_buf()));
                                 }
                             }
                         }
                         i += 1;
                     }
 
-                    if let Some(dir) = nav {
+                    if let Some(Act::Nav(dir)) = action {
                         app.navigate_to(dir);
-                    }
-                    if let Some((f, path)) = action {
+                    } else if let Some(Act::Action(f, path)) = action {
                         f(app, path);
                     }
                     if let Some(path) = load {

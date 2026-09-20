@@ -57,9 +57,6 @@ pub struct Palette {
     pub btn_hover: Color32,
     // --focus-ring
     pub focus_ring: Color32,
-    // --disabled-text (egui dims disabled widgets itself; kept for spec fidelity)
-    #[allow(dead_code)]
-    pub disabled_text: Color32,
 }
 
 /// Per-theme UI layout/sizing tokens (all optional; sensible defaults in code).
@@ -142,37 +139,15 @@ impl Theme {
     /// Hardcoded dark palette used only when no themes/ folder exists anywhere
     /// (broken install) — the app never runs with zero themes.
     fn builtin_fallback() -> Theme {
-        let hex = |s: &str| color_from_hex(s).unwrap_or(Color32::DARK_GRAY);
-        Theme {
-            id: DEFAULT_THEME_ID.into(),
-            name: "Dark".into(),
-            base: Base::Dark,
-            metadata_font: FontFamily::Proportional,
-            icons_dir: None,
-            palette: Palette {
-                bg: hex("#141414"),
-                panel_bg: hex("#1d1d1d"),
-                text_primary: hex("#e0e0e0"),
-                text_secondary: hex("#8c8c8c"),
-                accent: hex("#2ea3f0"),
-                border: hex("#383838"),
-                progress_fill: hex("#2ea3f0"),
-                slider_track: hex("#2b2b2b"),
-                slider_handle: hex("#9a9a9a"),
-                row_even: hex("#171717"),
-                row_odd: hex("#202020"),
-                btn_hover: hex("#2a2a2a"),
-                focus_ring: hex("#2ea3f0"),
-                disabled_text: hex("#555555"),
-            },
-            layout: Layout::default().with_defaults(),
-        }
+        // Use include_str so the theme.json is the single source of truth.
+        let json = include_str!("../../themes/dark/theme.json");
+        Theme::from_json(json, Path::new("")).unwrap()
     }
 }
 
 impl Palette {
     fn from_json(v: &serde_json::Value) -> Option<Palette> {
-        let tok = |k: &str| v.get(k).and_then(|x| x.as_str()).and_then(color_from_hex);
+        let tok = |k: &str| v.get(k).and_then(|x| x.as_str()).and_then(|s| Color32::from_hex(s).ok());
         Some(Palette {
             bg: tok("bg")?,
             panel_bg: tok("panel_bg")?,
@@ -187,20 +162,8 @@ impl Palette {
             row_odd: tok("row_odd")?,
             btn_hover: tok("btn_hover")?,
             focus_ring: tok("focus_ring")?,
-            disabled_text: tok("disabled_text")?,
         })
     }
-}
-
-fn color_from_hex(s: &str) -> Option<Color32> {
-    let s = s.trim_start_matches('#');
-    if s.len() != 6 {
-        return None;
-    }
-    let r = u8::from_str_radix(&s[0..2], 16).ok()?;
-    let g = u8::from_str_radix(&s[2..4], 16).ok()?;
-    let b = u8::from_str_radix(&s[4..6], 16).ok()?;
-    Some(Color32::from_rgb(r, g, b))
 }
 
 fn theme_dirs() -> Vec<PathBuf> {
@@ -347,39 +310,30 @@ impl Icon {
         Icon::Remove,
     ];
 
+    const DATA: [(&'static str, &'static str); 10] = [
+        ("logo.png", "☰"),
+        ("play.png", "▶"),
+        ("pause.png", "⏸"),
+        ("stop.png", "⏹"),
+        ("prev.png", "⏮"),
+        ("next.png", "⏭"),
+        ("shuffle.png", "🔀"),
+        ("repeat.png", "🔁"),
+        ("volume.png", "🔊"),
+        ("remove.png", "✕"),
+    ];
+
     pub fn index(self) -> usize {
-        Icon::ALL.iter().position(|&i| i == self).unwrap()
+        self as usize
     }
 
     fn file_name(self) -> &'static str {
-        match self {
-            Icon::Logo => "logo.png",
-            Icon::Play => "play.png",
-            Icon::Pause => "pause.png",
-            Icon::Stop => "stop.png",
-            Icon::Prev => "prev.png",
-            Icon::Next => "next.png",
-            Icon::Shuffle => "shuffle.png",
-            Icon::Repeat => "repeat.png",
-            Icon::Volume => "volume.png",
-            Icon::Remove => "remove.png",
-        }
+        Self::DATA[self.index()].0
     }
 
     /// Last-resort glyph when neither this theme nor the default ships the PNG.
     fn glyph(self) -> &'static str {
-        match self {
-            Icon::Logo => "☰",
-            Icon::Play => "▶",
-            Icon::Pause => "⏸",
-            Icon::Stop => "⏹",
-            Icon::Prev => "⏮",
-            Icon::Next => "⏭",
-            Icon::Shuffle => "🔀",
-            Icon::Repeat => "🔁",
-            Icon::Volume => "🔊",
-            Icon::Remove => "✕",
-        }
+        Self::DATA[self.index()].1
     }
 }
 
@@ -465,25 +419,28 @@ pub fn apply(ctx: &egui::Context, theme: &Theme) {
     ctx.set_visuals(v);
 }
 
-/// Read the persisted selection id (`~/.config/tplay/theme.json`); absent →
-/// the default theme id.
-pub fn selection() -> String {
-    dirs::config_dir()
-        .map(|d| d.join("tplay").join("theme.json"))
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v.get("theme").and_then(|x| x.as_str()).map(str::to_string))
-        .unwrap_or_else(|| DEFAULT_THEME_ID.to_string())
-}
-
-/// Persist the selection id.
-pub fn save_selection(id: &str) {
-    if let Some(path) = dirs::config_dir().map(|d| d.join("tplay").join("theme.json")) {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(path, format!("{{\"theme\":\"{id}\"}}"));
+/// Returns (row_rect, child_ui) with banding, accent tint, 3px stripe, and 6px inset.
+/// `i` is the row index for even/odd banding. `is_current` highlights the playing track.
+pub fn row(ui: &mut egui::Ui, i: usize, is_current: bool, row_h: f32, theme: &Theme) -> (egui::Rect, egui::Ui) {
+    let p = theme.palette;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h), egui::Sense::hover());
+    let bg = if i % 2 == 0 { p.row_even } else { p.row_odd };
+    ui.painter().rect_filled(rect, 2.0, bg);
+    if is_current {
+        ui.painter().rect_filled(rect, 2.0, p.accent.gamma_multiply(0.15));
+        ui.painter().rect_filled(
+            egui::Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height())),
+            0.0,
+            p.accent,
+        );
     }
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(egui::Rect::from_min_max(rect.min + egui::vec2(6.0, 0.0), rect.max))
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    child.spacing_mut().item_spacing.x = 4.0;
+    (rect, child)
 }
 
 #[cfg(test)]
@@ -503,7 +460,7 @@ mod tests {
                  "progress_fill":"#2ea3f0","slider_track":"#222222",
                  "slider_handle":"#999999","row_even":"#141414",
                  "row_odd":"#1c1c1c","btn_hover":"#282828",
-                 "focus_ring":"#2ea3f0","disabled_text":"#555555"}}}}"##,
+                 "focus_ring":"#2ea3f0"}}}}"##,
             ),
         )
         .unwrap();

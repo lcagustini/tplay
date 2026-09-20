@@ -1,5 +1,6 @@
 use crate::app::TPlayApp;
 use crate::gui::theme::{self, Icon};
+use crate::library;
 use eframe::egui;
 use std::path::PathBuf;
 
@@ -42,11 +43,7 @@ pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                 // cache is shared with the Library, so already-visited folders
                 // show tags instantly).
                 let info = app.track_info(path);
-                let name = info
-                    .and_then(|i| (!i.title.is_empty()).then_some(i.title.clone()))
-                    .unwrap_or_else(|| {
-                        path.file_stem().unwrap_or_default().to_string_lossy().into_owned()
-                    });
+                let name = library::title_or_stem(path, info);
                 let fmt = path
                     .extension()
                     .and_then(|e| e.to_str())
@@ -66,33 +63,8 @@ pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                 };
 
                 // Fixed-height row rect; background, full-row highlight and the
-                // accent stripe all go under the widgets.
-                let (rect, _) = ui.allocate_exact_size(
-                    egui::vec2(ui.available_width(), row_h),
-                    egui::Sense::hover(),
-                );
-                let bg = if i % 2 == 0 { p.row_even } else { p.row_odd };
-                ui.painter().rect_filled(rect, 2.0, bg);
-                if is_current || drag_hover == Some(i) {
-                    ui.painter().rect_filled(rect, 2.0, p.accent.gamma_multiply(0.15));
-                }
-                if is_current {
-                    ui.painter().rect_filled(
-                        egui::Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height())),
-                        0.0,
-                        p.accent,
-                    );
-                }
-
-                // Content inset 6px so the leading number clears the stripe.
-                let mut row = ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(egui::Rect::from_min_max(
-                            rect.min + egui::vec2(6.0, 0.0),
-                            rect.max,
-                        ))
-                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                );
+                // accent stripe all go under the widgets. Highlight on drag hover too.
+                let (rect, mut row) = theme::row(ui, i, is_current || drag_hover == Some(i), row_h, &theme);
                 row.spacing_mut().item_spacing.x = 8.0;
 
                 row.label(
@@ -178,15 +150,8 @@ pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                 let name = app
                     .playlist()
                     .get(idx)
-                    .and_then(|p| app.track_info(p))
-                    .and_then(|i| (!i.title.is_empty()).then_some(i.title.clone()))
-                    .unwrap_or_else(|| {
-                        app.playlist()
-                            .get(idx)
-                            .and_then(|p| p.file_stem())
-                            .map(|s| s.to_string_lossy().into_owned())
-                            .unwrap_or_default()
-                    });
+                    .map(|p| library::title_or_stem(p, app.track_info(p)))
+                    .unwrap_or_default();
                 if TPlayApp::confirm("Remove track", &format!("Remove '{name}' from the playlist?"), true) {
                     app.remove_track(idx);
                 }

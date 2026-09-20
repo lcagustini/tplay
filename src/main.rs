@@ -12,7 +12,6 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_title("TPlay")
             .with_inner_size([680.0, 460.0])
-            .with_resizable(true)
             .with_min_inner_size([320.0, 160.0])
             // No native title bar: the controls live in the app's own top bar
             // (right-aligned next to the logo), and the bar itself is draggable.

@@ -2,19 +2,11 @@ use crate::app::{EQ_PRESETS, Pane, TPlayApp};
 use crate::audio::eq::EQ_FREQUENCIES;
 use eframe::egui;
 
-fn format_freq(f: f32) -> String {
-    if f >= 1000.0 {
-        format!("{}K", (f / 1000.0) as i32)
-    } else {
-        format!("{}", f as i32)
-    }
-}
-
 pub fn equalizer_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
     // Owned Arc copy — panes call &mut app while using theme data.
     let theme = app.theme().clone();
     let p = theme.palette;
-    let gains = *app.eq_gains();
+    let gains = app.eq_gains();
     let layout = theme.layout.with_defaults();
 
     // Header — grouped controls; the tab already names the pane. Measured via
@@ -31,16 +23,16 @@ pub fn equalizer_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                         app.set_eq_gain(i, 0.0);
                     }
                 }
-                let mut sel = app.eq_preset();
+                let mut sel = app.eq_preset().map(|s| s.to_string());
                 egui::ComboBox::from_id_salt("tplay.eq.preset")
                     .selected_text(app.eq_preset_name())
                     .show_ui(ui, |ui| {
-                        for (i, (name, _)) in EQ_PRESETS.iter().enumerate() {
-                            ui.selectable_value(&mut sel, i, *name);
+                        for (name, _) in EQ_PRESETS {
+                            ui.selectable_value(&mut sel, Some(name.to_string()), name);
                         }
-                        ui.selectable_value(&mut sel, crate::app::EQ_PRESET_CUSTOM, "Custom");
+                        ui.selectable_value(&mut sel, None, "Custom");
                     });
-                if sel != app.eq_preset() {
+                if sel != app.eq_preset().map(|s| s.to_string()) {
                     app.set_eq_preset(sel);
                 }
             });
@@ -55,7 +47,7 @@ pub fn equalizer_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
     // coordinator keeps the dock split at least this tall.
     let label_h = ui.fonts(|f| {
         f.layout_no_wrap(
-            format_freq(EQ_FREQUENCIES[0]),
+            TPlayApp::format_freq(EQ_FREQUENCIES[0]),
             egui::FontId::new(10.0, theme.metadata_font.clone()),
             p.text_secondary,
         )
@@ -123,7 +115,7 @@ pub fn equalizer_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                     });
                     ui.add_space(layout.eq_band_gap);
                     ui.label(
-                        egui::RichText::new(format_freq(EQ_FREQUENCIES[i]))
+                        egui::RichText::new(TPlayApp::format_freq(EQ_FREQUENCIES[i]))
                             .small()
                             .color(p.text_secondary)
                             .font(egui::FontId::new(10.0, theme.metadata_font.clone())),

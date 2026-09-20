@@ -7,16 +7,12 @@
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::tag::ItemKey;
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 /// The audio extensions this player can play (mirrors the file dialog filter).
 const AUDIO_EXTENSIONS: [&str; 5] = ["mp3", "wav", "ogg", "flac", "m4a"];
-/// Playlist files: JSON (`{"paths": [...]}`), saved/loaded from the Library
-/// like any other file. Shuffle/repeat are appwide settings, not content.
-const PLAYLIST_EXTENSIONS: [&str; 1] = ["tplay"];
 
 pub fn is_audio(path: &Path) -> bool {
     path.extension()
@@ -25,49 +21,32 @@ pub fn is_audio(path: &Path) -> bool {
 }
 
 pub fn is_playlist(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| PLAYLIST_EXTENSIONS.iter().any(|a| e.eq_ignore_ascii_case(a)))
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("tplay"))
 }
 
-/// Write the given tracks as a `.tplay` playlist file (paths only). Returns
-/// false when the file couldn't be written or serialized.
-pub fn write_playlist(path: &Path, tracks: &[PathBuf]) -> bool {
-    #[derive(Serialize)]
-    struct PlaylistData {
-        paths: Vec<String>,
-    }
+/// Playlist file format (shared for read/write).
+#[derive(Serialize, Deserialize)]
+struct PlaylistData { paths: Vec<String> }
+
+/// Write the given tracks as a `.tplay` playlist file (paths only).
+pub fn write_playlist(path: &Path, tracks: &[PathBuf]) -> std::io::Result<()> {
     let data = PlaylistData {
-        paths: tracks
-            .iter()
-            .filter_map(|p| p.to_str().map(str::to_owned))
-            .collect(),
+        paths: tracks.iter().filter_map(|p| p.to_str().map(str::to_owned)).collect(),
     };
-    match serde_json::to_string_pretty(&data) {
-        Ok(json) => std::fs::write(path, json).is_ok(),
-        Err(_) => false,
-    }
+    let json = serde_json::to_string_pretty(&data)?;
+    std::fs::write(path, json)
 }
 
-/// Read a `.tplay` playlist file. `None` = not a parseable playlist (callers
-/// leave the current playlist alone); relative paths resolve against the
-/// playlist's own directory, like real players. Existence filtering happens
-/// in `TPlayApp::load_playlist_from`.
+/// Read a `.tplay` playlist file. Returns None if not parseable.
+/// Relative paths resolve against the playlist's own directory.
 pub fn read_playlist(path: &Path) -> Option<Vec<PathBuf>> {
     let json = std::fs::read_to_string(path).ok()?;
-    #[derive(Deserialize)]
-    struct PlaylistData {
-        paths: Vec<String>,
-    }
     let data: PlaylistData = serde_json::from_str(&json).ok()?;
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     Some(
         data.paths
             .into_iter()
-            .map(|s| {
-                let p = PathBuf::from(s);
-                if p.is_relative() { dir.join(p) } else { p }
-            })
+            .map(|s| { let p = PathBuf::from(s); if p.is_relative() { dir.join(p) } else { p } })
             .collect(),
     )
 }
@@ -90,25 +69,14 @@ pub struct TrackInfo {
 /// entries whose title is their name (the Title column interleaves them with
 /// files; the tag columns sink them last).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Entry {
-    Dir(PathBuf),
-    File(PathBuf),
+pub struct Entry {
+    pub path: PathBuf,
+    pub is_dir: bool,
 }
 
 impl Entry {
-    pub fn path(&self) -> &Path {
-        match self {
-            Entry::Dir(p) | Entry::File(p) => p,
-        }
-    }
-
-    pub fn is_dir(&self) -> bool {
-        matches!(self, Entry::Dir(_))
-    }
-}
-
-fn str_field(tag: &lofty::tag::Tag, key: ItemKey) -> String {
-    tag.get_string(key).map(str::to_owned).unwrap_or_default()
+    pub fn path(&self) -> &Path { &self.path }
+    pub fn is_dir(&self) -> bool { self.is_dir }
 }
 
 /// Read tags + duration for one file. `None` only when the file isn't a
@@ -116,13 +84,15 @@ fn str_field(tag: &lofty::tag::Tag, key: ItemKey) -> String {
 pub fn read_info(path: &Path) -> Option<TrackInfo> {
     let tagged = lofty::read_from_path(path).ok()?;
     let tag = tagged.primary_tag().or_else(|| tagged.first_tag());
+    let get = |k: ItemKey| tag.and_then(|t| t.get_string(k)).map(str::to_owned).unwrap_or_default();
+    let get_opt = |k: ItemKey| tag.and_then(|t| t.get_string(k)).map(str::to_owned);
     Some(TrackInfo {
-        title: tag.map(|t| str_field(t, ItemKey::TrackTitle)).unwrap_or_default(),
-        artist: tag.map(|t| str_field(t, ItemKey::TrackArtist)).unwrap_or_default(),
-        album: tag.map(|t| str_field(t, ItemKey::AlbumTitle)).unwrap_or_default(),
-        genre: tag.map(|t| str_field(t, ItemKey::Genre)).unwrap_or_default(),
-        year: tag.and_then(|t| t.get_string(ItemKey::Year).map(str::to_owned)),
-        track_no: tag.and_then(|t| t.get_string(ItemKey::TrackNumber).map(str::to_owned)),
+        title: get(ItemKey::TrackTitle),
+        artist: get(ItemKey::TrackArtist),
+        album: get(ItemKey::AlbumTitle),
+        genre: get(ItemKey::Genre),
+        year: get_opt(ItemKey::Year),
+        track_no: get_opt(ItemKey::TrackNumber),
         // lofty reports Duration::ZERO for streams with unknown length.
         duration: {
             let d = tagged.properties().duration();
@@ -153,14 +123,7 @@ pub fn list_dir(dir: &Path, show_hidden: bool) -> (Vec<PathBuf>, Vec<PathBuf>) {
             }
         }
     }
-    let by_name = |a: &PathBuf, b: &PathBuf| {
-        a.file_name()
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .cmp(&b.file_name().unwrap_or_default().to_ascii_lowercase())
-    };
-    dirs.sort_by(by_name);
-    files.sort_by(by_name);
+    // No sorting here - navigate_to will sort via apply_library_sort
     (dirs, files)
 }
 
@@ -182,94 +145,55 @@ pub fn scan_files(files: Vec<PathBuf>, tx: Sender<(PathBuf, TrackInfo)>) {
 /// into.
 pub const SORT_OPTIONS: [&str; 6] = ["Title", "Artist", "Album", "Year", "Genre", "Duration"];
 
-fn name_ord(a: &Path, b: &Path) -> Ordering {
-    a.file_name()
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .cmp(&b.file_name().unwrap_or_default().to_ascii_lowercase())
-}
-
-/// String ordering with empty/missing values sorting last in both directions.
-fn str_ord(a: &str, b: &str) -> Ordering {
-    match (a.is_empty(), b.is_empty()) {
-        (true, true) => Ordering::Equal,
-        (true, false) => Ordering::Greater,
-        (false, true) => Ordering::Less,
-        (false, false) => a.to_lowercase().cmp(&b.to_lowercase()),
-    }
-}
-
-/// Missing durations sort last; present ones by length.
-fn dur_ord(a: Option<Duration>, b: Option<Duration>) -> Ordering {
-    match (a, b) {
-        (Some(x), Some(y)) => x.cmp(&y),
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => Ordering::Equal,
-    }
-}
-
 /// Tagged title, falling back to the file stem — matches what rows display.
-fn title_or_stem<'a>(path: &'a Path, info: Option<&'a TrackInfo>) -> &'a str {
-    info.and_then(|i| (!i.title.is_empty()).then_some(i.title.as_str()))
-        .unwrap_or_else(|| path.file_stem().and_then(|s| s.to_str()).unwrap_or_default())
+pub fn title_or_stem(path: &Path, info: Option<&TrackInfo>) -> String {
+    info.and_then(|i| (!i.title.is_empty()).then_some(i.title.clone()))
+        .unwrap_or_else(|| path.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string())
 }
 
-/// Sort value for the Title column: tagged title or file stem for files, the
-/// folder's own name for dirs.
-fn title_or_name<'a>(e: &'a Entry, info: Option<&'a TrackInfo>) -> &'a str {
-    if let Entry::Dir(p) = e {
-        return p.file_name().and_then(|s| s.to_str()).unwrap_or_default();
-    }
-    title_or_stem(e.path(), info)
-}
-
-/// Sort value for the tag columns: empty for folders (they're untagged).
-fn field<'a>(e: &'a Entry, info: Option<&'a TrackInfo>, f: fn(&TrackInfo) -> &str) -> &'a str {
-    if e.is_dir() {
-        return "";
-    }
-    info.map(f).unwrap_or_default()
-}
-
-fn duration_of(e: &Entry, info: Option<&TrackInfo>) -> Option<Duration> {
-    if e.is_dir() {
-        None
-    } else {
-        info.and_then(|i| i.duration)
-    }
-}
-
-/// Compare two Library rows by a header sort key (index into `SORT_OPTIONS`).
-/// Unknown keys sort by file name; untagged fields sort last.
-pub fn cmp_entries(
-    a: &Entry,
-    b: &Entry,
-    key: usize,
-    a_info: Option<&TrackInfo>,
-    b_info: Option<&TrackInfo>,
-) -> Ordering {
-    match key {
-        0 => str_ord(title_or_name(a, a_info), title_or_name(b, b_info)),
-        1 => str_ord(
-            field(a, a_info, |i| i.artist.as_str()),
-            field(b, b_info, |i| i.artist.as_str()),
-        ),
-        2 => str_ord(
-            field(a, a_info, |i| i.album.as_str()),
-            field(b, b_info, |i| i.album.as_str()),
-        ),
-        3 => str_ord(
-            field(a, a_info, |i| i.year.as_deref().unwrap_or_default()),
-            field(b, b_info, |i| i.year.as_deref().unwrap_or_default()),
-        ),
-        4 => str_ord(
-            field(a, a_info, |i| i.genre.as_str()),
-            field(b, b_info, |i| i.genre.as_str()),
-        ),
-        5 => dur_ord(duration_of(a, a_info), duration_of(b, b_info)),
-        _ => name_ord(a.path(), b.path()),
-    }
+/// Sort key for a library entry and column. Returns a string that sorts correctly:
+/// - Empty/missing values get a prefix that sorts after normal content.
+/// - Durations become zero-padded milliseconds.
+pub fn sort_key(e: &Entry, info: Option<&TrackInfo>, col: usize) -> String {
+    let s: String = match col {
+        0 => {
+            // Title: folder name for dirs, tagged title or file stem for files
+            if e.is_dir {
+                e.path.file_name().and_then(|s| s.to_str()).unwrap_or_default().to_string()
+            } else {
+                title_or_stem(e.path(), info).to_string()
+            }
+        }
+        1 => {
+            // Artist
+            if e.is_dir { String::new() } else { info.map(|i| i.artist.as_str()).unwrap_or_default().to_string() }
+        }
+        2 => {
+            // Album
+            if e.is_dir { String::new() } else { info.map(|i| i.album.as_str()).unwrap_or_default().to_string() }
+        }
+        3 => {
+            // Year
+            if e.is_dir { String::new() } else { info.and_then(|i| i.year.as_deref()).unwrap_or_default().to_string() }
+        }
+        4 => {
+            // Genre
+            if e.is_dir { String::new() } else { info.map(|i| i.genre.as_str()).unwrap_or_default().to_string() }
+        }
+        5 => {
+            // Duration: zero-padded milliseconds, or ~ for missing (sorts last)
+            if e.is_dir {
+                "~".to_string()
+            } else if let Some(d) = info.and_then(|i| i.duration) {
+                format!("{:012}", d.as_millis())
+            } else {
+                "~".to_string()
+            }
+        }
+        _ => e.path.file_name().and_then(|s| s.to_str()).unwrap_or_default().to_string(),
+    };
+    // Prefix empty strings with \x7f (DEL) so they sort after normal content
+    if s.is_empty() { format!("\x7f{}", s) } else { s.to_lowercase() }
 }
 
 #[cfg(test)]
@@ -356,9 +280,9 @@ mod tests {
 
     #[test]
     fn cmp_entries_sorts_by_tag_fields() {
-        let a = Entry::File(PathBuf::from("a.wav"));
-        let b = Entry::File(PathBuf::from("b.wav"));
-        let dir = Entry::Dir(PathBuf::from("z-folder"));
+        let a = Entry { path: PathBuf::from("a.wav"), is_dir: false };
+        let b = Entry { path: PathBuf::from("b.wav"), is_dir: false };
+        let dir = Entry { path: PathBuf::from("z-folder"), is_dir: true };
         // Tags deliberately cross the filename order (a.wav < b.wav) so each
         // key proves it sorts by tags, not names.
         let info_a = TrackInfo {
@@ -381,21 +305,21 @@ mod tests {
         };
 
         // Title: Alpha (b.wav) sorts before Bravo (a.wav) — tags beat names.
-        assert!(cmp_entries(&b, &a, 0, Some(&info_a), Some(&info_b)).is_lt());
+        assert!(sort_key(&b, Some(&info_a), 0) < sort_key(&a, Some(&info_b), 0));
         // Artist / Album / Year / Genre.
-        assert!(cmp_entries(&a, &b, 1, Some(&info_b), Some(&info_a)).is_lt()); // Amy < Zed
-        assert!(cmp_entries(&a, &b, 2, Some(&info_b), Some(&info_a)).is_lt()); // Alpha < Zeta
-        assert!(cmp_entries(&a, &b, 3, Some(&info_b), Some(&info_a)).is_lt()); // 1995 < 2000
-        assert!(cmp_entries(&a, &b, 4, Some(&info_b), Some(&info_a)).is_lt()); // Jazz < Rock
+        assert!(sort_key(&a, Some(&info_b), 1) < sort_key(&b, Some(&info_a), 1)); // Amy < Zed
+        assert!(sort_key(&a, Some(&info_b), 2) < sort_key(&b, Some(&info_a), 2)); // Alpha < Zeta
+        assert!(sort_key(&a, Some(&info_b), 3) < sort_key(&b, Some(&info_a), 3)); // 1995 < 2000
+        assert!(sort_key(&a, Some(&info_b), 4) < sort_key(&b, Some(&info_a), 4)); // Jazz < Rock
         // Duration: present sorts before missing.
-        assert!(cmp_entries(&b, &a, 5, Some(&info_a), Some(&info_b)).is_lt());
+        assert!(sort_key(&b, Some(&info_a), 5) < sort_key(&a, Some(&info_b), 5));
         // Missing tags sort last (empty artist after "Zed", not before).
-        assert!(cmp_entries(&b, &a, 1, Some(&info_a), None).is_lt());
+        assert!(sort_key(&b, Some(&info_a), 1) < sort_key(&a, None, 1));
         // Folders are untagged: their name is the Title key, and they sort
         // last on the tag columns (no artist / no duration).
-        assert!(cmp_entries(&dir, &a, 0, None, Some(&info_b)).is_gt()); // "z-folder" > "Bravo"
-        assert!(cmp_entries(&a, &dir, 1, Some(&info_b), None).is_lt()); // Amy < (no artist)
-        assert!(cmp_entries(&a, &dir, 5, Some(&info_a), None).is_lt()); // present < missing
+        assert!(sort_key(&dir, None, 0) > sort_key(&a, Some(&info_b), 0)); // "z-folder" > "Bravo"
+        assert!(sort_key(&a, Some(&info_b), 1) < sort_key(&dir, None, 1)); // Amy < (no artist)
+        assert!(sort_key(&a, Some(&info_a), 5) < sort_key(&dir, None, 5)); // present < missing
     }
 
     #[test]
@@ -407,7 +331,7 @@ mod tests {
         assert!(!is_playlist(&dir.join("chill.mp3")));
 
         let tracks = vec![dir.join("a.mp3"), PathBuf::from("sub/b.ogg")];
-        assert!(write_playlist(&file, &tracks));
+        assert!(write_playlist(&file, &tracks).is_ok());
         let back = read_playlist(&file).expect("read playlist");
         // Absolute paths come back as-is; relative ones resolve against the
         // playlist's own directory.
