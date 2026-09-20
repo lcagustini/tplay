@@ -233,6 +233,20 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
     egui::TopBottomPanel::top("pane_dropdown_panel")
         .frame(egui::Frame::none())
         .show(ctx, |ui| {
+            // No native title bar (decorations off — see main.rs), so the whole
+            // bar drags the window. Added first, at the bottom of the z-stack:
+            // the menu logo and the window controls drawn after still win their
+            // own clicks, and only the empty bar area falls through to this.
+            let titlebar = ui.max_rect().shrink(0.5);
+            let drag = ui.interact(
+                titlebar,
+                egui::Id::new("tplay.titlebar_drag"),
+                egui::Sense::drag(),
+            );
+            if drag.drag_started() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
+
             let logo = app.theme_icon(theme::Icon::Logo).cloned();
             let menu_contents = |ui: &mut egui::Ui| {
                 let open_count = Pane::ALL.iter().filter(|p| pane_is_open(&tree, **p)).count();
@@ -275,6 +289,41 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
                         ui.menu_button("☰", menu_contents);
                     }
                 }
+
+                // No native title bar (decorations off — see main.rs), so the
+                // window controls live here, right-aligned via a right-to-left
+                // flush layout. Within it the platform convention holds: the
+                // first added (Close) lands rightmost, so reading left-to-right
+                // the order is minimize, maximize/restore, close. The glyphs
+                // come from the bundled emoji icon font (Ubuntu-Light has no
+                // box-drawing set).
+                let maximized = ui
+                    .ctx()
+                    .input(|i| i.viewport().maximized)
+                    .unwrap_or(false);
+                ui.with_layout(
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| {
+                        let close = ui
+                            .add(egui::Button::new("🗙").small().frame(false))
+                            .on_hover_text("Close");
+                        if close.clicked() {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        let maximize = ui
+                            .add(egui::Button::new("🗖").small().frame(false))
+                            .on_hover_text(if maximized { "Restore" } else { "Maximize" });
+                        if maximize.clicked() {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+                        }
+                        let minimize = ui
+                            .add(egui::Button::new("🗕").small().frame(false))
+                            .on_hover_text("Minimize");
+                        if minimize.clicked() {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                        }
+                    },
+                );
             });
         });
 

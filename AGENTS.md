@@ -62,6 +62,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 - Close pane via tab X button; reopen via the ☰ menu button (app logo, per-theme `logo.png`) at top-left, which also lists the Skin selector (theme switcher)
 - Tab bodies are wrapped in a ScrollArea by egui_dock; the EQ pane disables both scrollbars (`scroll_bars` → `[false, false]`) and sizes its 10 bands to the pane width, so nothing can overflow
 - Layout auto-saves to `~/.config/tplay/dock_layout.ron` (RON via serde) and restores on startup
+- **Window controls**: decorations are off (no native title bar — `main.rs`), so the top bar carries its own right-aligned controls — minimize 🗕, maximize/restore 🗖, close 🗙 (emoji glyphs; Ubuntu-Light has no box-drawing set). The bar itself drags the window via `StartDrag` (a bottom-of-z-stack `interact`); the menu logo and the control buttons drawn after still win their own clicks.
 
 ## Non-obvious machinery
 
