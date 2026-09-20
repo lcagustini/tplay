@@ -104,7 +104,7 @@ pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                 }
 
                 row.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if theme::icon_button(ui, app.theme_icon(Icon::Remove), Icon::Remove, 13.0, true).clicked() {
+                    if theme::icon_button(ui, app.theme_icon(Icon::Remove), Icon::Remove, 13.0, true, false).clicked() {
                         to_delete = Some(i);
                     }
                     if !fmt.is_empty() {
@@ -164,18 +164,6 @@ pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
         }
         if ui.button("Load Playlist").clicked() {
             app.load_playlist();
-        }
-
-        ui.separator();
-
-        let mut shuffle = app.shuffle();
-        if ui.checkbox(&mut shuffle, "Shuffle").changed() {
-            app.toggle_shuffle();
-        }
-
-        let mut repeat = app.repeat();
-        if ui.checkbox(&mut repeat, "Repeat").changed() {
-            app.toggle_repeat();
         }
     });
 }

@@ -82,7 +82,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             // Prev track
             let prev_enabled = app.has_prev_track();
-            if theme::icon_button(ui, app.theme_icon(Icon::Prev), Icon::Prev, 18.0, prev_enabled).clicked() {
+            if theme::icon_button(ui, app.theme_icon(Icon::Prev), Icon::Prev, 18.0, prev_enabled, false).clicked() {
                 app.prev_track();
             }
 
@@ -90,21 +90,30 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
             let is_paused = app.is_paused();
             let is_empty = app.is_empty();
             if is_paused || is_empty {
-                if theme::icon_button(ui, app.theme_icon(Icon::Play), Icon::Play, 18.0, true).clicked() {
+                if theme::icon_button(ui, app.theme_icon(Icon::Play), Icon::Play, 18.0, true, false).clicked() {
                     app.play();
                 }
-            } else if theme::icon_button(ui, app.theme_icon(Icon::Pause), Icon::Pause, 18.0, true).clicked() {
+            } else if theme::icon_button(ui, app.theme_icon(Icon::Pause), Icon::Pause, 18.0, true, false).clicked() {
                 app.pause();
             }
 
-            if theme::icon_button(ui, app.theme_icon(Icon::Stop), Icon::Stop, 18.0, true).clicked() {
+            if theme::icon_button(ui, app.theme_icon(Icon::Stop), Icon::Stop, 18.0, true, false).clicked() {
                 app.stop();
             }
 
             // Next track
             let next_enabled = app.has_next_track();
-            if theme::icon_button(ui, app.theme_icon(Icon::Next), Icon::Next, 18.0, next_enabled).clicked() {
+            if theme::icon_button(ui, app.theme_icon(Icon::Next), Icon::Next, 18.0, next_enabled, false).clicked() {
                 app.next_track();
+            }
+
+            // Playlist controls: shuffle / repeat — lit while active.
+            ui.separator();
+            if theme::icon_button(ui, app.theme_icon(Icon::Shuffle), Icon::Shuffle, 18.0, true, app.shuffle()).clicked() {
+                app.toggle_shuffle();
+            }
+            if theme::icon_button(ui, app.theme_icon(Icon::Repeat), Icon::Repeat, 18.0, true, app.repeat()).clicked() {
+                app.toggle_repeat();
             }
 
             ui.separator();

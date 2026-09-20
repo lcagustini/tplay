@@ -327,11 +327,7 @@ pub enum Icon {
     Stop,
     Prev,
     Next,
-    // Kept in the icon contract (theme authors supply them) though the
-    // playlist toggles render as text checkboxes today.
-    #[allow(dead_code)]
     Shuffle,
-    #[allow(dead_code)]
     Repeat,
     Volume,
     Remove,
@@ -388,13 +384,15 @@ impl Icon {
 }
 
 /// Transport/action button wired to a theme icon texture, falling back to a
-/// glyph when the icon failed to load.
+/// glyph when the icon failed to load. `selected` paints egui's selected
+/// visuals (theme `--progress-fill`/`--focus-ring`) for mode toggles.
 pub fn icon_button(
     ui: &mut egui::Ui,
     tex: Option<&TextureHandle>,
     icon: Icon,
     size: f32,
     enabled: bool,
+    selected: bool,
 ) -> egui::Response {
     let button = match tex {
         Some(h) => egui::Button::image(
@@ -402,7 +400,7 @@ pub fn icon_button(
         ),
         None => egui::Button::new(icon.glyph()),
     };
-    ui.add_enabled(enabled, button)
+    ui.add_enabled(enabled, button.selected(selected))
 }
 
 /// Standalone icon (e.g. the volume speaker beside its slider).

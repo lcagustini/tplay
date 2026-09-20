@@ -32,10 +32,10 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 - Click track name to play; drag track name to reorder; ✕ icon button removes track (✕ and the right-aligned FORMAT column sit in a fixed 24px row; rows alternate `--row-even`/`--row-odd`, the active row gets a full-row `--accent` tint plus a 3px `--accent` left stripe; row content is inset 6px so the leading number clears the stripe; filenames render without their extension — the FORMAT column carries the type)
 - **Shuffle** — plays each track once in random order; new tracks added go into unplayed pool; clicking a track resets shuffle
 - **Repeat** — loops playlist (sequential) or shuffle cycle
-- Transport (play/prev/next/stop) uses the theme's icon textures
+- Transport (play/prev/next/stop) uses the theme's icon textures; the shuffle/repeat mode toggles sit beside them (same icon set, lit via egui's selected visuals while active)
 - Auto-advance (`advance`) fires on natural track end (sink empty, unpaused, `current_path` set), called from `TPlayApp::update()` every frame
 - **Save Playlist** / **Load Playlist** buttons — manual save/load to `~/.config/tplay/playlist.json`
-- Action buttons (Add Files / Save / Load / Shuffle / Repeat) live in a `horizontal_wrapped` row at the bottom of the pane.
+- Action buttons (Add Files / Save / Load) live in a `horizontal_wrapped` row at the bottom of the pane.
 
 ## Equalizer
 
