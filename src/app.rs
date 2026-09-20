@@ -358,6 +358,7 @@ impl TPlayApp {
         } else {
             if let Some(path) = Self::audio_dialog().pick_file() {
                 self.add_files(vec![path]);
+                self.play_first_track();
             }
         }
     }
@@ -381,9 +382,17 @@ impl TPlayApp {
         self.sink.pause();
     }
 
+    /// Stop playback and reset song + playlist state: unloads the current
+    /// track and rewinds the play position, so the next Play starts from the
+    /// top of the playlist (or shuffle order) instead of resuming.
     pub fn stop(&mut self) {
-        let _ = self.sink.try_seek(Duration::ZERO);
-        self.sink.pause();
+        let _ = self.sink.stop();
+        self.current_path = None;
+        self.current_index = None;
+        self.total_duration = None;
+        self.seek_target = None;
+        self.seektable_ready = None;
+        self.shuffle_pos = 0;
     }
 
     pub fn set_volume(&mut self, volume: f32) {
