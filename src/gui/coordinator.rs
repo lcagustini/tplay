@@ -11,6 +11,8 @@ const DOCK_LAYOUT_FILE: &str = "dock_layout.ron";
 const DOCK_ID: &str = "tplay.dock_state";
 /// egui memory key: measured natural body height of a pane's content.
 const PANE_CONTENT_H: &str = "tplay.pane_content_h";
+/// egui memory key: measured minimum body width of a pane's content.
+const PANE_CONTENT_W: &str = "tplay.pane_content_w";
 
 /// How a pane is sized inside the dock.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -33,21 +35,27 @@ fn pane_sizing(pane: Pane) -> PaneSizing {
     }
 }
 
-/// Enforce the per-pane size policy by rewriting split fractions before the
-/// dock lays out (egui_dock has no per-pane size limits of its own):
-fn apply_pane_sizes(tree: &mut DockState<Pane>, ctx: &egui::Context, style: &Style) {
+/// Enforce the per-pane size policy by rewriting split fractions (egui_dock
+/// has no per-pane size limits of its own). Returns true if any fraction was
+/// changed — callers repaint so the correction lands on the next frame.
+/// `border_v`/`border_h` are the tab bar + body frame margins that sit
+/// outside the pane's measured content (vertical and horizontal).
+fn apply_pane_sizes(
+    tree: &mut DockState<Pane>,
+    ctx: &egui::Context,
+    border_v: f32,
+    border_h: f32,
+) -> bool {
+    let mut changed = false;
     for &pane in &Pane::ALL {
-        let id = egui::Id::new(PANE_CONTENT_H).with(pane);
-        let Some(content_h) = ctx.data(|d| d.get_temp::<f32>(id)) else { continue };
-        if content_h <= 0.0 {
+        let h_id = egui::Id::new(PANE_CONTENT_H).with(pane);
+        let w_id = egui::Id::new(PANE_CONTENT_W).with(pane);
+        let no_min = ctx
+            .data(|d| d.get_temp::<f32>(h_id).is_some_and(|h| h > 0.0))
+            || ctx.data(|d| d.get_temp::<f32>(w_id).is_some_and(|w| w > 0.0));
+        if !no_min {
             continue;
         }
-        // A leaf is the tab bar plus the body frame (its inner margin sits
-        // outside the pane content we measured).
-        let leaf_h = content_h
-            + style.tab_bar.height
-            + style.tab.tab_body.inner_margin.top
-            + style.tab.tab_body.inner_margin.bottom;
 
         let main = tree.main_surface_mut();
         let Some(leaf) = main.find_tab(&pane).map(|(node, _)| node) else { continue };
@@ -63,27 +71,62 @@ fn apply_pane_sizes(tree: &mut DockState<Pane>, ctx: &egui::Context, style: &Sty
             if dim <= 0.0 {
                 continue; // not laid out yet — skip until the tree has rects
             }
+            // Floor for this split orientation: a leaf is the content plus
+            // the tab bar + body frame (vertical) or inner side margins (horizontal).
+            let leaf_min = if vertical {
+                let content_h = ctx.data(|d| d.get_temp::<f32>(h_id)).unwrap_or(0.0);
+                (content_h > 0.0).then_some(content_h + border_v)
+            } else {
+                let content_w = ctx.data(|d| d.get_temp::<f32>(w_id)).unwrap_or(0.0);
+                (content_w > 0.0).then_some(content_w + border_h)
+            };
+            let Some(leaf_min) = leaf_min else { continue };
+            let min_frac = (leaf_min / dim).clamp(0.05, 0.95);
             // `fraction` is always the top/left child's share.
             let (c0, c1) = (parent.left(), parent.right());
+            let old = *fraction;
             match (pane_sizing(pane), c0 == leaf, c1 == leaf) {
-                // Pinned: the leaf takes exactly its content height.
+                // Pinned: the leaf takes exactly its content size.
                 (PaneSizing::Fixed, true, _) => {
-                    *fraction = (leaf_h / dim).clamp(0.05, 0.95);
+                    *fraction = min_frac;
                 }
                 (PaneSizing::Fixed, _, true) => {
-                    *fraction = ((dim - leaf_h) / dim).clamp(0.05, 0.95);
+                    *fraction = 1.0 - min_frac;
                 }
                 // Floor only: never smaller than its content, may grow.
                 (PaneSizing::Fill, true, _) => {
-                    *fraction = fraction.max((leaf_h / dim).clamp(0.05, 0.95));
+                    *fraction = fraction.max(min_frac);
                 }
                 (PaneSizing::Fill, _, true) => {
-                    *fraction = fraction.min(1.0 - (leaf_h / dim).clamp(0.05, 0.95));
+                    *fraction = fraction.min(1.0 - min_frac);
                 }
                 _ => {}
             }
+            changed |= *fraction != old;
         }
     }
+    changed
+}
+
+/// Minimum leaf size (content + border) for a pane, from the size its content
+/// recorded this frame (zero component = no floor in that dimension).
+fn pane_min_leaf(
+    tree: &DockState<Pane>,
+    ctx: &egui::Context,
+    pane: Pane,
+    border_v: f32,
+    border_h: f32,
+) -> egui::Vec2 {
+    if !pane_is_open(tree, pane) {
+        return egui::Vec2::ZERO;
+    }
+    let h = ctx
+        .data(|d| d.get_temp::<f32>(egui::Id::new(PANE_CONTENT_H).with(pane)))
+        .map_or(0.0, |h| h + border_v);
+    let w = ctx
+        .data(|d| d.get_temp::<f32>(egui::Id::new(PANE_CONTENT_W).with(pane)))
+        .map_or(0.0, |w| w + border_h);
+    egui::vec2(w, h)
 }
 
 fn default_tree() -> DockState<Pane> {
@@ -240,9 +283,14 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
     let mut style = Style::from_egui(ctx.style().as_ref());
     style.tab_bar.fill_tab_bar = true;
 
-    // Pin fixed panes to their content height and floor fill panes (the EQ)
+    // Pin fixed panes to their content size and floor fill panes (the EQ)
     // to their minimum before the dock lays out (see apply_pane_sizes).
-    apply_pane_sizes(&mut tree, ctx, &style);
+    let border_v = style.tab_bar.height
+        + style.tab.tab_body.inner_margin.top
+        + style.tab.tab_body.inner_margin.bottom;
+    let border_h = style.tab.tab_body.inner_margin.left
+        + style.tab.tab_body.inner_margin.right;
+    apply_pane_sizes(&mut tree, ctx, border_v, border_h);
 
     let mut viewer = PaneViewer { app };
     DockArea::new(&mut tree)
@@ -253,6 +301,37 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
         .show_leaf_collapse_buttons(false)
         .style(style)
         .show(ctx, &mut viewer);
+
+    // The splitter drag inside DockArea::show() edits fractions without
+    // respecting pane minimums; a torn-off (floating) window can likewise be
+    // shrunk below its content. Re-enforce both after the fact: if anything
+    // was dragged below its floor, rewrite the fractions/size and repaint so
+    // the corrected tree is what's laid out next frame (one-frame snap, not a
+    // permanent resize below the minimum).
+    let mut corrected = apply_pane_sizes(&mut tree, ctx, border_v, border_h);
+    let min = pane_min_leaf(&tree, ctx, Pane::Equalizer, border_v, border_h);
+    if min.x > 0.0 || min.y > 0.0 {
+        let eq_surface = tree
+            .iter_all_tabs()
+            .find(|(_, t)| **t == Pane::Equalizer)
+            .map(|((surface, _), _)| surface);
+        if let Some(surface) = eq_surface {
+            if let Some(ws) = tree.get_window_state_mut(surface) {
+                let cur = ws.rect();
+                let new_w = cur.width().max(min.x.max(50.0));
+                let new_h = cur.height().max(min.y);
+                let shrank = (cur.width() > 0.0 && new_w > cur.width())
+                    || (cur.height() > 0.0 && new_h > cur.height());
+                if shrank {
+                    ws.set_size(egui::vec2(new_w, new_h));
+                    corrected = true;
+                }
+            }
+        }
+    }
+    if corrected {
+        ctx.request_repaint();
+    }
 
     // Persist to egui memory (session) + disk
     ctx.data_mut(|d| d.insert_temp(egui::Id::new(DOCK_ID), tree.clone()));

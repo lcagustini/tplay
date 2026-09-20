@@ -69,6 +69,9 @@ pub struct Layout {
     pub eq_slider_min_h: f32,
     /// EQ slider maximum height (px).
     pub eq_slider_max_h: f32,
+    /// Minimum per-band width (px). Below `10 * eq_band_w_min` the band row
+    /// clips (no scrollbars), so the dock floors the pane's width there.
+    pub eq_band_w_min: f32,
     /// Gap between header and the first band row (px).
     pub eq_header_gap: f32,
     /// Gap between each band's slider and its frequency label (px).
@@ -80,6 +83,7 @@ impl Layout {
         Layout {
             eq_slider_min_h: if self.eq_slider_min_h > 0.0 { self.eq_slider_min_h } else { 60.0 },
             eq_slider_max_h: if self.eq_slider_max_h > 0.0 { self.eq_slider_max_h } else { 220.0 },
+            eq_band_w_min: if self.eq_band_w_min > 0.0 { self.eq_band_w_min } else { 40.0 },
             eq_header_gap: if self.eq_header_gap > 0.0 { self.eq_header_gap } else { 6.0 },
             eq_band_gap: if self.eq_band_gap > 0.0 { self.eq_band_gap } else { 2.0 },
         }
@@ -127,6 +131,7 @@ impl Theme {
         let layout = v.get("layout").map_or(Layout::default(), |l| Layout {
             eq_slider_min_h: l.get("eq_slider_min_h").and_then(|x| x.as_f64()).map(|x| x as f32).unwrap_or(0.0),
             eq_slider_max_h: l.get("eq_slider_max_h").and_then(|x| x.as_f64()).map(|x| x as f32).unwrap_or(0.0),
+            eq_band_w_min: l.get("eq_band_w_min").and_then(|x| x.as_f64()).map(|x| x as f32).unwrap_or(0.0),
             eq_header_gap: l.get("eq_header_gap").and_then(|x| x.as_f64()).map(|x| x as f32).unwrap_or(0.0),
             eq_band_gap: l.get("eq_band_gap").and_then(|x| x.as_f64()).map(|x| x as f32).unwrap_or(0.0),
         }).with_defaults();

@@ -2,6 +2,11 @@
 
 Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no network. 12 source files (~1300 lines) + `themes/` data folder; read all of them before changing anything — there is nothing else to explore.
 
+## Rules
+
+- Never screenshot or try to see the GUI. Use instrumentation (debug prints, egui memory, config files) or ask the user for feedback instead.
+- Never add hardcoded constants. Use the config and theme files (`~/.config/tplay/*`, `themes/<id>/theme.json` layout/palette tokens).
+
 ## Layout
 
 - `src/main.rs` — bootstrap: window options (680x460 default, resizable), hands off to `app::TPlayApp`.
@@ -44,12 +49,12 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 - Theme files are plain JSON + PNGs — creating/modifying a theme is drop-in editing, no rebuild. Theme selection persists in `~/.config/tplay/theme.json`; config absence or unknown id = `dark`.
 - Icons: `themes/<id>/icons/<name>.png` (10 fixed names). Resolution: own file → default theme's file → glyph. Preloaded synchronously into `egui::TextureHandle`s (`TPlayApp.icons`, one per `Icon::ALL` slot) at startup and in `set_theme`; `app.theme_icon(Icon)` hands them to `theme::icon_button`/`theme::icon`.
 - Retro: light Winamp grays + blue, `metadata_font: monospace` for times/metadata. Neon: near-black blue + mint accent/pink progress.
-- **Layout tokens**: each theme may include a `layout` object with EQ sizing values (`eq_slider_min_h`, `eq_slider_max_h`, `eq_header_gap`, `eq_band_gap`). These drive the equalizer pane's minimum/maximum slider height and spacing, replacing hardcoded values. Defaults live in code (`Layout::with_defaults`).
+- **Layout tokens**: each theme may include a `layout` object with EQ sizing values (`eq_slider_min_h`, `eq_slider_max_h`, `eq_band_w_min`, `eq_header_gap`, `eq_band_gap`). These drive the equalizer pane's minimum/maximum slider height, minimum band width (the dock floors the pane's width at `10 × eq_band_w_min`, since the band row clips below it — no scrollbars), and spacing, replacing hardcoded values. Defaults live in code (`Layout::with_defaults`).
 
 ## Docking (egui_dock)
 
 - Three panes as tabs: **Now Playing**, **Playlist**, **Equalizer**
-- **Pane sizing**: per-pane `PaneSizing` policy in coordinator.rs — `Fill` panes (Playlist, Equalizer) take their dock share and resize via separator drag; `Fixed` panes (Now Playing) are pinned to their measured content height each frame (the Now Playing pane records its scope height to egui memory under `tplay.pane_content_h`, and `apply_fixed_pane_sizes` rewrites the enclosing split's `fraction` before `DockArea::show`, so the separator snaps back — no empty dead zone below the controls)
+- **Pane sizing**: per-pane `PaneSizing` policy in coordinator.rs — `Fill` panes (Playlist, Equalizer) take their dock share and resize via separator drag; `Fixed` panes (Now Playing) are pinned to their measured content height each frame (the Now Playing pane records its scope height to egui memory under `tplay.pane_content_h`, and `apply_pane_sizes` rewrites the enclosing split's `fraction` before `DockArea::show`, so the separator snaps back — no empty dead zone below the controls). Minimum floors are enforced twice per frame: `apply_pane_sizes` runs before `DockArea::show`, and again **after** it (the splitter drag and floating-window resize happen inside `show()` and ignore the floors), then `ctx.request_repaint()` lands the corrected fractions next frame - so dragging below the EQ sliders' minimum height snaps back instead of sticking.
 - Default layout: top row (Now Playing tab) ~25%, bottom (Playlist) ~75%
 - Drag tabs to reorder; drag onto split overlays to dock left/right/top/bottom/center
 - Resize panes via draggable splitters

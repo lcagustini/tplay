@@ -67,6 +67,12 @@ pub fn equalizer_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
             egui::Id::new("tplay.pane_content_h").with(Pane::Equalizer),
             header_h + layout.eq_header_gap + layout.eq_slider_min_h + layout.eq_band_gap + label_h,
         );
+        // Horizontal floor: the 10 bands at their min width. The same
+        // `layout.eq_band_w_min` drives both the shrink logic and this floor.
+        d.insert_temp(
+            egui::Id::new("tplay.pane_content_w").with(Pane::Equalizer),
+            10.0 * layout.eq_band_w_min,
+        );
     });
 
     ui.add_space(layout.eq_header_gap);
@@ -87,7 +93,7 @@ pub fn equalizer_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
         (band_w_max, ((avail_w - band_w_max * 10.0) / 9.0).max(0.0))
     } else {
         // Not enough room even at zero spacing — shrink bands too.
-        ((avail_w / 10.0).max(40.0), 0.0)
+        ((avail_w / 10.0).max(layout.eq_band_w_min), 0.0)
     };
     let row_w = band_w * 10.0 + spacing * 9.0;
     let pad = ((avail_w - row_w) / 2.0).max(0.0);
