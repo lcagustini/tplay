@@ -321,10 +321,12 @@ pub enum Icon {
     /// Window chrome: minimize / maximize (text_primary, per theme).
     Minimize,
     Maximize,
+    /// Album Cover pane placeholder shown when a track has no art.
+    NoCover,
 }
 
 impl Icon {
-    pub const ALL: [Icon; 17] = [
+    pub const ALL: [Icon; 18] = [
         Icon::Logo,
         Icon::Play,
         Icon::Pause,
@@ -342,9 +344,10 @@ impl Icon {
         Icon::Folder,
         Icon::Minimize,
         Icon::Maximize,
+        Icon::NoCover,
     ];
 
-    const DATA: [(&'static str, &'static str); 17] = [
+    const DATA: [(&'static str, &'static str); 18] = [
         ("logo.png", "☰"),
         ("play.png", "▶"),
         ("pause.png", "⏸"),
@@ -362,6 +365,7 @@ impl Icon {
         ("folder.png", "📁"),
         ("minimize.png", "🗕"),
         ("maximize.png", "🗖"),
+        ("nocover.png", "🎵"),
     ];
 
     pub fn index(self) -> usize {
@@ -373,7 +377,7 @@ impl Icon {
     }
 
     /// Last-resort glyph when neither this theme nor the default ships the PNG.
-    fn glyph(self) -> &'static str {
+    pub fn glyph(self) -> &'static str {
         Self::DATA[self.index()].1
     }
 }

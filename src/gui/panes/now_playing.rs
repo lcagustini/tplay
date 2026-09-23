@@ -21,6 +21,16 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
     let theme = app.theme().clone();
     let layout = theme.layout.with_defaults();
 
+    // Now Playing is a Fill pane (dock-sized, resizable — the Fixed pin is
+    // gone), so pad the top to vertically center the controls in the pane.
+    // The pad comes from this pane's measured content height last frame (the
+    // same value the coordinator floors the split at), so it converges one
+    // frame after any pane resize.
+    let content_h_id = egui::Id::new("tplay.pane_content_h").with(crate::app::Pane::NowPlaying);
+    let avail_h = ui.available_height();
+    let last_h = ui.ctx().data(|d| d.get_temp::<f32>(content_h_id)).unwrap_or(avail_h);
+    ui.add_space(((avail_h - last_h) / 2.0).max(0.0));
+
     let body = ui.scope(|ui| {
         ui.vertical(|ui| {
         // Progress row: elapsed | full-width seek bar | total.
@@ -136,12 +146,10 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
         });
     });
 
-    // Record the natural content height so the coordinator can pin this pane
-    // to exactly its content (no empty dead space below the controls).
+    // Record the natural content height (excluding the centering pad): the
+    // coordinator floors this pane's split at it and we read it next frame
+    // to compute the centering pad.
     ui.ctx().data_mut(|d| {
-        d.insert_temp(
-            egui::Id::new("tplay.pane_content_h").with(crate::app::Pane::NowPlaying),
-            body.response.rect.height(),
-        );
+        d.insert_temp(content_h_id, body.response.rect.height());
     });
 }

@@ -28,10 +28,10 @@ fn rand_usize(state: &mut u64, max: usize) -> usize {
 
 // Docking panes (egui_dock) - used by GUI layer only
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Debug)]
-pub enum Pane { NowPlaying, Playlist, Equalizer, Library, Visualizer }
+pub enum Pane { NowPlaying, Playlist, Equalizer, Library, Visualizer, AlbumCover }
 
 impl Pane {
-    pub const ALL: [Pane; 5] = [Pane::NowPlaying, Pane::Playlist, Pane::Equalizer, Pane::Library, Pane::Visualizer];
+    pub const ALL: [Pane; 6] = [Pane::NowPlaying, Pane::Playlist, Pane::Equalizer, Pane::Library, Pane::Visualizer, Pane::AlbumCover];
 }
 
 /// Visualizer views (serde'd into config.json `viz_view`). The pane matches

@@ -52,12 +52,11 @@ fn apply_min_pane_sizes(
             let min_frac = (leaf_min / dim).clamp(0.05, 0.95);
             let (c0, c1) = (parent.left(), parent.right());
             let old = *fraction;
-            // NowPlaying is Fixed: pin to exact content height. Others are Fill: floor only.
-            let is_fixed = pane == Pane::NowPlaying && vertical;
+            // All panes are Fill: floor at the minimum size, never pin to it.
             if c0 == leaf {
-                *fraction = if is_fixed { min_frac } else { fraction.max(min_frac) };
+                *fraction = fraction.max(min_frac);
             } else if c1 == leaf {
-                *fraction = if is_fixed { 1.0 - min_frac } else { fraction.min(1.0 - min_frac) };
+                *fraction = fraction.min(1.0 - min_frac);
             }
             changed |= *fraction != old;
         }
@@ -67,8 +66,8 @@ fn apply_min_pane_sizes(
 
 fn default_tree() -> DockState<Pane> {
     let mut d = DockState::new(vec![Pane::NowPlaying]);
-    // 0.15 ≈ Now Playing's content height on a default-size window; the
-    // Fixed-pane override corrects it to the exact height after frame one.
+    // 0.15 ≈ Now Playing's content height on a default-size window. All panes
+    // are Fill, so this is just the starting split — resizable from there.
     d.main_surface_mut().split_below(NodeIndex::root(), 0.15, vec![Pane::Playlist]);
     d
 }
@@ -80,6 +79,7 @@ fn pane_title(pane: Pane) -> egui::WidgetText {
         Pane::Equalizer => "Equalizer".into(),
         Pane::Library => "Library".into(),
         Pane::Visualizer => "Visualizer".into(),
+        Pane::AlbumCover => "Album Cover".into(),
     }
 }
 
@@ -128,6 +128,7 @@ impl TabViewer for PaneViewer<'_> {
             Pane::Equalizer => panes::equalizer::equalizer_pane(self.app, ui),
             Pane::Library => panes::library::library_pane(self.app, ui),
             Pane::Visualizer => panes::visualizer::visualizer_pane(self.app, ui),
+            Pane::AlbumCover => panes::album_cover::album_cover_pane(self.app, ui),
         }
     }
 
@@ -140,7 +141,7 @@ impl TabViewer for PaneViewer<'_> {
     // Visualizer does the same (full-rect painting, no scroll).
     fn scroll_bars(&self, tab: &Pane) -> [bool; 2] {
         match tab {
-            Pane::Equalizer | Pane::Visualizer => [false, false],
+            Pane::Equalizer | Pane::Visualizer | Pane::AlbumCover => [false, false],
             _ => [true, true],
         }
     }

@@ -1,6 +1,6 @@
 # tplay
 
-Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no network. 13 source files (~3100 lines) + `themes/` data folder; read all of them before changing anything — there is nothing else to explore.
+Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no network. 20 source files (~4300 lines) + `themes/` data folder; read all of them before changing anything — there is nothing else to explore.
 
 ## Rules
 
@@ -13,10 +13,10 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 - `src/app.rs` — `TPlayApp`: ALL app state + logic, zero UI code. Owns the rodio stream/sink. The GUI calls in through pub methods; read-only getters sit at the bottom. **No docking state** — that lives in GUI layer.
 - `src/lib.rs` — public re-exports for testing (`app`, `audio`, `gui`, `library`).
 - `src/gui/mod.rs` — declares `coordinator` + `panes` + `theme`.
-- `src/gui/coordinator.rs` — `update_ui(app, ctx)`: applies the theme's egui visuals, then draws one frame's `DockArea` (egui_dock). Implements `TabViewer` for `Pane` enum; calls the four pane functions in `ui()`. Loads dock layout from egui memory + `~/.config/tplay/dock_layout.json`; saves to disk only when the layout changes or the app closes. The ☰ menu re-adds closed panes.
+- `src/gui/coordinator.rs` — `update_ui(app, ctx)`: applies the theme's egui visuals, then draws one frame's `DockArea` (egui_dock). Implements `TabViewer` for `Pane` enum; calls the six pane functions in `ui()`. Loads dock layout from egui memory + `~/.config/tplay/dock_layout.json`; saves to disk only when the layout changes or the app closes. The ☰ menu re-adds closed panes.
 - `src/gui/theme.rs` — data-driven theme system. `Themes::load()` scans `~/.config/tplay/themes/` (user, wins on id clash), `<exe_dir>/themes/` (shipped with the app), `./themes/` (dev: `cargo run` from repo root) and merges by theme id. Each `themes/<id>/theme.json` carries `id`, `name`, `base` (dark/light), `metadata_font` (monospace/…), and the 14-token `Palette` (`--bg`, `--accent`, `--row-even`, …) as hex strings; invalid files are skipped with an eprintln, and a hardcoded dark fallback theme guarantees a non-empty list (broken install). `apply(ctx, &Theme)` maps tokens onto egui `Visuals` each frame so a mid-session switch lands instantly. Selection persists to `~/.config/tplay/config.json` (the `theme` field); missing config = `dark`.
-- `themes/<id>/icons/*.png` — per-theme icon set (logo, play, pause, stop, prev, next, shuffle, repeat, volume, remove, sort_asc, sort_desc, star_on, star_off, folder, minimize, maximize). Missing PNGs fall back to the default theme's (`dark`), then to unicode glyphs. `theme::load_icons` decodes them synchronously into egui textures at startup and on skin switch (NO egui async loader — the URI loader path showed pending/error placeholders and stretched buttons).
-- `src/gui/panes/{now_playing,playlist,equalizer,library}.rs` — one free function per pane, each taking `(app: &mut TPlayApp, ui: &mut egui::Ui)`. Position-independent — work identically docked anywhere.
+- `themes/<id>/icons/*.png` — per-theme icon set (logo, play, pause, stop, prev, next, shuffle, repeat, volume, remove, sort_asc, sort_desc, star_on, star_off, folder, minimize, maximize, nocover). Missing PNGs fall back to the default theme's (`dark`), then to unicode glyphs. `theme::load_icons` decodes them synchronously into egui textures at startup and on skin switch (NO egui async loader — the URI loader path showed pending/error placeholders and stretched buttons).
+- `src/gui/panes/{now_playing,playlist,equalizer,library,visualizer,album_cover}.rs` — one free function per pane, each taking `(app: &mut TPlayApp, ui: &mut egui::Ui)`. Position-independent — work identically docked anywhere.
 - `src/library.rs` — pure logic: directory listing, tag/duration reading via `lofty`, background scan thread (`scan_files` + mpsc), `TrackInfo` cache, sorting (`sort_key` with DEL prefix for empty values), playlist read/write (`.tplay` JSON).
 - `src/audio/mod.rs` — file-level helpers, no playback logic:
   - `probe_duration` — symphonia-based duration probe; fallback when rodio's `Decoder::total_duration()` is None (mainly MP3). This is why `symphonia` is a direct dep.
@@ -54,7 +54,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 | serde / serde_json | playlist save/load (JSON) + dock layout (JSON via serde) |
 | dirs | cross-platform config directory (`~/.config/tplay/`) |
 | egui_dock | docking layout: tab drag/split/tear-off; serde for layout persistence |
-| image (png-only) | decodes theme icons (PNG → egui texture) synchronously at startup / skin switch |
+| image (png+jpeg) | decodes theme icons (PNG → egui texture) synchronously at startup / skin switch, and album covers (PNG/JPEG, format sniffed from bytes) in the Album Cover pane |
 | lofty | audio tag reading for every pane's track display — ID3v2, Vorbis comments, MP4 ilst, RIFF INFO (artist/album/year/genre/track + duration) |
 
 ---
@@ -106,6 +106,16 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
  
 ---
  
+## Album Cover
+ 
+- Dockable pane (**Album Cover**), closed by default, auto-listed in the ☰ menu. Library `read_cover` helper plus the theme `nocover` placeholder icon — no new theme tokens, no new app state (the texture cache lives in egui memory).
+- **Art source** (`library::read_cover`): the currently playing track's embedded tag picture (lofty `tag.pictures()`, first one), else a cover file beside the track (`folder.jpg`/`Folder.jpg`/`cover.jpg`/`Cover.jpg`/`folder.png`/`cover.png` — `COVER_FILES`, same house-constant style as `AUDIO_EXTENSIONS`). Reads on demand when the track changes — **not** part of the folder tag scan, so no MBs of art bytes in the background cache.
+- **Decode**: `image::load_from_memory` (PNG+JPEG features) sniffs the format from magic bytes — no mime plumbing. Synchronous on the UI thread, one decode per track change (small, single-digit ms).
+- **Cache**: egui memory under `tplay.cover` holds `(path, Option<TextureHandle>)` — keyed by the playing track's path, so a track with no art re-reads nothing until the track changes (the `None` half caches "checked, no art").
+- **Drawing**: full-rect `ui.painter()`, `p.bg` fill like the Visualizer, art letterboxed centered with aspect ratio preserved; no art → the theme's `nocover.png` placeholder (128×128, panel_bg rounded square + text_secondary note, baked at generation; fallback chain: own → default theme → 🎵 glyph via `painter.text`), centered at pane-relative size. `scroll_bars = [false, false]` like the EQ/Visualizer panes.
+ 
+---
+ 
 ## Library
 
 - Filesystem browser (`TPlayApp::navigate_to`): the current folder's subfolders + audio files rendered as one combined row list (`library::Entry::Dir`/`File`), `..` row to move up. Subfolders are `📁` rows, audio files are tag-table rows. Dot-prefixed (hidden) subfolders are skipped by default — a "Show hidden folders" checkbox in the ☰ menu toggles it (`TPlayApp::show_hidden`/`set_show_hidden`, persisted in `config.json`).
@@ -128,7 +138,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 - All colors flow from each theme's JSON `Palette` tokens mirroring the reference CSS custom properties. Panes paint rows/labels/metadata straight from tokens via `app.theme().palette` (the `metadata_font` from `app.theme().metadata_font`).
 - Token → egui `Visuals` mapping (see docs on `theme::apply`): `--bg` → panel/window fill, `--text-primary` → `override_text_color`, `--progress-fill` → `selection.bg_fill` (the slider's trailing fill), `--slider-track` → `inactive.bg_fill` (rail), `--slider-handle` → `inactive.fg_stroke` (knob), `--focus-ring` → `selection.stroke`, `--accent` → hyperlink/active fill. `--row-even/odd` and `--text-secondary` can't be expressed in Visuals — panes use them directly.
 - Theme files are plain JSON + PNGs — creating/modifying a theme is drop-in editing, no rebuild. Theme selection persists in `~/.config/tplay/config.json`; config absence or unknown id = `dark`.
-- Icons: `themes/<id>/icons/<name>.png` (17 fixed names). Resolution: own file → default theme's file → glyph. Preloaded synchronously into `egui::TextureHandle`s (`TPlayApp.icons`, one per `Icon::ALL` slot) at startup and in `set_theme`; `app.theme_icon(Icon)` hands them to `theme::icon_button`/`theme::icon`. The 7 newer icons (sort/star/folder/window chrome) are generated 20×20 PNGs with colors baked from each theme's `theme.json` palette tokens at generation time (accent / text_secondary / text_primary) — no runtime tinting, matching the hand-drawn transport icons' convention.
+- Icons: `themes/<id>/icons/<name>.png` (18 fixed names). Resolution: own file → default theme's file → glyph. Preloaded synchronously into `egui::TextureHandle`s (`TPlayApp.icons`, one per `Icon::ALL` slot) at startup and in `set_theme`; `app.theme_icon(Icon)` hands them to `theme::icon_button`/`theme::icon`. The 7 newer icons (sort/star/folder/window chrome) are generated 20×20 PNGs with colors baked from each theme's `theme.json` palette tokens at generation time (accent / text_secondary / text_primary) — no runtime tinting, matching the hand-drawn transport icons' convention. `nocover.png` (the Album Cover pane's placeholder) is generated the same way but at 128×128 so it stays crisp scaled to pane size.
 - Retro: light Winamp grays + blue (`accent`/`progress_fill`/`focus_ring` = `#15449e`, a darker royal blue than the original — measured to keep accent-as-text ≥ 4.5:1 on the light surfaces), `metadata_font: monospace` for times/metadata (monospace digits are tabular — the seek-bar time labels can't jitter in retro). Neon: near-black blue + mint accent/pink progress.
 - **Layout tokens**: each theme may include a `layout` object with EQ sizing values (`eq_slider_min_h`, `eq_slider_max_h`, `eq_band_w_min`, `eq_header_gap`, `eq_band_gap`), the type scale (`text_meta` 12px, `text_time` 13px — threaded through every pane's label/font sizes, no magic sizes in pane code), and the active-row tint alpha (`row_tint_alpha`, default 0.10). These drive the equalizer pane's minimum/maximum slider height, minimum band width (the dock floors the pane's width at `10 × eq_band_w_min` — default 30, so the floor (300px) fits inside the 320px minimum window since the band row clips below it — no scrollbars), spacing, and the row highlight, replacing hardcoded values. Defaults live in code (`Layout::with_defaults`).
 - **Active-row tint**: `theme::row` paints a *translucent* accent overlay (`row_tint_alpha` alpha) over the banded bg plus a 3px accent stripe — not `accent.gamma_multiply()`, which crushed to near-black and rendered the highlight invisible. The overlay keeps title text ≥ 9:1 in every theme (see `contrast_tests`).
@@ -149,8 +159,8 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 
 ## Docking (egui_dock)
 
-- Five panes as tabs: **Now Playing**, **Playlist**, **Equalizer**, **Library**, **Visualizer**
-- **Pane sizing**: per-pane `PaneSizing` policy in coordinator.rs — `Fill` panes (Playlist, Equalizer, Library) take their dock share and resize via separator drag; `Fixed` panes (Now Playing) are pinned to their measured content height each frame (the Now Playing pane records its scope height to egui memory under `tplay.pane_content_h`, and `apply_min_pane_sizes` rewrites the enclosing split's `fraction` before `DockArea::show`, so the separator snaps back — no empty dead zone below the controls). Minimum floors are enforced twice per frame: `apply_min_pane_sizes` runs before `DockArea::show`, and again **after** it (the splitter drag and floating-window resize happen inside `show()` and ignore the floors), then `ctx.request_repaint()` lands the corrected fractions next frame - so dragging below the EQ sliders' minimum height snaps back instead of sticking.
+- Six panes as tabs: **Now Playing**, **Playlist**, **Equalizer**, **Library**, **Visualizer**, **Album Cover**
+- **Pane sizing**: all panes are `Fill` — they take their dock share and resize via separator drag; `apply_min_pane_sizes` only *floors* every pane at its measured content size (Playlist/Equalizer/Library measure their bodies; Now Playing records its content height under `tplay.pane_content_h` and draws its controls **vertically centered** — the top pad is half of `available_height() - last frame's content height`, so it converges one frame after a resize). No pane is pinned; the old Now Playing "Fixed" behavior was removed. Minimum floors are enforced twice per frame: `apply_min_pane_sizes` runs before `DockArea::show`, and again **after** it (the splitter drag and floating-window resize happen inside `show()` and ignore the floors), then `ctx.request_repaint()` lands the corrected fractions next frame - so dragging below the EQ sliders' minimum height snaps back instead of sticking.
 - Default layout: top row (Now Playing tab) ~15%, bottom (Playlist) ~85%
 - Drag tabs to reorder; drag onto split overlays to dock left/right/top/bottom/center
 - Resize panes via draggable splitters
@@ -232,6 +242,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 | `PANE_CONTENT_W` | gui/coordinator.rs | `"tplay.pane_content_w"` (egui memory key) |
 | `DOCK_ID` | gui/coordinator.rs | `"tplay.dock_state"` (egui memory key) |
 | `DOCK_SAVED_JSON` | gui/coordinator.rs | `"tplay.dock_layout_saved"` (egui memory key) |
+| `COVER_ID` (fn `cover_id`) | gui/panes/album_cover.rs | `"tplay.cover"` (egui memory key — decoded cover cache) |
 | `SEEK_ID` | gui/panes/now_playing.rs | `"tplay.seek"` (egui memory key) |
 | `LIB_INIT` | gui/panes/library.rs | `"tplay.library.init"` (egui memory key) |
 | `LIB_QUERY` | gui/panes/library.rs | `"tplay.library.query"` (egui memory key) |

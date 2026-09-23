@@ -32,10 +32,10 @@ fn format_freq_uses_k_for_kilohertz() {
 
 #[test]
 fn pane_all_is_stable() {
-    assert_eq!(Pane::ALL.len(), 5);
+    assert_eq!(Pane::ALL.len(), 6);
     assert_eq!(
         Pane::ALL,
-        [Pane::NowPlaying, Pane::Playlist, Pane::Equalizer, Pane::Library, Pane::Visualizer]
+        [Pane::NowPlaying, Pane::Playlist, Pane::Equalizer, Pane::Library, Pane::Visualizer, Pane::AlbumCover]
     );
 }
 

@@ -14,6 +14,13 @@ use std::time::Duration;
 /// The audio extensions this player can play (mirrors the file dialog filter).
 const AUDIO_EXTENSIONS: [&str; 5] = ["mp3", "wav", "ogg", "flac", "m4a"];
 
+/// Cover art filenames to fall back to when a track has no embedded art.
+/// `folder.jpg` is the classic album-folder convention, `cover.jpg` is common
+/// from Linux rippers; PNG variants exist too. Checked in the track's own dir.
+const COVER_FILES: [&str; 6] = [
+    "folder.jpg", "Folder.jpg", "cover.jpg", "Cover.jpg", "folder.png", "cover.png",
+];
+
 pub fn is_audio(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -99,6 +106,25 @@ pub fn read_info(path: &Path) -> Option<TrackInfo> {
             if d.is_zero() { crate::audio::probe_duration(path) } else { Some(d) }
         },
     })
+}
+
+/// Embedded album art for one file, falling back to a cover file beside it
+/// (`folder.jpg`/`cover.jpg`/…, see `COVER_FILES`). Returns raw image bytes;
+/// `read_info`'s sibling for the Album Cover pane. `None` when the file has
+/// neither — the caller draws the themed placeholder.
+pub fn read_cover(path: &Path) -> Option<Vec<u8>> {
+    if let Ok(tagged) = lofty::read_from_path(path) {
+        let tag = tagged.primary_tag().or_else(|| tagged.first_tag());
+        if let Some(pic) = tag.and_then(|t| t.pictures().first()) {
+            return Some(pic.data().to_vec());
+        }
+    }
+    let dir = path.parent()?;
+    COVER_FILES
+        .iter()
+        .map(|f| dir.join(f))
+        .find(|p| p.is_file())
+        .and_then(|p| std::fs::read(p).ok())
 }
 
 /// Entries in a directory: subfolders first then audio files, each sorted
