@@ -12,6 +12,10 @@ const DOCK_LAYOUT_FILE: &str = "dock_layout.json";
 const DOCK_ID: &str = "tplay.dock_state";
 /// egui memory key: serialized layout JSON currently on disk (seeded at startup).
 const DOCK_SAVED_JSON: &str = "tplay.dock_layout_saved";
+/// egui memory key: tracked named layout file (for save-over, like playlist_file).
+const NAMED_LAYOUT_FILE: &str = "tplay.named_layout_file";
+/// Directory name under config for named layout files.
+const LAYOUTS_DIR: &str = "layouts";
 /// egui memory key: measured natural body height of a pane's content.
 const PANE_CONTENT_H: &str = "tplay.pane_content_h";
 /// egui memory key: measured minimum body width of a pane's content.
@@ -143,6 +147,37 @@ fn layout_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("tplay").join(DOCK_LAYOUT_FILE))
 }
 
+fn layouts_dir() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("tplay").join(LAYOUTS_DIR))
+}
+
+/// Save a DockState to a JSON file at the given path (creates parent dirs).
+fn save_layout(tree: &DockState<Pane>, path: &std::path::Path) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, serde_json::to_string(tree).unwrap_or_default());
+}
+
+/// Load a DockState from a JSON file. Returns None if the file is missing,
+/// unreadable, or contains invalid JSON.
+fn load_layout(path: &std::path::Path) -> Option<DockState<Pane>> {
+    std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok())
+}
+
+/// List all *.json files in the layouts dir, sorted by file name.
+fn list_layouts(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut files: Vec<_> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
+        .map(|e| e.path())
+        .collect();
+    files.sort();
+    files
+}
+
 /// Update the UI for one frame. Called from TPlayApp::update().
 pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
     // Theme tokens -> egui visuals, every frame so a mid-session switch lands instantly.
@@ -191,6 +226,12 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
             let win_close_tex = app.theme_icon(theme::Icon::Remove).cloned();
             let win_max_tex = app.theme_icon(theme::Icon::Maximize).cloned();
             let win_min_tex = app.theme_icon(theme::Icon::Minimize).cloned();
+
+            // Precompute layouts dir and tracked layout once per frame for the menu.
+            let layouts_dir = layouts_dir();
+            let layout_files = layouts_dir.as_ref().map(|d| list_layouts(d.as_ref())).unwrap_or_default();
+            let tracked_layout = ctx.data(|d| d.get_temp::<String>(egui::Id::new(NAMED_LAYOUT_FILE)));
+
             let menu_contents = |ui: &mut egui::Ui| {
                 let open_count = Pane::ALL.iter().filter(|p| pane_is_open(&tree, **p)).count();
                 for pane in Pane::ALL {
@@ -223,6 +264,70 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
                 let mut show_hidden = app.show_hidden();
                 if ui.checkbox(&mut show_hidden, "Show hidden folders").changed() {
                     app.set_show_hidden(show_hidden);
+                }
+                // Layouts section
+                ui.separator();
+                ui.label("Layouts");
+                // Saved layouts from the layouts/ directory
+                for path in &layout_files {
+                    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("layout");
+                    ui.horizontal(|ui| {
+                        if ui.selectable_label(false, stem).clicked() {
+                            if let Some(loaded) = load_layout(path) {
+                                tree = loaded;
+                                ctx.data_mut(|d| d.insert_temp(egui::Id::new(NAMED_LAYOUT_FILE), path.to_string_lossy().into_owned()));
+                                ui.close_menu();
+                            }
+                        }
+                        // Delete button (✕) — uses the same remove icon as window close
+                        if theme::icon_button(ui, win_close_tex.as_ref(), theme::Icon::Remove, 13.0, true, false)
+                            .on_hover_text(format!("Delete saved layout \"{stem}\""))
+                            .clicked()
+                        {
+                            if TPlayApp::confirm("Delete layout", &format!("Remove saved layout \"{stem}\"?"), true) {
+                                let _ = std::fs::remove_file(path);
+                                // Clear tracking if this was the tracked layout
+                                if tracked_layout.as_deref() == Some(path.to_string_lossy().as_ref()) {
+                                    ctx.data_mut(|d| d.insert_temp(egui::Id::new(NAMED_LAYOUT_FILE), String::new()));
+                                }
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                }
+                // Save current layout… (overwrites tracked file if any, else dialog)
+                let save_hover = tracked_layout
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(|p| format!("Overwrite layout: {}", p))
+                    .unwrap_or_else(|| "Save the current dock layout to a file".into());
+                if ui.button("Save current layout…").on_hover_text(save_hover).clicked() {
+                    let mut dialog = rfd::FileDialog::new()
+                        .add_filter("TPlay layout", &["json"])
+                        .set_file_name("layout.json");
+                    if let Some(dir) = &layouts_dir {
+                        dialog = dialog.set_directory(dir);
+                    }
+                    if let Some(path) = dialog.save_file() {
+                        save_layout(&tree, &path);
+                        ctx.data_mut(|d| d.insert_temp(egui::Id::new(NAMED_LAYOUT_FILE), path.to_string_lossy().into_owned()));
+                    }
+                    ui.close_menu();
+                }
+                // Load layout… (any file, tracks it)
+                if ui.button("Load layout…").clicked() {
+                    let mut dialog = rfd::FileDialog::new()
+                        .add_filter("TPlay layout", &["json"]);
+                    if let Some(dir) = &layouts_dir {
+                        dialog = dialog.set_directory(dir);
+                    }
+                    if let Some(path) = dialog.pick_file() {
+                        if let Some(loaded) = load_layout(&path) {
+                            tree = loaded;
+                            ctx.data_mut(|d| d.insert_temp(egui::Id::new(NAMED_LAYOUT_FILE), path.to_string_lossy().into_owned()));
+                        }
+                    }
+                    ui.close_menu();
                 }
             };
             ui.horizontal(|ui| {
@@ -319,8 +424,7 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
         let saved = ctx.data(|d| d.get_temp::<String>(egui::Id::new(DOCK_SAVED_JSON))).unwrap_or_default();
         let closing = ctx.input(|i| i.viewport().close_requested());
         if json != saved || closing {
-            if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
-            let _ = std::fs::write(&path, &json);
+            save_layout(&tree, &path);
             ctx.data_mut(|d| d.insert_temp(egui::Id::new(DOCK_SAVED_JSON), json));
         }
     }

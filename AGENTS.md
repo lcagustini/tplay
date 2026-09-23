@@ -35,6 +35,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
   - `playlist_shuffle.rs` — reset semantics (remove/move/play_track/toggle) and newly-added tracks joining the unplayed pool.
   - `contrast_tests.rs` — WCAG contrast verification of the *bundled* themes: text (primary/secondary/accent) on every surface ≥ 4.5:1, UI components (focus ring, progress fill, slider handle) ≥ 3:1, and the active-row tint composite keeping title text ≥ 4.5:1. `eq_band_w_min` floor ≤ 320px window. Guards palette regressions.
   - `ui_polish_tests.rs` — theme-app behavior: `apply` zeroes `animation_time` (instant switch) and maps tokens to `Visuals`; new layout tokens (`text_meta`/`text_time`/`row_tint_alpha`) round-trip through `load_from`; the 10 × `eq_band_w_min` floor stays under the minimum window.
+  - `layout_save_load.rs` — named layout save/load round-trips through the coordinator helpers: `save_layout`/`load_layout`/`list_layouts` + the finite-viewport fix for serde stability.
 
 ## Build / verify
 
@@ -140,9 +141,10 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 - Drag tabs to reorder; drag onto split overlays to dock left/right/top/bottom/center
 - Resize panes via draggable splitters
 - Tear tabs off into floating windows
-- Close pane via tab X button (disabled — panes close via the ☰ menu checkbox); reopen via the ☰ menu button (app logo, per-theme `logo.png`) at top-left, which also lists the Theme selector (theme switcher)
+- Close pane via tab X button (disabled — panes close via the ☰ menu checkbox); reopen via the ☰ menu button (app logo, per-theme `logo.png`) at top-left, which also lists the Theme selector (theme switcher) and the **Layouts** section
 - Tab bodies are wrapped in a ScrollArea by egui_dock; the EQ pane disables both scrollbars (`scroll_bars` → `[false, false]`) and sizes its 10 bands to the pane width, so nothing can overflow
 - Layout auto-saves to `~/.config/tplay/dock_layout.json` (JSON via serde) on layout change or app close, and restores on startup
+- **Named layouts** (☰ menu → Layouts): save the current dock arrangement to `~/.config/tplay/layouts/<name>.json`; the menu lists every saved layout by stem — click to load, ✕ to delete. **Save current layout…** overwrites the tracked layout file if one exists (like playlists' `playlist_file`), otherwise opens a native save dialog defaulting to the layouts dir. **Load layout…** opens any layout file from anywhere and tracks it for future saves. Tracking is session-local (restart restores via `dock_layout.json`).
 - **Window controls**: decorations are off (no native title bar — `main.rs`), so the top bar carries its own right-aligned controls — minimize, maximize/restore, close — drawn from the per-theme `minimize`/`maximize`/`remove` (✕) icons via `theme::icon_button` (the old 🗕/🗖/🗙 emoji glyphs tofu'd). The bar itself drags the window via `StartDrag` (a bottom-of-z-stack `interact`); the menu logo and the control buttons drawn after still win their own clicks.
 - The ☰ menu also carries the "Show hidden folders" checkbox (Library toggle).
 
@@ -188,6 +190,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 |---|---|
 | `~/.config/tplay/config.json` | unified app settings (theme, EQ, shuffle, repeat, volume, last playlist, library state) |
 | `~/.config/tplay/dock_layout.json` | egui_dock layout (tabs, splits, floating windows) |
+| `~/.config/tplay/layouts/<name>.json` | named dock layout (tabs, splits, floating windows) — created via ☰ menu |
 | `~/.config/tplay/themes/<id>/theme.json` | user theme override (wins on id clash) |
 | `<exe_dir>/themes/<id>/theme.json` | shipped themes (dark, retro, neon) |
 | `./themes/<id>/theme.json` | dev themes (cargo run from repo root) |
@@ -204,9 +207,12 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 | `SORT_OPTIONS` | library.rs | 6 library columns |
 | `DEFAULT_THEME_ID` | gui/theme.rs | `"dark"` |
 | `DOCK_LAYOUT_FILE` | gui/coordinator.rs | `"dock_layout.json"` |
+| `LAYOUTS_DIR` | gui/coordinator.rs | `"layouts"` (named layouts subdir) |
+| `NAMED_LAYOUT_FILE` | gui/coordinator.rs | `"tplay.named_layout_file"` (egui memory key) |
 | `PANE_CONTENT_H` | gui/coordinator.rs | `"tplay.pane_content_h"` (egui memory key) |
 | `PANE_CONTENT_W` | gui/coordinator.rs | `"tplay.pane_content_w"` (egui memory key) |
 | `DOCK_ID` | gui/coordinator.rs | `"tplay.dock_state"` (egui memory key) |
+| `DOCK_SAVED_JSON` | gui/coordinator.rs | `"tplay.dock_layout_saved"` (egui memory key) |
 | `SEEK_ID` | gui/panes/now_playing.rs | `"tplay.seek"` (egui memory key) |
 | `LIB_INIT` | gui/panes/library.rs | `"tplay.library.init"` (egui memory key) |
 | `LIB_QUERY` | gui/panes/library.rs | `"tplay.library.query"` (egui memory key) |
@@ -233,7 +239,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 | Add EQ preset | `app.rs` (`EQ_PRESETS` array) |
 | Add audio format | `library.rs` (`AUDIO_EXTENSIONS`), `app.rs` (`audio_dialog` filter), Cargo.toml (rodio features) |
 | Change a pane's UI | the one function in `gui/panes/<pane>.rs` |
-| Change docking behavior | `gui/coordinator.rs` (`apply_min_pane_sizes`, `default_tree`) |
+| Change docking behavior | `gui/coordinator.rs` (`apply_min_pane_sizes`, `default_tree`, `save_layout`/`load_layout`/`list_layouts`, Layouts menu section) |
 | Add a config field | `app.rs` (`Config` struct + `save_config`/`load_config`) |
 | Change tag fields | `library.rs` (`TrackInfo`, `read_info`, `SORT_OPTIONS`, `sort_key`) |
 | Adjust seek behavior | `app.rs` (`seek`, `advance`, `load_file`) |

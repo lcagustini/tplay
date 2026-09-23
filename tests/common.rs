@@ -90,3 +90,17 @@ pub fn assert_duration_approx(actual: Option<Duration>, expected: Duration, msg:
         None => panic!("{} (got None, expected {:?})", msg, expected),
     }
 }
+
+/// Gives every node in a DockState a finite layout rect, like a rendered frame does.
+/// Never-painted leaves have Rect::NOTHING viewports that serialize as `null`,
+/// which serde_json can't parse back. This mirrors what a real session does.
+pub fn lay_out<T>(tree: &mut egui_dock::DockState<T>) {
+    use eframe::egui::{pos2, vec2, Rect};
+    let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0));
+    for i in 0..tree.surfaces_count() {
+        let surface = egui_dock::SurfaceIndex(i);
+        for node in tree[surface].iter_mut() {
+            node.set_rect(rect);
+        }
+    }
+}
