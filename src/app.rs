@@ -743,9 +743,7 @@ impl TPlayApp {
             .into_iter()
             .filter_map(|p| p.canonicalize().ok())
             .collect();
-        self.current_index = None;
-        self.current_path = None;
-        self.reset_shuffle();
+        self.stop();
         self.ensure_tags(self.playlist.clone());
         self.playlist_file = Some(path);
         self.playlist_dirty = false;

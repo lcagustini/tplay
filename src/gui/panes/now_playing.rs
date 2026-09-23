@@ -33,6 +33,28 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
 
     let body = ui.scope(|ui| {
         ui.vertical(|ui| {
+            // Track info: title, then artist · album — its own line on top of the
+            // time seeker. Tagged; the filename stands in until the tag scan lands
+            // (`load_file` reads the playing track up front, so this is already
+            // filled the moment a track starts).
+            let cur = app.current_path().map(|p| p.to_path_buf());
+            let info = cur.as_deref().and_then(|p| app.track_info(p));
+            let title = cur.as_deref().map(|p| library::title_or_stem(p, info)).unwrap_or_default();
+            if !title.is_empty() {
+                ui.label(meta(title, &theme, layout.text_time));
+                let artist = info.map(|i| i.artist.as_str()).unwrap_or_default();
+                let album = info.map(|i| i.album.as_str()).unwrap_or_default();
+                let sub = match (artist.is_empty(), album.is_empty()) {
+                    (true, true) => None,
+                    (true, false) => Some(album.to_owned()),
+                    (false, true) => Some(artist.to_owned()),
+                    (false, false) => Some(format!("{artist} · {album}")),
+                };
+                if let Some(sub) = sub {
+                    ui.label(meta(sub, &theme, layout.text_meta));
+                }
+            }
+
         // Progress row: elapsed | full-width seek bar | total.
         ui.horizontal(|ui| {
             let total_secs = app.total_duration().map(|d| d.as_secs_f32());
@@ -83,8 +105,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
 
         ui.add_space(8.0);
 
-        // Controls row: transport + volume, with track info sitting between
-        // them (mirrors the reference status-bar right group).
+        // Controls row: transport + volume.
         ui.horizontal(|ui| {
             // Prev track
             let prev_enabled = app.has_prev_track();
@@ -123,16 +144,6 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
             }
 
             ui.separator();
-
-            // Track info: title · artist (tagged; filename stands in until the tag
-            // scan lands — `load_file` reads the playing track up front, so
-            // this is already filled the moment a track starts).
-            let cur = app.current_path().map(|p| p.to_path_buf());
-            let info = cur.as_deref().and_then(|p| app.track_info(p));
-            let title = cur.as_deref().map(|p| library::title_or_stem(p, info)).unwrap_or_default();
-            let artist = info.map(|i| i.artist.as_str()).unwrap_or_default();
-            let label = if artist.is_empty() { title } else { format!("{title} · {artist}") };
-            ui.label(meta(label, &theme, layout.text_meta));
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Volume
