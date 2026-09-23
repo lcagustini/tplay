@@ -78,7 +78,7 @@ fn all_four_panes_survive_serialization() {
     let restored = round_trip(&tree);
     let tabs = tabs_of(&restored);
     assert_eq!(tabs.len(), 4);
-    for p in Pane::ALL {
+    for p in [Pane::NowPlaying, Pane::Playlist, Pane::Equalizer, Pane::Library] {
         assert!(tabs.contains(&p), "pane {p:?} lost in round trip");
     }
 }

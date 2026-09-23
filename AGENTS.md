@@ -92,7 +92,19 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 - **Sliders**: vertical, trailing fill (theme `--progress-fill`), height clamped to theme layout tokens (`eq_slider_min_h`..`eq_slider_max_h`). Band width dynamic: max 80px, shrinks with spacing to fit the pane; the pane width is floored at `10 × eq_band_w_min` (no scrollbars on the EQ pane). Frequency labels use the `text_meta` size. (A "scale the slider on press" effect isn't implemented — egui has no transform API for widgets; the drag already responds instantly with `animation_time = 0`.)
 
 ---
-
+ 
+## Visualizer
+ 
+- Dockable pane (**Visualizer**), closed by default, auto-listed in the ☰ menu. No new theme tokens, no new icons.
+- Header: **Bars / Wave** toggle, persisted in `config.json` (`viz_wave`) so the choice survives restarts.
+- Audio pipeline: `TapSource` wraps `EqSource` (post-EQ → visualizes exactly what you hear). Mono-downmixes, pushes into a capped ring buffer (`VizBuf`, ~100 ms / 4096 samples). `load_file` and `seek` append the tap; `load_file`/`stop()` clear the buffer.
+- **Bars mode**: 1024-point radix-2 FFT with Hann window → 32 log-spaced bands → dB-normalized (-60..0) → per-bin attack/release smoothing (classic WMP feel).
+- **Wave mode**: mirrored time-domain **peak envelope** downsampled from the ring buffer (one `|sample|` peak per ~2px display column, from a ~23 ms window), rendered as adjacent filled columns + outline strokes — column fills use `rect_filled` (polygon tessellation of raw sample waves rendered as garbage).
+- Drawing: full-rect `ui.painter()`, palette colors only (`accent`, `progress_fill`, `bg`), `scroll_bars = [false, false]` like the EQ pane.
+- No new dependencies — hand-rolled FFT and smoothing in `src/audio/viz.rs` (pure logic, tested without an audio device).
+ 
+---
+ 
 ## Library
 
 - Filesystem browser (`TPlayApp::navigate_to`): the current folder's subfolders + audio files rendered as one combined row list (`library::Entry::Dir`/`File`), `..` row to move up. Subfolders are `📁` rows, audio files are tag-table rows. Dot-prefixed (hidden) subfolders are skipped by default — a "Show hidden folders" checkbox in the ☰ menu toggles it (`TPlayApp::show_hidden`/`set_show_hidden`, persisted in `config.json`).
@@ -135,7 +147,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 
 ## Docking (egui_dock)
 
-- Four panes as tabs: **Now Playing**, **Playlist**, **Equalizer**, **Library**
+- Five panes as tabs: **Now Playing**, **Playlist**, **Equalizer**, **Library**, **Visualizer**
 - **Pane sizing**: per-pane `PaneSizing` policy in coordinator.rs — `Fill` panes (Playlist, Equalizer, Library) take their dock share and resize via separator drag; `Fixed` panes (Now Playing) are pinned to their measured content height each frame (the Now Playing pane records its scope height to egui memory under `tplay.pane_content_h`, and `apply_min_pane_sizes` rewrites the enclosing split's `fraction` before `DockArea::show`, so the separator snaps back — no empty dead zone below the controls). Minimum floors are enforced twice per frame: `apply_min_pane_sizes` runs before `DockArea::show`, and again **after** it (the splitter drag and floating-window resize happen inside `show()` and ignore the floors), then `ctx.request_repaint()` lands the corrected fractions next frame - so dragging below the EQ sliders' minimum height snaps back instead of sticking.
 - Default layout: top row (Now Playing tab) ~15%, bottom (Playlist) ~85%
 - Drag tabs to reorder; drag onto split overlays to dock left/right/top/bottom/center
@@ -155,6 +167,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 - **Seek fast/slow path** (`seek` in app.rs): try `sink.try_seek()`; if it fails, reopen the file and play through with `source.skip_duration(target)`. FLAC without a seektable cannot seek fast — hence the builder.
 - **EQ Source wrapper**: Custom `rodio::Source` that chains 10 biquad filters in series; applies per-sample in `next()`. Uses RBJ peaking EQ coefficients. Sample rate from inner source. Decoder outputs i16, converted to f32 via `convert_samples::<f32>()` before EQ. **EQ settings are live**: gains live in `Arc<RwLock<EqShared>>` shared with the GUI; `EqSource::refresh()` uses read locks (concurrent), UI uses write locks — no sink rebuild, no audio restart. 0 dB is an exact identity filter (RBJ peaking at A=1), so enabled/disabled needs no bypass path.
 - **FLAC seektable build**: loading an FLAC lacking a SEEKTABLE block spawns a thread running `build_flac_seektable` (~1 s). Field `seektable_ready: Option<Arc<AtomicBool>>`: `Some(flag)` while building, `None` = file already had one or isn't FLAC (fast path allowed, via `unwrap_or(true)` in `seek`). While building, seeks fall to the slow path.
+- **Visualization tap source** (`src/audio/viz.rs`): `TapSource` wraps `EqSource` (post-EQ) and mono-downmixes into a capped ring buffer (`VizBuf`, 4096 samples ≈ 93 ms). The GUI snapshots the tail each frame, runs a 1024-point radix-2 FFT with Hann window, maps to 32 log-spaced bands, dB-normalizes, and applies per-bin attack/release smoothing. Both `load_file` and `seek` append the tap; `load_file`/`stop()` clear the buffer so stopped playback shows flat idle. Pure logic — no audio device needed for tests.
   - **Phase 1**: read STREAMINFO (extract sample_rate) and locate the PADDING block (position, length, is_last).
   - **Phase 2**: walk audio packets via the symphonia demuxer (frame headers only, no decoding) to collect byte offsets at ~1-second intervals (sample_rate samples apart).
   - **Phase 3**: overwrite the PADDING block with a SEEKTABLE (18-byte entries). Remainder handling: <4 leftover bytes → sacrifice one slot; ≥4 leftover bytes → write a trailing PADDING block.
@@ -166,7 +179,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 - **Shuffle order**: `played: Vec<usize>` is the history of indices played in this shuffle cycle. `next_track_index` picks random from the unplayed pool; `prev_track_index` pops from `played`. `repeat=true` restarts the cycle when the pool is exhausted. Clicking a track directly resets shuffle (`played.clear()`). Reordering/deleting calls `reset_shuffle()`.
 - **Dock state in egui Memory**: `DockState<Pane>` lives in `ctx.data()` under `tplay.dock_state`. Pure UI state — not in `TPlayApp`. Layout persists to disk each frame.
 - **Shared tag scan**: one cache (`tag_cache`) + one background `scan_files` thread serve every pane. `TPlayApp::ensure_tags(paths)` starts the scan for whatever's missing from the cache (dropping any in-flight receiver — per-path cache means a dropped scan just restarts next request); results drain per frame in `drain_tag_scan`, the app's only other thread besides the FLAC seektable builder. Triggers: library `navigate_to`, playlist `add_files`, `load_playlist_from`. `load_file` reads the playing track's tags inline (one file) so Now Playing shows title · artist immediately. `library_scanning()` recomputes as "any current-folder file missing from the cache".
-- **Appwide settings**: one `~/.config/tplay/config.json` holds everything — theme, EQ (enabled + gains), shuffle/repeat, volume, last loaded playlist, and the library state (favorites, last dir, show hidden). Saved via `TPlayApp::save_config()` on any change, loaded once in `new()`. Shuffle/repeat are global playback modes — loading a playlist never touches them. Volume is applied to the sink at startup. The last loaded `.tplay` (`last_playlist`) is re-loaded on startup (Library + tag scan + tracked file all restored), so Save Playlist keeps overwriting the same file across sessions.
+- **Appwide settings**: one `~/.config/tplay/config.json` holds everything — theme, EQ (enabled + gains), shuffle/repeat, visualizer mode (`viz_wave`), volume, last loaded playlist, and the library state (favorites, last dir, show hidden). Saved via `TPlayApp::save_config()` on any change, loaded once in `new()`. Shuffle/repeat are global playback modes — loading a playlist never touches them. Volume is applied to the sink at startup. The last loaded `.tplay` (`last_playlist`) is re-loaded on startup (Library + tag scan + tracked file all restored), so Save Playlist keeps overwriting the same file across sessions.
   - **Config JSON structure**:
     ```json
     {
@@ -174,6 +187,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
       "eq": { "enabled": false, "gains": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] },
       "shuffle": false,
       "repeat": false,
+      "viz_wave": false,
       "volume": 1.0,
       "last_playlist": "/path/to/playlist.tplay",
       "library": { "favorites": ["/path/to/fav"], "last_dir": "/path/to/music", "show_hidden": false }
@@ -205,6 +219,9 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 | `EQ_FREQUENCIES` | audio/eq.rs | 10 band frequencies (Hz) — same constant drives filters and UI labels |
 | `EQ_PRESETS` | app.rs | 7 named gain curves |
 | `SORT_OPTIONS` | library.rs | 6 library columns |
+| `VIZ_BANDS` | audio/viz.rs | 32 log-spaced output bands for drawing |
+| `FFT_SIZE` | audio/viz.rs | 1024-point FFT window |
+| `VIZ_BUFFER_CAP` | audio/viz.rs | 4096 mono samples ring buffer cap |
 | `DEFAULT_THEME_ID` | gui/theme.rs | `"dark"` |
 | `DOCK_LAYOUT_FILE` | gui/coordinator.rs | `"dock_layout.json"` |
 | `LAYOUTS_DIR` | gui/coordinator.rs | `"layouts"` (named layouts subdir) |
@@ -239,6 +256,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 | Add EQ preset | `app.rs` (`EQ_PRESETS` array) |
 | Add audio format | `library.rs` (`AUDIO_EXTENSIONS`), `app.rs` (`audio_dialog` filter), Cargo.toml (rodio features) |
 | Change a pane's UI | the one function in `gui/panes/<pane>.rs` |
+| Change visualizer rendering | `gui/panes/visualizer.rs` (bars/wave draw), `audio/viz.rs` (FFT/smoothing) |
 | Change docking behavior | `gui/coordinator.rs` (`apply_min_pane_sizes`, `default_tree`, `save_layout`/`load_layout`/`list_layouts`, Layouts menu section) |
 | Add a config field | `app.rs` (`Config` struct + `save_config`/`load_config`) |
 | Change tag fields | `library.rs` (`TrackInfo`, `read_info`, `SORT_OPTIONS`, `sort_key`) |

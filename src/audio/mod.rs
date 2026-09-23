@@ -1,6 +1,7 @@
-//! Audio file handling — duration probing and format-specific processing.
+//! Audio file handling — duration probing, format-specific processing, and visualization.
 
 pub mod eq;
+pub mod viz;
 
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};

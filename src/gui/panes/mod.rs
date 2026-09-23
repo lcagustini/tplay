@@ -4,3 +4,4 @@ pub mod equalizer;
 pub mod library;
 pub mod now_playing;
 pub mod playlist;
+pub mod visualizer;

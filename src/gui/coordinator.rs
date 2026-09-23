@@ -79,6 +79,7 @@ fn pane_title(pane: Pane) -> egui::WidgetText {
         Pane::Playlist => "Playlist".into(),
         Pane::Equalizer => "Equalizer".into(),
         Pane::Library => "Library".into(),
+        Pane::Visualizer => "Visualizer".into(),
     }
 }
 
@@ -126,6 +127,7 @@ impl TabViewer for PaneViewer<'_> {
             Pane::Playlist => panes::playlist::playlist_pane(self.app, ui),
             Pane::Equalizer => panes::equalizer::equalizer_pane(self.app, ui),
             Pane::Library => panes::library::library_pane(self.app, ui),
+            Pane::Visualizer => panes::visualizer::visualizer_pane(self.app, ui),
         }
     }
 
@@ -135,9 +137,10 @@ impl TabViewer for PaneViewer<'_> {
 
     // The EQ pane sizes its bands to fit the pane width; hide the tab-level
     // scrollbars (egui_dock wraps tab bodies in a ScrollArea by default).
+    // Visualizer does the same (full-rect painting, no scroll).
     fn scroll_bars(&self, tab: &Pane) -> [bool; 2] {
         match tab {
-            Pane::Equalizer => [false, false],
+            Pane::Equalizer | Pane::Visualizer => [false, false],
             _ => [true, true],
         }
     }

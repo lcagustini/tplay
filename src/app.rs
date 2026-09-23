@@ -28,10 +28,10 @@ fn rand_usize(state: &mut u64, max: usize) -> usize {
 
 // Docking panes (egui_dock) - used by GUI layer only
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Debug)]
-pub enum Pane { NowPlaying, Playlist, Equalizer, Library }
+pub enum Pane { NowPlaying, Playlist, Equalizer, Library, Visualizer }
 
 impl Pane {
-    pub const ALL: [Pane; 4] = [Pane::NowPlaying, Pane::Playlist, Pane::Equalizer, Pane::Library];
+    pub const ALL: [Pane; 5] = [Pane::NowPlaying, Pane::Playlist, Pane::Equalizer, Pane::Library, Pane::Visualizer];
 }
 
 /// Unified config — single JSON file. Dock layout stays separate.
@@ -45,6 +45,8 @@ pub struct Config {
     pub shuffle: bool,
     #[serde(default)]
     pub repeat: bool,
+    #[serde(default)]
+    pub viz_wave: bool,
     #[serde(default = "default_volume")]
     pub volume: f32,
     #[serde(default)]
@@ -152,6 +154,10 @@ pub struct TPlayApp {
 
     /// Equalizer state — single source of truth shared with EqSource.
     eq_shared: Arc<RwLock<audio::eq::EqShared>>,
+    /// Visualization ring buffer — written by the tap source, read by the GUI.
+    viz: audio::viz::VizBuf,
+    /// Visualizer pane mode: false = Bars, true = Wave. Persisted in config.json.
+    viz_wave: bool,
 
 
     /// Theme (loaded from themes/ dirs), applied to egui visuals by the GUI layer.
@@ -226,6 +232,8 @@ impl TPlayApp {
                 gains: config.eq.gains,
                 enabled: config.eq.enabled,
             })),
+            viz: audio::viz::VizBuf::new(),
+            viz_wave: config.viz_wave,
             theme,
             themes,
             icons,
@@ -293,6 +301,7 @@ impl TPlayApp {
             },
             shuffle: self.shuffle,
             repeat: self.repeat,
+            viz_wave: self.viz_wave,
             volume: self.volume,
             last_playlist: self.playlist_file.as_ref().and_then(|p| p.to_str()).map(str::to_owned),
             library: LibraryData {
@@ -322,6 +331,7 @@ impl TPlayApp {
     fn load_file(&mut self, path: PathBuf) {
         self.seek_target     = None;
         self.seektable_ready = None;
+        self.viz.clear();
 
         match Sink::try_new(&self.stream_handle) {
             Ok(s) => { self.sink = s; self.sink.set_volume(self.volume); }
@@ -354,7 +364,8 @@ impl TPlayApp {
                         .or_else(|| audio::probe_duration(&path));
                     let source = source.convert_samples::<f32>();
                     let eq_source = audio::eq::EqSource::new(source, Arc::clone(&self.eq_shared));
-                    self.sink.append(eq_source);
+                    let tap_source = audio::viz::TapSource::new(eq_source, self.viz.clone());
+                    self.sink.append(tap_source);
                     self.current_path = Some(path);
                 }
                 Err(e) => {
@@ -469,7 +480,8 @@ impl TPlayApp {
         }
         self.sink.set_volume(self.volume);
         let eq_source = audio::eq::EqSource::new(source.skip_duration(target), Arc::clone(&self.eq_shared));
-        self.sink.append(eq_source);
+        let tap_source = audio::viz::TapSource::new(eq_source, self.viz.clone());
+        self.sink.append(tap_source);
         if was_paused { self.sink.pause(); }
     }
 
@@ -536,6 +548,7 @@ impl TPlayApp {
         self.total_duration = None;
         self.seek_target = None;
         self.seektable_ready = None;
+        self.viz.clear();
         self.reset_shuffle();
     }
 
@@ -888,6 +901,20 @@ impl TPlayApp {
     pub fn current_index(&self) -> Option<usize> { self.current_index }
     pub fn shuffle(&self) -> bool { self.shuffle }
     pub fn repeat(&self) -> bool { self.repeat }
+    /// Visualization buffer (shared with the tap source).
+    pub fn viz(&self) -> &audio::viz::VizBuf { &self.viz }
+
+    /// Visualizer pane mode — false = Bars, true = Wave.
+    pub fn viz_wave(&self) -> bool { self.viz_wave }
+
+    /// Set the visualizer mode; persists to config.json immediately.
+    pub fn set_viz_wave(&mut self, wave: bool) {
+        if self.viz_wave == wave {
+            return;
+        }
+        self.viz_wave = wave;
+        self.save_config();
+    }
 
     pub fn library_dir(&self) -> &std::path::Path { &self.library_dir }
     pub fn library_entries(&self) -> &[library::Entry] { &self.library_entries }

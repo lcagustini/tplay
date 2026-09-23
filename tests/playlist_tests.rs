@@ -5,7 +5,7 @@ use tplay::app::EQ_PRESETS;
 use std::path::PathBuf;
 #[path = "common.rs"]
 mod common;
-use crate::common::{test_dir, temp_dir};
+use crate::common::test_dir;
 
 #[test]
 fn playlist_write_read_roundtrip() {
@@ -159,7 +159,7 @@ fn shuffle_prev_pops_history() {
     // Play 3 tracks
     let t1 = shuffle_next(len, &mut played, &mut rng, false).unwrap();
     let t2 = shuffle_next(len, &mut played, &mut rng, false).unwrap();
-    let t3 = shuffle_next(len, &mut played, &mut rng, false).unwrap();
+    let _t3 = shuffle_next(len, &mut played, &mut rng, false).unwrap();
 
     // Go back
     let prev = shuffle_prev(len, &mut played, false).unwrap();

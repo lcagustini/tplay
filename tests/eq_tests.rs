@@ -1,6 +1,6 @@
 //! Equalizer logic tests — RBJ coefficients, biquad processing, EqSource behavior.
 
-use tplay::audio::eq::{peaking_eq_coeffs, Biquad, EQ_FREQUENCIES, EqShared};
+use tplay::audio::eq::{peaking_eq_coeffs, Biquad, EQ_FREQUENCIES};
 use std::f32::consts::PI;
 
 #[test]
@@ -64,7 +64,7 @@ fn biquad_zero_gain_passes_through() {
 #[test]
 fn biquad_state_persists_across_samples() {
     let mut bq = Biquad::new(44100, 1000.0, 6.0);
-    let out1 = bq.process(1.0);
+    let _out1 = bq.process(1.0);
     let out2 = bq.process(0.0);
     let out3 = bq.process(0.0);
     // With boost and zero input, state should decay (ringing)
