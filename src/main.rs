@@ -21,6 +21,11 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "TPlay",
         native_options,
-        Box::new(|cc| Ok(Box::new(app::TPlayApp::new(cc)))),
+        Box::new(|cc| {
+            // App-wide text fallback: a system font appended after egui's
+            // bundled fonts so any Unicode in tags renders (no tofu boxes).
+            gui::theme::install_fallback_fonts(&cc.egui_ctx, gui::theme::SYSTEM_FONT_CANDIDATES);
+            Ok(Box::new(app::TPlayApp::new(cc)))
+        }),
     )
 }

@@ -469,6 +469,48 @@ pub fn apply(ctx: &egui::Context, theme: &Theme) {
     ctx.style_mut(|s| s.animation_time = 0.0);
 }
 
+/// System font files probed (in order) for the text fallback — covers
+/// characters egui's bundled fonts lack (e.g. U+2010 HYPHEN in "Ne‐Yo",
+/// which Ubuntu-Light's subset only starts covering at U+2013). First
+/// existing, valid file wins; `.ttc` collections are skipped (ab_glyph
+/// reads a single face, index 0). App-wide, not per-theme.
+pub const SYSTEM_FONT_CANDIDATES: &[&str] = &[
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    "C:\\Windows\\Fonts\\arial.ttf",
+    "C:\\Windows\\Fonts\\segoeui.ttf",
+];
+
+/// Append the first available system font to the fallback chain of both font
+/// families so characters the bundled fonts miss render instead of tofu
+/// boxes. Called once at startup. Returns whether a font was installed.
+pub fn install_fallback_fonts(ctx: &egui::Context, candidates: &[&str]) -> bool {
+    for path in candidates {
+        let Ok(bytes) = std::fs::read(Path::new(path)) else { continue };
+        let magic = &bytes[..bytes.len().min(4)];
+        if magic == [0, 1, 0, 0] || magic == b"OTTO" {
+            let mut defs = egui::FontDefinitions::default();
+            defs.font_data.insert(
+                "system-fallback".to_owned(),
+                Arc::new(egui::FontData::from_owned(bytes)),
+            );
+            for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+                defs.families
+                    .entry(family)
+                    .or_default()
+                    .push("system-fallback".to_owned());
+            }
+            ctx.set_fonts(defs);
+            return true;
+        }
+    }
+    false
+}
+
 /// Returns (row_rect, child_ui) with banding, accent tint, 3px stripe, and 6px inset.
 /// `i` is the row index for even/odd banding. `is_current` highlights the playing
 /// track: a translucent `row_tint_alpha` accent overlay over the banded bg (keeps
