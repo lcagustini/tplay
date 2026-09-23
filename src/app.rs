@@ -935,6 +935,28 @@ impl TPlayApp {
         self.favorite_dirs.iter().any(|d| d == dir)
     }
 
+    /// Fixed user-folder shortcuts (Home + XDG user dirs) shown above the
+    /// Favorites list in the Library pane. Missing dirs are skipped; dupes
+    /// (e.g. Music == Home) are dropped.
+    pub fn quick_folders(&self) -> Vec<(String, PathBuf)> {
+        let mut v: Vec<(String, PathBuf)> = Vec::new();
+        if let Some(h) = dirs::home_dir() {
+            v.push(("Home".into(), h));
+        }
+        for (label, d) in [
+            ("Music", dirs::audio_dir()),
+            ("Downloads", dirs::download_dir()),
+            ("Desktop", dirs::desktop_dir()),
+        ] {
+            if let Some(p) = d.filter(|p| p.is_dir()) {
+                if !v.iter().any(|(_, e)| e == &p) {
+                    v.push((label.into(), p));
+                }
+            }
+        }
+        v
+    }
+
     pub fn show_hidden(&self) -> bool { self.show_hidden }
 
     pub fn library_sort(&self) -> usize { self.library_sort }

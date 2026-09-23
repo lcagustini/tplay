@@ -210,8 +210,8 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
         app.navigate_to(app.library_dir().to_path_buf());
     }
 
-    // Header: current dir (folder icon + strong name, full path on hover) +
-    // favorite toggle; composition counts + Add All on the right.
+    // Header: breadcrumb to the current dir (clickable ancestors) + favorite
+    // toggle; composition counts + Add All on the right.
     let folder_tex = app.theme_icon(theme::Icon::Folder).cloned();
     let (n_tracks, n_dirs, n_playlists) = {
         let mut c = (0usize, 0usize, 0usize);
@@ -227,14 +227,54 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
         c
     };
     ui.horizontal(|ui| {
+        // Breadcrumb: root → current, every ancestor clickable; middle
+        // segments collapse to "…" beyond depth 3 so deep paths fit narrow
+        // panes. The trailing segment is the current dir (strong, inactive).
         let dir = app.library_dir().to_path_buf();
-        let name = dir_name(&dir);
-        if let Some(tex) = &folder_tex {
-            ui.add(egui::Image::new(tex).fit_to_exact_size(egui::vec2(14.0, 14.0)));
+        let mut segs: Vec<PathBuf> = Vec::new();
+        let mut cur = Some(dir.clone());
+        while let Some(d) = cur {
+            segs.push(d.clone());
+            cur = d.parent().map(Path::to_path_buf);
         }
-        let label = if folder_tex.is_some() { name } else { format!("📁  {name}") };
-        ui.label(egui::RichText::new(label).strong().color(p.text_primary))
-            .on_hover_text(dir.display().to_string());
+        segs.reverse();
+        let mut jump: Option<PathBuf> = None;
+        for (i, seg) in segs.iter().enumerate() {
+            // Root + last two always show; anything in between → one "…".
+            if i != 0 && i + 2 < segs.len() {
+                if i == 1 {
+                    ui.label(egui::RichText::new("…").small().color(p.text_secondary));
+                }
+                continue;
+            }
+            let name = dir_name(seg);
+            if i + 1 == segs.len() {
+                ui.label(egui::RichText::new(name).strong().color(p.text_primary))
+                    .on_hover_text(seg.display().to_string());
+            } else {
+                // Cap each ancestor's width so long names truncate instead of
+                // shoving the ★ toggle / Add All off the pane edge.
+                let w = (name.chars().count() as f32 * 8.0 + 6.0).min(70.0);
+                if ui
+                    .add_sized(
+                        egui::vec2(w, 18.0),
+                        egui::Label::new(
+                            egui::RichText::new(name).small().color(p.text_secondary),
+                        )
+                        .truncate()
+                        .sense(egui::Sense::click()),
+                    )
+                    .on_hover_text(seg.display().to_string())
+                    .clicked()
+                {
+                    jump = Some(seg.clone());
+                }
+                ui.label(egui::RichText::new("/").small().color(p.text_secondary));
+            }
+        }
+        if let Some(seg) = jump {
+            app.navigate_to(seg);
+        }
         let fav = app.is_favorite(&dir);
         let tex = if fav {
             app.theme_icon(theme::Icon::StarOn).cloned()
@@ -299,40 +339,82 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
 
     ui.add_space(4.0);
 
-    // Favorites column + file browser column.
+    // Places + Favorites column, file browser column.
     ui.horizontal_top(|ui| {
         ui.vertical(|ui| {
             ui.set_min_width(120.0);
-            ui.label(egui::RichText::new("Favorites").small().strong().color(p.text_secondary));
-            ui.add_space(4.0);
-            let mut jump: Option<PathBuf> = None;
-            for dir in app.favorite_dirs().to_vec() {
-                ui.horizontal(|ui| {
-                    let name = dir_name(&dir);
-                    let active = app.library_dir() == dir;
-                    if ui
-                        .add_sized(
-                            egui::vec2(100.0, 18.0),
-                            egui::Label::new(
-                                egui::RichText::new(&name)
-                                    .color(if active { p.accent } else { p.text_secondary })
-                                    .font(egui::FontId::new(layout.text_meta, theme.metadata_font.clone())),
-                            )
-                            .truncate()
-                            .sense(egui::Sense::click()),
-                        )
-                        .clicked()
-                    {
-                        jump = Some(dir.clone());
+            let scroll_h = (ui.available_height() - 8.0).max(40.0);
+            // id_salt: without it this would share the default "scroll_area"
+            // persistent id with the file list's ScrollArea (sibling column
+            // uis resolve to the same ui.id) → egui ID-clash debug overlay.
+            egui::ScrollArea::vertical()
+                .id_salt("places_favorites")
+                // auto_shrink x=true: a vertical scroll area must not claim the
+                // whole row width (auto_shrink=false expands it to fill) — that
+                // starves the file-list column next to it.
+                .auto_shrink([true, false])
+                .max_height(scroll_h)
+                .show(ui, |ui| {
+                    let mut jump: Option<PathBuf> = None;
+
+                    // Places: fixed user-folder shortcuts (Home + XDG dirs) —
+                    // same row style as favorites, no ✕ (not removable).
+                    let places = app.quick_folders();
+                    if !places.is_empty() {
+                        ui.label(egui::RichText::new("Places").small().strong().color(p.text_secondary));
+                        ui.add_space(4.0);
+                        for (label, path) in places {
+                            let active = app.library_dir() == path;
+                            if ui
+                                .add_sized(
+                                    egui::vec2(100.0, 18.0),
+                                    egui::Label::new(
+                                        egui::RichText::new(label)
+                                            .color(if active { p.accent } else { p.text_secondary })
+                                            .font(egui::FontId::new(layout.text_meta, theme.metadata_font.clone())),
+                                    )
+                                    .truncate()
+                                    .sense(egui::Sense::click()),
+                                )
+                                .on_hover_text(path.display().to_string())
+                                .clicked()
+                            {
+                                jump = Some(path.clone());
+                            }
+                        }
+                        ui.add_space(8.0);
                     }
-                    if theme::icon_button(ui, app.theme_icon(theme::Icon::Remove), theme::Icon::Remove, 13.0, true, false).clicked() {
-                        app.toggle_favorite(dir.clone());
+
+                    ui.label(egui::RichText::new("Favorites").small().strong().color(p.text_secondary));
+                    ui.add_space(4.0);
+                    for dir in app.favorite_dirs().to_vec() {
+                        ui.horizontal(|ui| {
+                            let name = dir_name(&dir);
+                            let active = app.library_dir() == dir;
+                            if ui
+                                .add_sized(
+                                    egui::vec2(100.0, 18.0),
+                                    egui::Label::new(
+                                        egui::RichText::new(&name)
+                                            .color(if active { p.accent } else { p.text_secondary })
+                                            .font(egui::FontId::new(layout.text_meta, theme.metadata_font.clone())),
+                                    )
+                                    .truncate()
+                                    .sense(egui::Sense::click()),
+                                )
+                                .clicked()
+                            {
+                                jump = Some(dir.clone());
+                            }
+                            if theme::icon_button(ui, app.theme_icon(theme::Icon::Remove), theme::Icon::Remove, 13.0, true, false).clicked() {
+                                app.toggle_favorite(dir.clone());
+                            }
+                        });
+                    }
+                    if let Some(dir) = jump {
+                        app.navigate_to(dir);
                     }
                 });
-            }
-            if let Some(dir) = jump {
-                app.navigate_to(dir);
-            }
         });
         ui.separator();
         ui.vertical(|ui| {
