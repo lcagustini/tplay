@@ -144,6 +144,11 @@ pub struct TPlayApp {
     /// preventing snap-back to 0 during a skip_duration seek.
     seek_target: Option<f32>,
 
+    /// The slow-path seek rebuilds the sink with a skip_duration(target) source;
+    /// rodio's get_pos() only counts post-skip samples, so the fresh sink
+    /// under-reports by exactly the skip amount. Compensate for it.
+    position_offset: Duration,
+
     /// Set to Some(flag) while the background seektable builder is running.
     /// The flag flips to true when the thread finishes. None means the file
     /// either already had a seektable or is not a FLAC.
@@ -240,6 +245,7 @@ impl TPlayApp {
             total_duration: None,
             volume: config.volume,
             seek_target: None,
+            position_offset: Duration::ZERO,
             seektable_ready: None,
             playlist: Vec::new(),
             current_index: None,
@@ -351,6 +357,7 @@ impl TPlayApp {
 
     fn load_file(&mut self, path: PathBuf) {
         self.seek_target     = None;
+        self.position_offset = Duration::ZERO;
         self.seektable_ready = None;
         self.viz.clear();
 
@@ -500,6 +507,9 @@ impl TPlayApp {
             Err(e) => { eprintln!("seek sink: {e}"); return; }
         }
         self.sink.set_volume(self.volume);
+        // get_pos() on the fresh sink counts only post-skip samples; the
+        // skipped `target` is the new position offset from here on.
+        self.position_offset = target;
         let eq_source = audio::eq::EqSource::new(source.skip_duration(target), Arc::clone(&self.eq_shared));
         let tap_source = audio::viz::TapSource::new(eq_source, self.viz.clone());
         self.sink.append(tap_source);
@@ -568,6 +578,7 @@ impl TPlayApp {
         self.current_index = None;
         self.total_duration = None;
         self.seek_target = None;
+        self.position_offset = Duration::ZERO;
         self.seektable_ready = None;
         self.viz.clear();
         self.reset_shuffle();
@@ -1027,14 +1038,14 @@ impl TPlayApp {
     }
 
     pub fn playback_position(&self) -> f32 {
-        let pos = self.sink.get_pos();
+        let pos = self.sink.get_pos().saturating_add(self.position_offset);
         self.total_duration
             .map(|d| (pos.as_secs_f32() / d.as_secs_f32()).clamp(0.0, 1.0))
             .unwrap_or(0.0)
     }
 
     pub fn playback_position_secs(&self) -> Duration {
-        self.sink.get_pos()
+        self.sink.get_pos().saturating_add(self.position_offset)
     }
 
     pub fn is_empty(&self) -> bool {
