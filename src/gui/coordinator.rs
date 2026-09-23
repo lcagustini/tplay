@@ -148,7 +148,11 @@ fn layout_path() -> Option<PathBuf> {
 }
 
 fn layouts_dir() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("tplay").join(LAYOUTS_DIR))
+    dirs::config_dir().map(|d| {
+        let dir = d.join("tplay").join(LAYOUTS_DIR);
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    })
 }
 
 /// Save a DockState to a JSON file at the given path (creates parent dirs).
