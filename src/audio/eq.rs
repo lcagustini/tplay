@@ -14,6 +14,7 @@ pub const EQ_FREQUENCIES: [f32; 10] = [
 
 /// Live-controllable EQ state, shared between `TPlayApp` (writer) and `EqSource` (reader).
 /// Gains are in dB (-12..12); 0 dB is an exact identity filter.
+#[derive(Debug, Clone, Default)]
 pub struct EqShared {
     pub gains: [f32; 10],
     pub enabled: bool,
@@ -21,7 +22,7 @@ pub struct EqShared {
 
 /// RBJ peaking EQ filter coefficients.
 /// Based on: https://www.w3.org/TR/audio-eq-cookbook/
-fn peaking_eq_coeffs(sample_rate: f32, freq: f32, q: f32, gain_db: f32) -> (f32, f32, f32, f32, f32) {
+pub fn peaking_eq_coeffs(sample_rate: f32, freq: f32, q: f32, gain_db: f32) -> (f32, f32, f32, f32, f32) {
     let a = 10f32.powf(gain_db / 40.0);
     let w0 = 2.0 * std::f32::consts::PI * freq / sample_rate;
     let cos_w0 = w0.cos();
@@ -40,23 +41,23 @@ fn peaking_eq_coeffs(sample_rate: f32, freq: f32, q: f32, gain_db: f32) -> (f32,
 }
 
 /// Biquad filter state for one band (Direct Form II transposed)
-struct Biquad {
-    b0: f32,
-    b1: f32,
-    b2: f32,
-    a1: f32,
-    a2: f32,
-    z1: f32,
-    z2: f32,
+pub struct Biquad {
+    pub b0: f32,
+    pub b1: f32,
+    pub b2: f32,
+    pub a1: f32,
+    pub a2: f32,
+    pub z1: f32,
+    pub z2: f32,
 }
 
 impl Biquad {
-    fn new(sample_rate: u32, freq: f32, gain_db: f32) -> Self {
+    pub fn new(sample_rate: u32, freq: f32, gain_db: f32) -> Self {
         let (b0, b1, b2, a1, a2) = peaking_eq_coeffs(sample_rate as f32, freq, 1.0, gain_db);
         Self { b0, b1, b2, a1, a2, z1: 0.0, z2: 0.0 }
     }
 
-    fn process(&mut self, input: f32) -> f32 {
+    pub fn process(&mut self, input: f32) -> f32 {
         let out = self.b0 * input + self.z1;
         self.z1 = self.b1 * input - self.a1 * out + self.z2;
         self.z2 = self.b2 * input - self.a2 * out;

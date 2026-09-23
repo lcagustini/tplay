@@ -3,6 +3,10 @@ name = "tplay"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "tplay"
+path = "src/lib.rs"
+
 [dependencies]
 eframe    = "0.30"
 # symphonia-all enables MP3, FLAC, OGG, WAV, AAC decoding

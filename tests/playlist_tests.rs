@@ -1,0 +1,317 @@
+//! Playlist logic tests — shuffle, repeat, add/remove/move, navigation.
+
+use tplay::library::{write_playlist, read_playlist};
+use tplay::app::EQ_PRESETS;
+use std::path::PathBuf;
+#[path = "common.rs"]
+mod common;
+use crate::common::{test_dir, temp_dir};
+
+#[test]
+fn playlist_write_read_roundtrip() {
+    let dir = test_dir("playlist_write_read_roundtrip");
+    let file = dir.join("test.tplay");
+
+    let tracks = vec![
+        dir.join("track1.mp3"),
+        PathBuf::from("relative/track2.ogg"),
+    ];
+
+    write_playlist(&file, &tracks).unwrap();
+    let back = read_playlist(&file).unwrap();
+
+    assert_eq!(back[0], dir.join("track1.mp3"));
+    assert_eq!(back[1], dir.join("relative/track2.ogg"));
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn playlist_read_malformed_returns_none() {
+    let dir = test_dir("playlist_read_malformed_returns_none");
+    let file = dir.join("bad.tplay");
+
+    std::fs::write(&file, "not json").unwrap();
+    assert!(read_playlist(&file).is_none());
+
+    std::fs::write(&file, "{}").unwrap(); // valid json, wrong structure
+    assert!(read_playlist(&file).is_none());
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn playlist_relative_paths_resolve_against_playlist_dir() {
+    let dir = test_dir("playlist_relative_paths_resolve_against_playlist_dir");
+    let subdir = dir.join("sub");
+    std::fs::create_dir_all(&subdir).unwrap();
+    let file = subdir.join("playlist.tplay");
+
+    let tracks = vec![
+        PathBuf::from("track1.mp3"),
+        PathBuf::from("../track2.flac"),
+    ];
+
+    write_playlist(&file, &tracks).unwrap();
+    let back = read_playlist(&file).unwrap();
+
+    // Relative paths are joined with playlist dir but not canonicalized
+    assert_eq!(back[0], subdir.join("track1.mp3"));
+    assert_eq!(back[1], subdir.join("../track2.flac"));
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// ── Shuffle logic tests ────────────────────────────────────────────────
+
+/// Replicates TPlayApp::next_track_index shuffle logic for testing.
+fn shuffle_next(len: usize, played: &mut Vec<usize>, rng_state: &mut u64, repeat: bool) -> Option<usize> {
+    if len == 0 { return None; }
+    if len == 1 { return repeat.then_some(0); }
+
+    let unplayed: Vec<usize> = (0..len).filter(|i| !played.contains(i)).collect();
+    if unplayed.is_empty() {
+        if repeat {
+            played.clear();
+            let idx = (xor_shift(rng_state) as usize) % len;
+            played.push(idx);
+            return Some(idx);
+        }
+        return None;
+    }
+    let idx = unplayed[(xor_shift(rng_state) as usize) % unplayed.len()];
+    played.push(idx);
+    Some(idx)
+}
+
+/// Replicates TPlayApp::prev_track_index shuffle logic for testing.
+fn shuffle_prev(len: usize, played: &mut Vec<usize>, repeat: bool) -> Option<usize> {
+    if len == 0 { return None; }
+    if len == 1 { return repeat.then_some(0); }
+
+    if played.len() > 1 {
+        played.pop();
+        played.last().copied()
+    } else if repeat && !played.is_empty() {
+        played.last().copied()
+    } else {
+        None
+    }
+}
+
+/// XorShift64 - matches TPlayApp::rand_u64
+fn xor_shift(state: &mut u64) -> u64 {
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    *state
+}
+
+#[test]
+fn shuffle_plays_each_track_once_before_repeat() {
+    let len = 5;
+    let mut played = Vec::new();
+    let mut rng = 0xC0FFEE;
+    let mut seen = Vec::new();
+
+    for _ in 0..len {
+        let idx = shuffle_next(len, &mut played, &mut rng, false).unwrap();
+        assert!(!seen.contains(&idx), "duplicate in shuffle cycle: {:?}", played);
+        seen.push(idx);
+    }
+    assert_eq!(seen.len(), len);
+    assert_eq!(played.len(), len);
+}
+
+#[test]
+fn shuffle_exhausted_returns_none_without_repeat() {
+    let len = 3;
+    let mut played = Vec::new();
+    let mut rng = 0xC0FFEE;
+
+    for _ in 0..len {
+        shuffle_next(len, &mut played, &mut rng, false);
+    }
+    assert!(shuffle_next(len, &mut played, &mut rng, false).is_none());
+}
+
+#[test]
+fn shuffle_exhausted_restarts_with_repeat() {
+    let len = 3;
+    let mut played = Vec::new();
+    let mut rng = 0xC0FFEE;
+
+    for _ in 0..len {
+        shuffle_next(len, &mut played, &mut rng, true);
+    }
+    // Next call should restart cycle
+    let idx = shuffle_next(len, &mut played, &mut rng, true);
+    assert!(idx.is_some());
+    assert_eq!(played.len(), 1); // history cleared, new cycle started
+}
+
+#[test]
+fn shuffle_prev_pops_history() {
+    let len = 5;
+    let mut played = Vec::new();
+    let mut rng = 0xC0FFEE;
+
+    // Play 3 tracks
+    let t1 = shuffle_next(len, &mut played, &mut rng, false).unwrap();
+    let t2 = shuffle_next(len, &mut played, &mut rng, false).unwrap();
+    let t3 = shuffle_next(len, &mut played, &mut rng, false).unwrap();
+
+    // Go back
+    let prev = shuffle_prev(len, &mut played, false).unwrap();
+    assert_eq!(prev, t2);
+    assert_eq!(played.len(), 2);
+
+    let prev = shuffle_prev(len, &mut played, false).unwrap();
+    assert_eq!(prev, t1);
+    assert_eq!(played.len(), 1);
+
+    // At start of history, no more prev
+    assert!(shuffle_prev(len, &mut played, false).is_none());
+}
+
+#[test]
+fn shuffle_prev_loops_with_repeat() {
+    let len = 3;
+    let mut played = Vec::new();
+    let mut rng = 0xC0FFEE;
+
+    let t1 = shuffle_next(len, &mut played, &mut rng, true).unwrap();
+    let _ = shuffle_prev(len, &mut played, true); // back to start, history len 1
+
+    // With repeat, prev at start of history wraps to last played
+    let prev = shuffle_prev(len, &mut played, true).unwrap();
+    assert_eq!(prev, t1); // loops to the only track in history
+}
+
+// ── Sequential (non-shuffle) navigation tests ────────────────────────
+
+fn sequential_next(len: usize, current: Option<usize>, repeat: bool) -> Option<usize> {
+    if len == 0 { return None; }
+    if len == 1 { return repeat.then_some(0); }
+
+    match (repeat, current) {
+        (false, Some(i)) if i + 1 < len => Some(i + 1),
+        (true, Some(i)) => Some((i + 1) % len),
+        (true, None) => Some(0),
+        _ => None,
+    }
+}
+
+fn sequential_prev(len: usize, current: Option<usize>, repeat: bool) -> Option<usize> {
+    if len == 0 { return None; }
+    if len == 1 { return repeat.then_some(0); }
+
+    match (repeat, current) {
+        (false, Some(i)) if i > 0 => Some(i - 1),
+        (true, Some(i)) => Some((i + len - 1) % len),
+        (true, None) => Some(len - 1),
+        _ => None,
+    }
+}
+
+#[test]
+fn sequential_next_wraps_with_repeat() {
+    assert_eq!(sequential_next(5, Some(4), true), Some(0));
+    assert_eq!(sequential_next(5, Some(2), true), Some(3));
+}
+
+#[test]
+fn sequential_next_stops_at_end_without_repeat() {
+    assert_eq!(sequential_next(5, Some(4), false), None);
+    assert_eq!(sequential_next(5, Some(2), false), Some(3));
+}
+
+#[test]
+fn sequential_prev_wraps_with_repeat() {
+    assert_eq!(sequential_prev(5, Some(0), true), Some(4));
+    assert_eq!(sequential_prev(5, Some(2), true), Some(1));
+}
+
+#[test]
+fn sequential_prev_stops_at_start_without_repeat() {
+    assert_eq!(sequential_prev(5, Some(0), false), None);
+    assert_eq!(sequential_prev(5, Some(2), false), Some(1));
+}
+
+#[test]
+fn single_track_repeats_only_with_repeat() {
+    assert_eq!(sequential_next(1, Some(0), true), Some(0));
+    assert_eq!(sequential_next(1, Some(0), false), None);
+    assert_eq!(sequential_prev(1, Some(0), true), Some(0));
+    assert_eq!(sequential_prev(1, Some(0), false), None);
+}
+
+// ── Playlist mutation tests ──────────────────────────────────────────
+
+#[test]
+fn remove_track_adjusts_current_index() {
+    let mut playlist = vec![
+        PathBuf::from("a.mp3"),
+        PathBuf::from("b.mp3"),
+        PathBuf::from("c.mp3"),
+    ];
+    let mut current_index = Some(1); // playing b.mp3
+
+    // Remove track before current
+    playlist.remove(0);
+    if current_index == Some(0) { current_index = None; }
+    else if current_index.unwrap() > 0 { current_index = Some(current_index.unwrap() - 1); }
+    assert_eq!(current_index, Some(0)); // now points to b.mp3 (was index 1)
+    assert_eq!(playlist[0], PathBuf::from("b.mp3"));
+
+    // Remove current track
+    playlist.remove(0);
+    if current_index == Some(0) { current_index = None; }
+    else if current_index.unwrap() > 0 { current_index = Some(current_index.unwrap() - 1); }
+    assert_eq!(current_index, None); // current track removed
+    assert_eq!(playlist.len(), 1);
+}
+
+#[test]
+fn move_track_adjusts_current_index() {
+    let mut playlist = vec![
+        PathBuf::from("a.mp3"),
+        PathBuf::from("b.mp3"),
+        PathBuf::from("c.mp3"),
+        PathBuf::from("d.mp3"),
+    ];
+    let mut current_index = Some(1); // playing b.mp3
+
+    // Move a (0) to after c (2) -> playlist: b, c, a, d
+    let item = playlist.remove(0);
+    playlist.insert(2, item);
+    if current_index == Some(0) { current_index = Some(2); }
+    else if 0 < current_index.unwrap() && current_index.unwrap() <= 2 { current_index = Some(current_index.unwrap() - 1); }
+    assert_eq!(current_index, Some(0)); // b.mp3 now at index 0
+
+    // Move d (3) to before b (0) -> playlist: d, b, c, a
+    let item = playlist.remove(3);
+    playlist.insert(0, item);
+    if current_index == Some(3) { current_index = Some(0); }
+    else if 0 <= current_index.unwrap() && current_index.unwrap() < 3 { current_index = Some(current_index.unwrap() + 1); }
+    assert_eq!(current_index, Some(1)); // b.mp3 now at index 1
+}
+
+// ── EQ presets ────────────────────────────────────────────────────────
+
+#[test]
+fn eq_presets_have_correct_length() {
+    for (name, gains) in EQ_PRESETS {
+        assert_eq!(gains.len(), 10, "preset {} has wrong band count", name);
+        for &g in &gains {
+            assert!(g >= -12.0 && g <= 12.0, "preset {} gain {} out of range", name, g);
+        }
+    }
+}
+
+#[test]
+fn eq_flat_preset_is_zero_gains() {
+    let (name, gains) = EQ_PRESETS[0];
+    assert_eq!(name, "Flat");
+    assert_eq!(gains, [0.0; 10]);
+}

@@ -27,7 +27,7 @@ fn rand_usize(state: &mut u64, max: usize) -> usize {
 }
 
 // Docking panes (egui_dock) - used by GUI layer only
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Debug)]
 pub enum Pane { NowPlaying, Playlist, Equalizer, Library }
 
 impl Pane {
@@ -35,43 +35,44 @@ impl Pane {
 }
 
 /// Unified config — single JSON file. Dock layout stays separate.
+/// `pub` so the integration tests can pin the on-disk shape.
 #[derive(Serialize, Deserialize, Default)]
-struct Config {
-    theme: String,
+pub struct Config {
+    pub theme: String,
     #[serde(default)]
-    eq: EqData,
+    pub eq: EqData,
     #[serde(default)]
-    shuffle: bool,
+    pub shuffle: bool,
     #[serde(default)]
-    repeat: bool,
+    pub repeat: bool,
     #[serde(default = "default_volume")]
-    volume: f32,
+    pub volume: f32,
     #[serde(default)]
-    last_playlist: Option<String>,
+    pub last_playlist: Option<String>,
     #[serde(default)]
-    library: LibraryData,
+    pub library: LibraryData,
 }
 
 fn default_volume() -> f32 { 1.0 }
 
 #[derive(Serialize, Deserialize, Default)]
-struct EqData {
+pub struct EqData {
     #[serde(default)]
-    enabled: bool,
+    pub enabled: bool,
     #[serde(default = "default_gains")]
-    gains: [f32; 10],
+    pub gains: [f32; 10],
 }
 
 fn default_gains() -> [f32; 10] { [0.0; 10] }
 
 #[derive(Serialize, Deserialize, Default)]
-struct LibraryData {
+pub struct LibraryData {
     #[serde(default)]
-    favorites: Vec<String>,
+    pub favorites: Vec<String>,
     #[serde(default)]
-    last_dir: String,
+    pub last_dir: String,
     #[serde(default)]
-    show_hidden: bool,
+    pub show_hidden: bool,
 }
 
 /// Generic config persistence: create dir, serialize/deserialize JSON.
@@ -155,7 +156,7 @@ pub struct TPlayApp {
 
     /// Theme (loaded from themes/ dirs), applied to egui visuals by the GUI layer.
     theme: Arc<Theme>,
-    /// All loadable themes (Skin dropdown + icon fallback).
+    /// All loadable themes (Theme dropdown + icon fallback).
     themes: Themes,
     /// Current theme's icons, one `Option` per `Icon::ALL` slot (None → glyph).
     icons: Vec<Option<egui::TextureHandle>>,
@@ -585,7 +586,7 @@ impl TPlayApp {
         self.eq_preset().unwrap_or("Custom")
     }
 
-    /// Switch theme by id (from the Skin dropdown); persisted, applied the
+    /// Switch theme by id (from the Theme dropdown); persisted, applied the
     /// same frame by the GUI layer, icons re-decoded for the new palette.
     pub fn set_theme(&mut self, id: &str) {
         if let Some(theme) = self.themes.get(id) {
@@ -599,7 +600,7 @@ impl TPlayApp {
         &self.theme
     }
 
-    /// All loadable themes, for the Skin dropdown.
+    /// All loadable themes, for the Theme dropdown.
     pub fn themes(&self) -> &[Arc<Theme>] {
         self.themes.list()
     }
