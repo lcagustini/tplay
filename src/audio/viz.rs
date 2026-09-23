@@ -297,12 +297,15 @@ pub fn compute_wave(viz: &VizBuf, buckets: usize) -> Vec<f32> {
         return vec![0.0; buckets.max(1)];
     }
     let buckets = buckets.max(1);
+    let len = samples.len();
     let mut wave = vec![0.0f32; buckets];
-    let per = samples.len().div_ceil(buckets); // samples per bucket
+    // Even distribution: sample i lands in bucket i*buckets/len, so the last
+    // sample fills the last bucket. The old `i / div_ceil(len, buckets)`
+    // rounding left the rightmost buckets empty (silent gap at pane edge).
     for (i, &s) in samples.iter().enumerate() {
         let v = s.abs();
         if v.is_finite() {
-            let b = (i / per).min(buckets - 1);
+            let b = (i * buckets / len).min(buckets - 1);
             if v > wave[b] {
                 wave[b] = v;
             }
@@ -387,5 +390,20 @@ mod tests {
         assert_eq!(wave.len(), 2);
         assert!((wave[0] - 0.8).abs() < 1e-6);
         assert!((wave[1] - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn compute_wave_reaches_last_bucket() {
+        // 1024 samples, 350 buckets (a ~700px pane): div_ceil grouping used to
+        // leave the rightmost buckets empty, collapsing the wave before the
+        // pane edge. Every bucket must now get its share and fill to 1.0.
+        let buf = VizBuf::new();
+        for _ in 0..1024 {
+            buf.push(1.0);
+        }
+        let wave = compute_wave(&buf, 350);
+        assert_eq!(wave.len(), 350);
+        assert_eq!(wave[349], 1.0);
+        assert!(wave.iter().all(|&v| v == 1.0));
     }
 }
