@@ -237,21 +237,6 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
             let tracked_layout = ctx.data(|d| d.get_temp::<String>(egui::Id::new(NAMED_LAYOUT_FILE)));
 
             let menu_contents = |ui: &mut egui::Ui| {
-                let open_count = Pane::ALL.iter().filter(|p| pane_is_open(&tree, **p)).count();
-                for pane in Pane::ALL {
-                    let mut open = pane_is_open(&tree, pane);
-                    let last_one = open && open_count == 1;
-                    if ui.add_enabled(!last_one, egui::Checkbox::new(&mut open, pane_title(pane).text()))
-                        .changed()
-                    {
-                        if open {
-                            add_pane(&mut tree, pane);
-                        } else {
-                            remove_pane(&mut tree, pane);
-                        }
-                    }
-                }
-                ui.separator();
                 ui.label("Theme");
                 let mut sel = app.theme().id.clone();
                 for t in app.themes() {
@@ -269,9 +254,25 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
                 if ui.checkbox(&mut show_hidden, "Show hidden folders").changed() {
                     app.set_show_hidden(show_hidden);
                 }
-                // Layouts section
+                // Layouts section — panes + saved layouts + save/load
                 ui.separator();
                 ui.label("Layouts");
+                // Pane visibility checkboxes
+                let open_count = Pane::ALL.iter().filter(|p| pane_is_open(&tree, **p)).count();
+                for pane in Pane::ALL {
+                    let mut open = pane_is_open(&tree, pane);
+                    let last_one = open && open_count == 1;
+                    if ui.add_enabled(!last_one, egui::Checkbox::new(&mut open, pane_title(pane).text()))
+                        .changed()
+                    {
+                        if open {
+                            add_pane(&mut tree, pane);
+                        } else {
+                            remove_pane(&mut tree, pane);
+                        }
+                    }
+                }
+                ui.separator();
                 // Saved layouts from the layouts/ directory
                 for path in &layout_files {
                     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("layout");
