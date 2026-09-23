@@ -5,7 +5,7 @@
 //! `CreationContext`, so end-to-end playback can't run headless; the pure
 //! logic behind the public surface is pinned here instead.
 
-use tplay::app::{EQ_PRESETS, Pane, TPlayApp};
+use tplay::app::{EQ_PRESETS, Pane, TPlayApp, VizView};
 use std::time::Duration;
 
 #[test]
@@ -37,6 +37,19 @@ fn pane_all_is_stable() {
         Pane::ALL,
         [Pane::NowPlaying, Pane::Playlist, Pane::Equalizer, Pane::Library, Pane::Visualizer]
     );
+}
+
+#[test]
+fn viz_view_registry_is_stable_and_uniquely_named() {
+    // The pane's selector iterates ALL; names must stay unique and the default
+    // view is what an empty config falls back to (see config_persistence).
+    assert_eq!(VizView::ALL.len(), 2);
+    assert_eq!(VizView::ALL, [VizView::Bars, VizView::Wave]);
+    assert_eq!(VizView::default(), VizView::Bars);
+    let mut names: Vec<&str> = VizView::ALL.iter().map(|v| v.name()).collect();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), VizView::ALL.len(), "view names must be unique (the selector keys off them)");
 }
 
 #[test]

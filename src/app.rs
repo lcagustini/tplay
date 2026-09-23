@@ -34,6 +34,27 @@ impl Pane {
     pub const ALL: [Pane; 5] = [Pane::NowPlaying, Pane::Playlist, Pane::Equalizer, Pane::Library, Pane::Visualizer];
 }
 
+/// Visualizer views (serde'd into config.json `viz_view`). The pane matches
+/// on this; the app just stores/serializes it — same shape as `Pane`.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug, Default)]
+pub enum VizView {
+    #[default]
+    Bars,
+    Wave,
+}
+
+impl VizView {
+    pub const ALL: [VizView; 2] = [VizView::Bars, VizView::Wave];
+
+    /// Dropdown label in the visualizer pane header.
+    pub fn name(self) -> &'static str {
+        match self {
+            VizView::Bars => "Bars",
+            VizView::Wave => "Wave",
+        }
+    }
+}
+
 /// Unified config — single JSON file. Dock layout stays separate.
 /// `pub` so the integration tests can pin the on-disk shape.
 #[derive(Serialize, Deserialize, Default)]
@@ -46,7 +67,7 @@ pub struct Config {
     #[serde(default)]
     pub repeat: bool,
     #[serde(default)]
-    pub viz_wave: bool,
+    pub viz_view: VizView,
     #[serde(default = "default_volume")]
     pub volume: f32,
     #[serde(default)]
@@ -156,8 +177,8 @@ pub struct TPlayApp {
     eq_shared: Arc<RwLock<audio::eq::EqShared>>,
     /// Visualization ring buffer — written by the tap source, read by the GUI.
     viz: audio::viz::VizBuf,
-    /// Visualizer pane mode: false = Bars, true = Wave. Persisted in config.json.
-    viz_wave: bool,
+    /// Visualizer pane view (index into `VizView::ALL`). Persisted in config.json.
+    viz_view: VizView,
 
 
     /// Theme (loaded from themes/ dirs), applied to egui visuals by the GUI layer.
@@ -233,7 +254,7 @@ impl TPlayApp {
                 enabled: config.eq.enabled,
             })),
             viz: audio::viz::VizBuf::new(),
-            viz_wave: config.viz_wave,
+            viz_view: config.viz_view,
             theme,
             themes,
             icons,
@@ -301,7 +322,7 @@ impl TPlayApp {
             },
             shuffle: self.shuffle,
             repeat: self.repeat,
-            viz_wave: self.viz_wave,
+            viz_view: self.viz_view,
             volume: self.volume,
             last_playlist: self.playlist_file.as_ref().and_then(|p| p.to_str()).map(str::to_owned),
             library: LibraryData {
@@ -904,15 +925,15 @@ impl TPlayApp {
     /// Visualization buffer (shared with the tap source).
     pub fn viz(&self) -> &audio::viz::VizBuf { &self.viz }
 
-    /// Visualizer pane mode — false = Bars, true = Wave.
-    pub fn viz_wave(&self) -> bool { self.viz_wave }
+    /// Visualizer pane view — see `VizView::ALL`.
+    pub fn viz_view(&self) -> VizView { self.viz_view }
 
-    /// Set the visualizer mode; persists to config.json immediately.
-    pub fn set_viz_wave(&mut self, wave: bool) {
-        if self.viz_wave == wave {
+    /// Set the visualizer view; persists to config.json immediately.
+    pub fn set_viz_view(&mut self, view: VizView) {
+        if self.viz_view == view {
             return;
         }
-        self.viz_wave = wave;
+        self.viz_view = view;
         self.save_config();
     }
 

@@ -2,7 +2,7 @@
 //! round-trip, missing-field defaults). `TPlayApp::save_config` writes this
 //! every change; the on-disk contract is what's pinned here.
 
-use tplay::app::{Config, EqData, LibraryData};
+use tplay::app::{Config, EqData, LibraryData, VizView};
 use std::path::PathBuf;
 
 #[test]
@@ -12,7 +12,7 @@ fn config_round_trip_preserves_every_field() {
         eq: EqData { enabled: true, gains: [1.0; 10] },
         shuffle: true,
         repeat: true,
-        viz_wave: true,
+        viz_view: VizView::Wave,
         volume: 0.5,
         last_playlist: Some("/music/chill.tplay".into()),
         library: LibraryData {
@@ -30,7 +30,7 @@ fn config_round_trip_preserves_every_field() {
     assert_eq!(back.eq.gains, [1.0; 10]);
     assert_eq!(back.shuffle, true);
     assert_eq!(back.repeat, true);
-    assert_eq!(back.viz_wave, true);
+    assert_eq!(back.viz_view, VizView::Wave);
     assert_eq!(back.volume, 0.5);
     assert_eq!(back.last_playlist.as_deref(), Some("/music/chill.tplay"));
     assert_eq!(back.library.favorites, vec![PathBuf::from("/music/favs")]);
@@ -50,7 +50,7 @@ fn config_missing_fields_fall_back_to_defaults() {
     assert_eq!(c.eq.gains, [0.0; 10]);
     assert!(!c.shuffle);
     assert!(!c.repeat);
-    assert!(!c.viz_wave);
+    assert_eq!(c.viz_view, VizView::Bars); // default view
     assert_eq!(c.volume, 1.0); // default_volume
     assert_eq!(c.last_playlist, None);
     assert!(c.library.favorites.is_empty());
@@ -76,7 +76,7 @@ fn config_json_shape_has_expected_keys() {
     assert!(v.get("theme").is_some());
     assert!(v.get("shuffle").is_some());
     assert!(v.get("repeat").is_some());
-    assert!(v.get("viz_wave").is_some());
+    assert!(v.get("viz_view").is_some());
     assert!(v.get("volume").is_some());
     assert!(v.get("last_playlist").is_some());
     let eq = v.get("eq").expect("eq object");

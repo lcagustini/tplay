@@ -96,10 +96,11 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 ## Visualizer
  
 - Dockable pane (**Visualizer**), closed by default, auto-listed in the ☰ menu. No new theme tokens, no new icons.
-- Header: **Bars / Wave** toggle, persisted in `config.json` (`viz_wave`) so the choice survives restarts.
+- Header: the view selector iterates `VizView::ALL` (registry in `app.rs`), persisted in `config.json` (`viz_view`) so the choice survives restarts.
+- **Views are modular, mirroring the panes pattern**: one file per view under `src/gui/panes/visualizer/views/`, each exposing a single `pub fn draw(painter, rect, viz, palette)`; `visualizer.rs` is the dispatcher (header + `match`). Views own their per-frame state privately in egui memory (bars keeps its smoothing buffer under its own key). **Adding a view** = a new `views/<name>.rs` + a `VizView` variant in `app.rs` (`ALL` + `name` + one match arm) — no coordinator/config changes.
 - Audio pipeline: `TapSource` wraps `EqSource` (post-EQ → visualizes exactly what you hear). Mono-downmixes, pushes into a capped ring buffer (`VizBuf`, ~100 ms / 4096 samples). `load_file` and `seek` append the tap; `load_file`/`stop()` clear the buffer.
-- **Bars mode**: 1024-point radix-2 FFT with Hann window → 32 log-spaced bands → dB-normalized (-60..0) → per-bin attack/release smoothing (classic WMP feel).
-- **Wave mode**: mirrored time-domain **peak envelope** downsampled from the ring buffer (one `|sample|` peak per ~2px display column, from a ~23 ms window), rendered as adjacent filled columns + outline strokes — column fills use `rect_filled` (polygon tessellation of raw sample waves rendered as garbage).
+- **Bars view**: 1024-point radix-2 FFT with Hann window → 32 log-spaced bands → dB-normalized (-60..0) → per-bin attack/release smoothing (classic WMP feel).
+- **Wave view**: mirrored time-domain **peak envelope** downsampled from the ring buffer (one `|sample|` peak per ~2px display column, from a ~23 ms window), rendered as adjacent filled columns + outline strokes — column fills use `rect_filled` (polygon tessellation of raw sample waves rendered as garbage).
 - Drawing: full-rect `ui.painter()`, palette colors only (`accent`, `progress_fill`, `bg`), `scroll_bars = [false, false]` like the EQ pane.
 - No new dependencies — hand-rolled FFT and smoothing in `src/audio/viz.rs` (pure logic, tested without an audio device).
  
@@ -180,7 +181,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 - **Shuffle order**: `played: Vec<usize>` is the history of indices played in this shuffle cycle. `next_track_index` picks random from the unplayed pool; `prev_track_index` pops from `played`. `repeat=true` restarts the cycle when the pool is exhausted. Clicking a track directly resets shuffle (`played.clear()`). Reordering/deleting calls `reset_shuffle()`.
 - **Dock state in egui Memory**: `DockState<Pane>` lives in `ctx.data()` under `tplay.dock_state`. Pure UI state — not in `TPlayApp`. Layout persists to disk each frame.
 - **Shared tag scan**: one cache (`tag_cache`) + one background `scan_files` thread serve every pane. `TPlayApp::ensure_tags(paths)` starts the scan for whatever's missing from the cache (dropping any in-flight receiver — per-path cache means a dropped scan just restarts next request); results drain per frame in `drain_tag_scan`, the app's only other thread besides the FLAC seektable builder. Triggers: library `navigate_to`, playlist `add_files`, `load_playlist_from`. `load_file` reads the playing track's tags inline (one file) so Now Playing shows title · artist immediately. `library_scanning()` recomputes as "any current-folder file missing from the cache".
-- **Appwide settings**: one `~/.config/tplay/config.json` holds everything — theme, EQ (enabled + gains), shuffle/repeat, visualizer mode (`viz_wave`), volume, last loaded playlist, and the library state (favorites, last dir, show hidden). Saved via `TPlayApp::save_config()` on any change, loaded once in `new()`. Shuffle/repeat are global playback modes — loading a playlist never touches them. Volume is applied to the sink at startup. The last loaded `.tplay` (`last_playlist`) is re-loaded on startup (Library + tag scan + tracked file all restored), so Save Playlist keeps overwriting the same file across sessions.
+- **Appwide settings**: one `~/.config/tplay/config.json` holds everything — theme, EQ (enabled + gains), shuffle/repeat, visualizer view (`viz_view`), volume, last loaded playlist, and the library state (favorites, last dir, show hidden). Saved via `TPlayApp::save_config()` on any change, loaded once in `new()`. Shuffle/repeat are global playback modes — loading a playlist never touches them. Volume is applied to the sink at startup. The last loaded `.tplay` (`last_playlist`) is re-loaded on startup (Library + tag scan + tracked file all restored), so Save Playlist keeps overwriting the same file across sessions.
   - **Config JSON structure**:
     ```json
     {
@@ -188,7 +189,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
       "eq": { "enabled": false, "gains": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] },
       "shuffle": false,
       "repeat": false,
-      "viz_wave": false,
+      "viz_view": "Bars",
       "volume": 1.0,
       "last_playlist": "/path/to/playlist.tplay",
       "library": { "favorites": ["/path/to/fav"], "last_dir": "/path/to/music", "show_hidden": false }
