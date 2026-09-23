@@ -1,4 +1,9 @@
 //! Shared test utilities for tplay.
+//!
+//! Each `tests/<suite>.rs` is its own binary and compiles this whole file, but
+//! only uses a subset of helpers — so dead_code fires per-binary even though
+//! every helper is used somewhere. Suppressed here on purpose.
+#![allow(dead_code)]
 
 use std::fs;
 use std::path::{Path, PathBuf};
