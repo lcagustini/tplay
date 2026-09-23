@@ -493,6 +493,9 @@ impl TPlayApp {
             .unwrap_or(true);
 
         if table_ready && self.sink.try_seek(target).is_ok() {
+            // The seek landed in-place: TrackPosition now reports the new
+            // position, so the slow path's skip offset no longer applies.
+            self.position_offset = Duration::ZERO;
             return;
         }
 

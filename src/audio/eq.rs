@@ -163,4 +163,17 @@ where
     fn total_duration(&self) -> Option<Duration> {
         self.inner.total_duration()
     }
+
+    /// Forward the seek to the decoder; on success drop the filter history —
+    /// stale biquad state from before the jump point would click at the seek.
+    fn try_seek(&mut self, pos: Duration) -> Result<(), rodio::source::SeekError> {
+        let res = self.inner.try_seek(pos);
+        if res.is_ok() {
+            for band in &mut self.bands {
+                band.z1 = 0.0;
+                band.z2 = 0.0;
+            }
+        }
+        res
+    }
 }

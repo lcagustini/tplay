@@ -135,6 +135,12 @@ where
     fn total_duration(&self) -> Option<std::time::Duration> {
         self.inner.total_duration()
     }
+
+    /// Forward the seek to the decoder. The viz buffer is intentionally not
+    /// cleared — same as the slow-path seek — the ~100 ms window just rolls on.
+    fn try_seek(&mut self, pos: std::time::Duration) -> Result<(), rodio::source::SeekError> {
+        self.inner.try_seek(pos)
+    }
 }
 
 /// Hann window for the FFT.

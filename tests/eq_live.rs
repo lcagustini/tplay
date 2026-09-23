@@ -7,7 +7,9 @@
 //! Source-level contract: identity at 0 dB, boost in the time domain, and
 //! live reconfiguration + disable.)
 
-use tplay::audio::eq::{EqShared, EqSource, EQ_FREQUENCIES};
+use tplay::audio::eq::{Biquad, EqShared, EqSource, EQ_FREQUENCIES};
+use tplay::audio::viz::{TapSource, VizBuf};
+use rodio::buffer::SamplesBuffer;
 use rodio::Source;
 use std::f32::consts::PI;
 use std::sync::{Arc, RwLock};
@@ -127,6 +129,44 @@ fn disabled_eq_passes_audio_through_unfiltered() {
 
     let max_diff = input.iter().zip(&out).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
     assert!(max_diff < 1e-7, "disabled EQ must be bit-transparent (max diff {max_diff})");
+}
+
+#[test]
+fn try_seek_forwards_to_inner_and_resets_filter_state() {
+    // The fast seek path (Sink::try_seek) reaches the decoder only if
+    // EqSource and TapSource forward try_seek. Wrap an in-memory seekable
+    // buffer whose sample values encode their index, jump to 0.5 s, and
+    // assert the stream resumes at the mid-file sample.
+    let sr = 44100u32;
+    let samples: Vec<f32> = (0..sr as usize * 2).map(|i| i as f32).collect();
+    let buf = SamplesBuffer::new(2, sr, samples);
+
+    // EQ enabled with a boost so the seek's filter-history reset is observable.
+    let shared = Arc::new(RwLock::new(EqShared {
+        gains: [12.0; 10],
+        enabled: true,
+    }));
+    let eq = EqSource::new(buf, shared);
+    let mut tap = TapSource::new(eq, VizBuf::new());
+
+    // Build filter history over the opening samples, then jump to 0.5 s
+    // (sample offset 44100 in interleaved stereo).
+    for _ in 0..100 {
+        tap.next().unwrap();
+    }
+    tap.try_seek(Duration::from_millis(500)).unwrap();
+
+    // Expected: the 10-band chain applied to 44100.0 from zeroed state.
+    let mut expected = 44100.0f32;
+    for freq in EQ_FREQUENCIES {
+        let mut fresh = Biquad::new(sr, freq, 12.0);
+        expected = fresh.process(expected);
+    }
+    let first = tap.next().unwrap();
+    assert!(
+        (first - expected).abs() < 1e-3,
+        "seek must land on the mid-file sample with fresh filters: got {first}, expected {expected}"
+    );
 }
 
 #[test]
