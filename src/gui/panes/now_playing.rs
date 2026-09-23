@@ -95,9 +95,18 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
             } else if bar.drag_stopped() || bar.clicked() {
                 app.seek(seek_normalized);
             } else if let Some(target) = app.seek_target() {
+                // A seek briefly holds the bar at the target; follow once the
+                // sink's position catches up. (seek_target stays set after a
+                // seek by design — catch-up is monotonic, so past this point
+                // we track playback forever.)
                 if total_secs.is_some() && app.playback_position() >= target - 0.02 {
                     seek_normalized = actual_ratio;
                 }
+            } else {
+                // Resting state: track the real playback position. This is
+                // also what resets the bar to 0:00 on a track change, since
+                // load_file clears seek_target and the new track starts at 0.
+                seek_normalized = actual_ratio;
             }
 
             ui.ctx().memory_mut(|m| m.data.insert_temp(seek_id(), seek_normalized));
