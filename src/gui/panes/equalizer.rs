@@ -48,7 +48,7 @@ pub fn equalizer_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
     let label_h = ui.fonts(|f| {
         f.layout_no_wrap(
             TPlayApp::format_freq(EQ_FREQUENCIES[0]),
-            egui::FontId::new(10.0, theme.metadata_font.clone()),
+            egui::FontId::new(layout.text_meta, theme.metadata_font.clone()),
             p.text_secondary,
         )
         .size()
@@ -116,9 +116,8 @@ pub fn equalizer_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                     ui.add_space(layout.eq_band_gap);
                     ui.label(
                         egui::RichText::new(TPlayApp::format_freq(EQ_FREQUENCIES[i]))
-                            .small()
                             .color(p.text_secondary)
-                            .font(egui::FontId::new(10.0, theme.metadata_font.clone())),
+                            .font(egui::FontId::new(layout.text_meta, theme.metadata_font.clone())),
                     );
                 });
             });

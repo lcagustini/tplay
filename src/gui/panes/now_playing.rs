@@ -19,6 +19,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
     // Owned Arc copy (refcount bump) — lets panes call &mut app while keeping
     // the theme data; `meta` takes &Theme via deref.
     let theme = app.theme().clone();
+    let layout = theme.layout.with_defaults();
 
     let body = ui.scope(|ui| {
         ui.vertical(|ui| {
@@ -35,14 +36,14 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
             // Measure both time labels so the bar between them takes exactly
             // the leftover width. (available_width() read from nested
             // right-to-left scopes under-sizes inside the dock's ScrollArea.)
-            let font = egui::FontId::new(13.0, theme.metadata_font.clone());
+            let font = egui::FontId::new(layout.text_time, theme.metadata_font.clone());
             let label_w = |s: &str| {
                 ui.fonts(|f| f.layout_no_wrap(s.to_owned(), font.clone(), theme.palette.text_secondary).size().x)
             };
             let gaps = ui.spacing().item_spacing.x * 2.0;
             let bar_w = (ui.available_width() - label_w(&pos_str) - label_w(&total_str) - gaps).max(40.0);
 
-            ui.label(meta(pos_str, &theme, 13.0));
+            ui.label(meta(pos_str, &theme, layout.text_time));
 
             let bar = ui.add_enabled_ui(total_secs.is_some(), |ui| {
                 // A Slider ignores add_sized — it requests spacing().slider_width
@@ -55,7 +56,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                 )
             }).inner;
 
-            ui.label(meta(total_str, &theme, 13.0));
+            ui.label(meta(total_str, &theme, layout.text_time));
 
             if bar.dragged() {
                 // hold
@@ -121,7 +122,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
             let title = cur.as_deref().map(|p| library::title_or_stem(p, info)).unwrap_or_default();
             let artist = info.map(|i| i.artist.as_str()).unwrap_or_default();
             let label = if artist.is_empty() { title } else { format!("{title} · {artist}") };
-            ui.label(meta(label, &theme, 12.0));
+            ui.label(meta(label, &theme, layout.text_meta));
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Volume

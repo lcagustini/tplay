@@ -8,22 +8,25 @@
     "panel_bg": "#bcbcbc",
     "text_primary": "#161616",
     "text_secondary": "#464646",
-    "accent": "#2b6fd4",
+    "accent": "#15449e",
     "border": "#9a9a9a",
-    "progress_fill": "#2b6fd4",
+    "progress_fill": "#15449e",
     "slider_track": "#ababab",
     "slider_handle": "#333333",
     "row_even": "#c8c8c8",
     "row_odd": "#d6d6d6",
     "btn_hover": "#e0e0e0",
-    "focus_ring": "#2b6fd4",
+    "focus_ring": "#15449e",
     "disabled_text": "#8a8a8a"
   },
   "layout": {
     "eq_slider_min_h": 60,
     "eq_slider_max_h": 220,
-    "eq_band_w_min": 40,
+    "eq_band_w_min": 30,
     "eq_header_gap": 6,
-    "eq_band_gap": 2
+    "eq_band_gap": 2,
+    "text_meta": 12,
+    "text_time": 13,
+    "row_tint_alpha": 0.1
   }
 }

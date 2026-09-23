@@ -33,44 +33,64 @@ const CELL_WIDTHS: [f32; 6] = [0.0, 90.0, 100.0, 34.0, 64.0, 44.0]; // Title is 
 const ROW_FIXED_W: f32 = CELL_WIDTHS[1] + CELL_WIDTHS[2] + CELL_WIDTHS[3] + CELL_WIDTHS[4] + CELL_WIDTHS[5] + 40.0;
 
 /// One clickable column header. Returns true when clicked; the caller picks
-/// the sort key. The active column is accent-colored with a ▾/▴ direction
-/// hint; clicking it again flips the direction in `TPlayApp::set_library_sort`.
+/// the sort key. The active column is accent-colored with a theme icon
+/// (`arrow`) showing the sort direction; clicking it again flips the
+/// direction in `TPlayApp::set_library_sort`.
 fn header_cell(
     ui: &mut egui::Ui,
     p: theme::Palette,
     label: &str,
     active: bool,
-    asc: bool,
+    arrow: Option<&egui::TextureHandle>,
     w: f32,
     row_h: f32,
 ) -> bool {
-    let text = if active {
-        format!("{label} {}", if asc { "▾" } else { "▴" })
-    } else {
-        label.to_string()
+    let color = if active { p.accent } else { p.text_secondary };
+    let btn = match arrow {
+        Some(tex) => egui::Button::image_and_text(
+            egui::Image::new(tex).fit_to_exact_size(egui::vec2(10.0, 10.0)),
+            egui::RichText::new(label).small().color(color),
+        ),
+        None => egui::Button::new(egui::RichText::new(label).small().color(color)),
     };
-    ui.add_sized(
-        egui::vec2(w, row_h),
-        egui::Button::new(
-            egui::RichText::new(text)
-                .small()
-                .color(if active { p.accent } else { p.text_secondary }),
-        )
-        .frame(false),
-    )
-    .on_hover_text("Sort by this column")
-    .clicked()
+    ui.add_sized(egui::vec2(w, row_h), btn.frame(false))
+        .on_hover_text("Sort by this column")
+        .clicked()
 }
 
-fn draw_dir_row(ui: &mut egui::Ui, theme: &theme::Theme, row_h: f32, i: usize, name: &str) -> bool {
+fn draw_dir_row(
+    ui: &mut egui::Ui,
+    theme: &theme::Theme,
+    row_h: f32,
+    i: usize,
+    name: &str,
+    folder: Option<&egui::TextureHandle>,
+) -> bool {
     let p = theme.palette;
+    let layout = theme.layout.with_defaults();
     let (rect, mut row) = theme::row(ui, i, false, row_h, theme);
     row.spacing_mut().item_spacing.x = 4.0;
-    row.painter().text(
-        rect.min + egui::vec2(6.0, row_h / 2.0),
+    let mut text_x = rect.min.x + 6.0;
+    if let Some(tex) = folder {
+        let s = 14.0;
+        let img_rect = egui::Rect::from_min_size(
+            egui::pos2(rect.min.x + 2.0, rect.center().y - s / 2.0),
+            egui::vec2(s, s),
+        );
+        ui.painter().image(
+            tex.id(),
+            img_rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+        text_x += s + 4.0;
+    }
+    let text = if folder.is_none() { format!("📁  {name}") } else { name.to_string() };
+    ui.painter().text(
+        egui::pos2(text_x, rect.center().y),
         egui::Align2::LEFT_CENTER,
-        format!("📁  {name}"),
-        egui::FontId::new(12.0, theme.metadata_font.clone()),
+        text,
+        egui::FontId::new(layout.text_meta, theme.metadata_font.clone()),
         p.text_secondary,
     );
     let resp = ui.interact(rect, egui::Id::new("lib_dir").with(i), egui::Sense::click());
@@ -101,9 +121,9 @@ fn draw_playlist_row(ui: &mut egui::Ui, theme: &theme::Theme, row_h: f32, i: usi
         )
         .on_hover_text("Load playlist");
 
-    row.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        ui.label(egui::RichText::new("Playlist").small().color(p.accent));
-    });
+    // Tag sits right after the name (left-of-center), not floated to the
+    // row's far right past the empty tag cells.
+    row.add(egui::Label::new(egui::RichText::new("Playlist").small().color(p.accent)));
 
     title_resp.clicked()
 }
@@ -118,6 +138,7 @@ fn draw_file_row(
     info: Option<&library::TrackInfo>,
 ) -> Option<fn(&mut TPlayApp, PathBuf)> {
     let p = theme.palette;
+    let layout = theme.layout.with_defaults();
     let is_current = app.current_path().is_some_and(|c| c == path);
     let (rect, mut row) = theme::row(ui, i, is_current, row_h, theme);
     row.spacing_mut().item_spacing.x = 4.0;
@@ -161,7 +182,7 @@ fn draw_file_row(
         egui::Label::new(
             egui::RichText::new(TPlayApp::fmt_duration(dur))
                 .color(p.text_secondary)
-                .font(egui::FontId::new(12.0, theme.metadata_font.clone())),
+                .font(egui::FontId::new(layout.text_meta, theme.metadata_font.clone())),
         ),
     );
     let add_clicked = row
@@ -181,6 +202,7 @@ fn draw_file_row(
 pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
     let theme = app.theme().clone();
     let p = theme.palette;
+    let layout = theme.layout.with_defaults();
 
     // First frame this session: list the saved/current dir and start the scan.
     if !ui.ctx().memory_mut(|m| m.data.get_temp::<bool>(egui::Id::new(LIB_INIT)).unwrap_or(false)) {
@@ -188,16 +210,44 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
         app.navigate_to(app.library_dir().to_path_buf());
     }
 
-    // Header: current dir + favorite toggle (+ Add All on the right).
+    // Header: current dir (folder icon + strong name, full path on hover) +
+    // favorite toggle; composition counts + Add All on the right.
+    let folder_tex = app.theme_icon(theme::Icon::Folder).cloned();
+    let (n_tracks, n_dirs, n_playlists) = {
+        let mut c = (0usize, 0usize, 0usize);
+        for e in app.library_entries() {
+            if e.is_dir() {
+                c.1 += 1;
+            } else if library::is_playlist(e.path()) {
+                c.2 += 1;
+            } else {
+                c.0 += 1;
+            }
+        }
+        c
+    };
     ui.horizontal(|ui| {
         let dir = app.library_dir().to_path_buf();
-        ui.label(
-            egui::RichText::new(dir_name(&dir))
-                .color(p.text_secondary)
-                .font(egui::FontId::new(12.0, theme.metadata_font.clone())),
-        );
+        let name = dir_name(&dir);
+        if let Some(tex) = &folder_tex {
+            ui.add(egui::Image::new(tex).fit_to_exact_size(egui::vec2(14.0, 14.0)));
+        }
+        let label = if folder_tex.is_some() { name } else { format!("📁  {name}") };
+        ui.label(egui::RichText::new(label).strong().color(p.text_primary))
+            .on_hover_text(dir.display().to_string());
         let fav = app.is_favorite(&dir);
-        let fav_btn = egui::Button::new(if fav { "★" } else { "☆" }).selected(fav);
+        let tex = if fav {
+            app.theme_icon(theme::Icon::StarOn).cloned()
+        } else {
+            app.theme_icon(theme::Icon::StarOff).cloned()
+        };
+        let fav_btn = match tex {
+            Some(tex) => egui::Button::image(
+                egui::Image::new(&tex).fit_to_exact_size(egui::vec2(14.0, 14.0)),
+            )
+            .selected(fav),
+            None => egui::Button::new(if fav { "★" } else { "☆" }).selected(fav),
+        };
         if ui.add(fav_btn).on_hover_text("Favorite folder").clicked() {
             app.toggle_favorite(dir);
         }
@@ -215,6 +265,18 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                     .collect();
                 app.add_files(files);
             }
+            // "1 track" stays singular.
+            let n = |n: usize, s: &str| format!("{n} {s}{}", if n == 1 { "" } else { "s" });
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} · {} · {}",
+                    n(n_tracks, "track"),
+                    n(n_dirs, "folder"),
+                    n(n_playlists, "playlist"),
+                ))
+                .small()
+                .color(p.text_secondary),
+            );
         });
     });
 
@@ -240,7 +302,7 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
     // Favorites column + file browser column.
     ui.horizontal_top(|ui| {
         ui.vertical(|ui| {
-            ui.set_min_width(140.0);
+            ui.set_min_width(120.0);
             ui.label(egui::RichText::new("Favorites").small().strong().color(p.text_secondary));
             ui.add_space(4.0);
             let mut jump: Option<PathBuf> = None;
@@ -254,7 +316,7 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                             egui::Label::new(
                                 egui::RichText::new(&name)
                                     .color(if active { p.accent } else { p.text_secondary })
-                                    .font(egui::FontId::new(12.0, theme.metadata_font.clone())),
+                                    .font(egui::FontId::new(layout.text_meta, theme.metadata_font.clone())),
                             )
                             .truncate()
                             .sense(egui::Sense::click()),
@@ -263,7 +325,7 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                     {
                         jump = Some(dir.clone());
                     }
-                    if ui.small_button("✕").clicked() {
+                    if theme::icon_button(ui, app.theme_icon(theme::Icon::Remove), theme::Icon::Remove, 13.0, true, false).clicked() {
                         app.toggle_favorite(dir.clone());
                     }
                 });
@@ -274,32 +336,46 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
         });
         ui.separator();
         ui.vertical(|ui| {
-            // Sortable column header over the file list (Title takes the
-            // flexible column; the tag cells mirror the row widths).
-            let (cur, asc) = (app.library_sort(), app.library_sort_asc());
-            ui.horizontal(|ui| {
-                let (head, _) = ui.allocate_exact_size(
-                    egui::vec2(ui.available_width(), 22.0),
-                    egui::Sense::hover(),
-                );
-                ui.painter().rect_filled(head, 0.0, p.row_odd);
-                let mut h = ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(egui::Rect::from_min_max(head.min + egui::vec2(6.0, 0.0), head.max))
-                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                );
-                h.spacing_mut().item_spacing.x = 4.0;
-                for (key, label) in library::SORT_OPTIONS.iter().enumerate() {
-                    let w = if key == 0 {
-                        (head.width() - ROW_FIXED_W).max(2.0)
-                    } else {
-                        CELL_WIDTHS[key]
-                    };
-                    if header_cell(&mut h, p, label, key == cur, asc, w, 22.0) {
-                        app.set_library_sort(key);
+            // Sortable column header only when the folder has audio files —
+            // folders/playlists-only rows have no tag columns to align to.
+            let has_audio = app
+                .library_entries()
+                .iter()
+                .any(|e| !e.is_dir() && !library::is_playlist(e.path()));
+            if has_audio {
+                let (cur, asc) = (app.library_sort(), app.library_sort_asc());
+                let asc_tex = app.theme_icon(theme::Icon::SortAsc).cloned();
+                let desc_tex = app.theme_icon(theme::Icon::SortDesc).cloned();
+                ui.horizontal(|ui| {
+                    let (head, _) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), 22.0),
+                        egui::Sense::hover(),
+                    );
+                    ui.painter().rect_filled(head, 0.0, p.row_odd);
+                    let mut h = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(egui::Rect::from_min_max(head.min + egui::vec2(6.0, 0.0), head.max))
+                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                    );
+                    h.spacing_mut().item_spacing.x = 4.0;
+                    for (key, label) in library::SORT_OPTIONS.iter().enumerate() {
+                        let w = if key == 0 {
+                            (head.width() - ROW_FIXED_W).max(2.0)
+                        } else {
+                            CELL_WIDTHS[key]
+                        };
+                        let arrow = if key == cur {
+                            // Ascending → up triangle; descending → down.
+                            if asc { asc_tex.as_ref() } else { desc_tex.as_ref() }
+                        } else {
+                            None
+                        };
+                        if header_cell(&mut h, p, label, key == cur, arrow, w, 22.0) {
+                            app.set_library_sort(key);
+                        }
                     }
-                }
-            });
+                });
+            }
 
             let scroll_h = (ui.available_height() - 24.0).max(40.0);
             egui::ScrollArea::vertical()
@@ -314,7 +390,7 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
 
                     // Parent dir row, then the sorted folder + file rows.
                     if let Some(up) = app.library_dir().parent() {
-                        if draw_dir_row(ui, &theme, row_h, i, "..") {
+                        if draw_dir_row(ui, &theme, row_h, i, "..", folder_tex.as_ref()) {
                             action = Some(Act::Nav(up.to_path_buf()));
                         }
                         i += 1;
@@ -326,7 +402,7 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                                 i += 1;
                                 continue;
                             }
-                            if draw_dir_row(ui, &theme, row_h, i, &name) {
+                            if draw_dir_row(ui, &theme, row_h, i, &name, folder_tex.as_ref()) {
                                 action = Some(Act::Nav(entry.path().to_path_buf()));
                             }
                         } else {

@@ -8,6 +8,7 @@ pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
     // Owned Arc copy — panes call &mut app while using theme data.
     let theme = app.theme().clone();
     let p = theme.palette;
+    let layout = theme.layout.with_defaults();
 
     // Header: the current playlist's name (single source — app.playlist_name;
     // follows New/Save/Load live).
@@ -70,7 +71,7 @@ pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                 row.label(
                     egui::RichText::new(format!("{:>2}.", i + 1))
                         .color(p.text_secondary)
-                        .font(egui::FontId::new(12.0, theme.metadata_font.clone())),
+                        .font(egui::FontId::new(layout.text_meta, theme.metadata_font.clone())),
                 );
 
                 // Title fills the remaining width (meta + fmt + ✕ right-aligned).
@@ -94,7 +95,7 @@ pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                         title_resp.rect.center(),
                         egui::Align2::CENTER_CENTER,
                         &name,
-                        egui::FontId::proportional(14.0),
+                        egui::FontId::new(layout.text_time, theme.metadata_font.clone()),
                         p.accent,
                     );
                 }
@@ -111,7 +112,7 @@ pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                         ui.label(
                             egui::RichText::new(fmt.clone())
                                 .color(p.text_secondary)
-                                .font(egui::FontId::new(12.0, theme.metadata_font.clone())),
+                                .font(egui::FontId::new(layout.text_meta, theme.metadata_font.clone())),
                         );
                     }
                     if !meta.is_empty() {
@@ -164,13 +165,14 @@ pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
         m.data.insert_temp(drag_hover_id, drag_hover);
     });
 
-    // Bottom actions: New Playlist (confirm only when there are unsaved edits —
+    // Bottom actions: Create Playlist (confirm only when there are unsaved edits —
     // tracks are added from the Library now), Save Playlist (native save
     // dialog, defaults to the Library's current folder; later saves overwrite
     // the tracked file directly).
     ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
-        if ui.button("New Playlist").clicked() {
+        ui.spacing_mut().item_spacing.x = 12.0;
+        if ui.button("Create Playlist").clicked() {
             if TPlayApp::confirm(
                 "New playlist",
                 "Discard unsaved changes and start a new playlist?",
@@ -181,8 +183,8 @@ pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
         }
         let save_hover = app
             .playlist_file()
-            .map(|p| format!("Overwrite {}", p.display()))
-            .unwrap_or_else(|| "Save to a .tplay file".into());
+            .map(|p| format!("Overwrite playlist: {}", p.display()))
+            .unwrap_or_else(|| "Save the playlist to a .tplay file".into());
         if ui.button("Save Playlist").on_hover_text(save_hover).clicked() {
             if let Some(path) = app.playlist_file().map(PathBuf::from) {
                 // Already saved once this session: overwrite, no dialog.

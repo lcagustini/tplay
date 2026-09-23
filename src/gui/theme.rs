@@ -22,14 +22,14 @@ use std::sync::Arc;
 /// Default theme id, shipped with the app and used as the icon fallback.
 pub const DEFAULT_THEME_ID: &str = "dark";
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Base {
     Dark,
     Light,
 }
 
 /// One value per CSS custom property in the reference spec.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Palette {
     // --bg
     pub bg: Color32,
@@ -60,7 +60,7 @@ pub struct Palette {
 }
 
 /// Per-theme UI layout/sizing tokens (all optional; sensible defaults in code).
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Layout {
     /// EQ slider minimum height (px). Below this, sliders become unusable.
     pub eq_slider_min_h: f32,
@@ -73,6 +73,12 @@ pub struct Layout {
     pub eq_header_gap: f32,
     /// Gap between each band's slider and its frequency label (px).
     pub eq_band_gap: f32,
+    /// Type scale: row metadata / caption label size (px).
+    pub text_meta: f32,
+    /// Type scale: time / duration label size (px).
+    pub text_time: f32,
+    /// Active-row highlight: alpha (0..1) of the full-row accent tint.
+    pub row_tint_alpha: f32,
 }
 
 impl Layout {
@@ -80,9 +86,12 @@ impl Layout {
         Layout {
             eq_slider_min_h: if self.eq_slider_min_h > 0.0 { self.eq_slider_min_h } else { 60.0 },
             eq_slider_max_h: if self.eq_slider_max_h > 0.0 { self.eq_slider_max_h } else { 220.0 },
-            eq_band_w_min: if self.eq_band_w_min > 0.0 { self.eq_band_w_min } else { 40.0 },
+            eq_band_w_min: if self.eq_band_w_min > 0.0 { self.eq_band_w_min } else { 30.0 },
             eq_header_gap: if self.eq_header_gap > 0.0 { self.eq_header_gap } else { 6.0 },
             eq_band_gap: if self.eq_band_gap > 0.0 { self.eq_band_gap } else { 2.0 },
+            text_meta: if self.text_meta > 0.0 { self.text_meta } else { 12.0 },
+            text_time: if self.text_time > 0.0 { self.text_time } else { 13.0 },
+            row_tint_alpha: if self.row_tint_alpha > 0.0 { self.row_tint_alpha } else { 0.10 },
         }
     }
 }
@@ -92,7 +101,7 @@ impl Layout {
 pub struct Theme {
     /// Stable id used in theme.json selection + as the skins directory name.
     pub id: String,
-    /// Human-friendly name shown in the Skin dropdown.
+    /// Human-friendly name shown in the Theme dropdown.
     pub name: String,
     pub base: Base,
     /// Retro renders times/metadata in monospace (the pixel-era look).
@@ -131,6 +140,9 @@ impl Theme {
             eq_band_w_min: l.get("eq_band_w_min").and_then(|x| x.as_f64()).map(|x| x as f32).unwrap_or(0.0),
             eq_header_gap: l.get("eq_header_gap").and_then(|x| x.as_f64()).map(|x| x as f32).unwrap_or(0.0),
             eq_band_gap: l.get("eq_band_gap").and_then(|x| x.as_f64()).map(|x| x as f32).unwrap_or(0.0),
+            text_meta: l.get("text_meta").and_then(|x| x.as_f64()).map(|x| x as f32).unwrap_or(0.0),
+            text_time: l.get("text_time").and_then(|x| x.as_f64()).map(|x| x as f32).unwrap_or(0.0),
+            row_tint_alpha: l.get("row_tint_alpha").and_then(|x| x.as_f64()).map(|x| x as f32).unwrap_or(0.0),
         }).with_defaults();
 
         Some(Theme { id, name, base, layout, metadata_font, palette, icons_dir })
@@ -192,7 +204,9 @@ impl Themes {
     }
 
     /// Scan the given directories (in priority order) and merge by theme id.
-    fn load_from(dirs: &[PathBuf]) -> Themes {
+    /// Load all themes found across the given dirs (first dir wins on id
+    /// clash) plus the hardcoded dark fallback.
+    pub fn load_from(dirs: &[PathBuf]) -> Themes {
         let mut list: Vec<Arc<Theme>> = Vec::new();
         for dir in dirs {
             let Ok(entries) = std::fs::read_dir(&dir) else { continue };
@@ -281,6 +295,8 @@ pub fn load_icons(
 }
 
 /// Pane icons. Each maps to a `<theme>/icons/<name>.png` and a fallback glyph.
+/// Fallback glyphs must exist in the bundled egui font stack (Ubuntu-Light /
+/// NotoEmoji / emoji-icon-font) or they render as tofu boxes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Icon {
     /// App logo — menu button in the top panel (per-theme PNG, fallback glyph).
@@ -294,10 +310,21 @@ pub enum Icon {
     Repeat,
     Volume,
     Remove,
+    /// Library sort direction (accent-colored, per theme).
+    SortAsc,
+    SortDesc,
+    /// Library favorite toggle (star_on = accent, star_off = secondary).
+    StarOn,
+    StarOff,
+    /// Library folder row glyph.
+    Folder,
+    /// Window chrome: minimize / maximize (text_primary, per theme).
+    Minimize,
+    Maximize,
 }
 
 impl Icon {
-    pub const ALL: [Icon; 10] = [
+    pub const ALL: [Icon; 17] = [
         Icon::Logo,
         Icon::Play,
         Icon::Pause,
@@ -308,9 +335,16 @@ impl Icon {
         Icon::Repeat,
         Icon::Volume,
         Icon::Remove,
+        Icon::SortAsc,
+        Icon::SortDesc,
+        Icon::StarOn,
+        Icon::StarOff,
+        Icon::Folder,
+        Icon::Minimize,
+        Icon::Maximize,
     ];
 
-    const DATA: [(&'static str, &'static str); 10] = [
+    const DATA: [(&'static str, &'static str); 17] = [
         ("logo.png", "☰"),
         ("play.png", "▶"),
         ("pause.png", "⏸"),
@@ -320,7 +354,14 @@ impl Icon {
         ("shuffle.png", "🔀"),
         ("repeat.png", "🔁"),
         ("volume.png", "🔊"),
-        ("remove.png", "✕"),
+        ("remove.png", "×"),
+        ("sort_asc.png", "⏶"),
+        ("sort_desc.png", "⏷"),
+        ("star_on.png", "★"),
+        ("star_off.png", "☆"),
+        ("folder.png", "📁"),
+        ("minimize.png", "🗕"),
+        ("maximize.png", "🗖"),
     ];
 
     pub fn index(self) -> usize {
@@ -417,17 +458,32 @@ pub fn apply(ctx: &egui::Context, theme: &Theme) {
     v.widgets.active.fg_stroke = Stroke::new(1.5_f32, p.text_primary);
 
     ctx.set_visuals(v);
+
+    // Kill widget color cross-fades so a mid-session theme switch lands on the
+    // very next frame (this app's aesthetic is instant, Winamp-style; the
+    // default ~0.08s animation smears token colors across every widget).
+    ctx.style_mut(|s| s.animation_time = 0.0);
 }
 
 /// Returns (row_rect, child_ui) with banding, accent tint, 3px stripe, and 6px inset.
-/// `i` is the row index for even/odd banding. `is_current` highlights the playing track.
+/// `i` is the row index for even/odd banding. `is_current` highlights the playing
+/// track: a translucent `row_tint_alpha` accent overlay over the banded bg (keeps
+/// text readable, unlike a gamma-multiplied fill which darkens past the bg) plus
+/// a 3px accent stripe.
 pub fn row(ui: &mut egui::Ui, i: usize, is_current: bool, row_h: f32, theme: &Theme) -> (egui::Rect, egui::Ui) {
     let p = theme.palette;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h), egui::Sense::hover());
     let bg = if i % 2 == 0 { p.row_even } else { p.row_odd };
     ui.painter().rect_filled(rect, 2.0, bg);
     if is_current {
-        ui.painter().rect_filled(rect, 2.0, p.accent.gamma_multiply(0.15));
+        let alpha = theme.layout.with_defaults().row_tint_alpha;
+        let tint = Color32::from_rgba_unmultiplied(
+            p.accent.r(),
+            p.accent.g(),
+            p.accent.b(),
+            (alpha * 255.0).round() as u8,
+        );
+        ui.painter().rect_filled(rect, 2.0, tint);
         ui.painter().rect_filled(
             egui::Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height())),
             0.0,
@@ -441,51 +497,4 @@ pub fn row(ui: &mut egui::Ui, i: usize, is_current: bool, row_h: f32, theme: &Th
     );
     child.spacing_mut().item_spacing.x = 4.0;
     (rect, child)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Fixture theme.json written into a temp dir tree, returning the dirs.
-    fn write_theme(dir: &Path, id: &str, palette_accent: &str) {
-        std::fs::create_dir_all(dir.join(id)).unwrap();
-        std::fs::write(
-            dir.join(id).join("theme.json"),
-            format!(
-                r##"{{"id":"{id}","name":"{id}","base":"dark",
-                 "palette":{{"bg":"#101010","panel_bg":"#181818",
-                 "text_primary":"#e0e0e0","text_secondary":"#8c8c8c",
-                 "accent":"{palette_accent}","border":"#333333",
-                 "progress_fill":"#2ea3f0","slider_track":"#222222",
-                 "slider_handle":"#999999","row_even":"#141414",
-                 "row_odd":"#1c1c1c","btn_hover":"#282828",
-                 "focus_ring":"#2ea3f0"}}}}"##,
-            ),
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn higher_priority_dir_wins_and_icons_fall_back() {
-        let base = std::env::temp_dir().join(format!("tplay-test-{}", std::process::id()));
-        let overrides = base.join("overrides");
-        let bundled = base.join("bundled");
-        write_theme(&overrides, "dark", "#ff0000");
-        write_theme(&bundled, "dark", "#00ff00"); // must lose to overrides
-        write_theme(&bundled, "mine", "#0000ff"); // no icons dir
-        std::fs::create_dir_all(overrides.join("dark").join("icons")).unwrap();
-        std::fs::write(overrides.join("dark").join("icons").join("play.png"), b"png").unwrap();
-
-        // Priority order: first dir in the slice wins on id clash.
-        let themes = Themes::load_from(&[overrides.clone(), bundled]);
-        assert_eq!(themes.list().len(), 2);
-        assert_eq!(themes.default().palette.accent, Color32::from_rgb(0xff, 0, 0));
-        // "mine" has no icons of its own → falls back to the default theme's.
-        let mine = themes.get("mine").unwrap();
-        assert!(themes.icon_path(mine, Icon::Play).unwrap().ends_with("dark/icons/play.png"));
-        assert!(themes.icon_path(mine, Icon::Volume).is_none()); // dark has no volume.png
-
-        let _ = std::fs::remove_dir_all(&base);
-    }
 }

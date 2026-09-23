@@ -160,7 +160,7 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
         .unwrap_or_else(default_tree);
 
     // Top-left menu button (app logo per theme): pane checkboxes reflect the
-    // tree, toggles edit it; a Skin section (moved here from the Now Playing
+    // tree, toggles edit it; a Theme section (moved here from the Now Playing
     // title row) switches themes.
     egui::TopBottomPanel::top("pane_dropdown_panel")
         .frame(egui::Frame::none())
@@ -180,6 +180,11 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
             }
 
             let logo = app.theme_icon(theme::Icon::Logo).cloned();
+            // Window-chrome textures are cloned before the closures below so
+            // they don't have to capture `app` (menu_contents already does).
+            let win_close_tex = app.theme_icon(theme::Icon::Remove).cloned();
+            let win_max_tex = app.theme_icon(theme::Icon::Maximize).cloned();
+            let win_min_tex = app.theme_icon(theme::Icon::Minimize).cloned();
             let menu_contents = |ui: &mut egui::Ui| {
                 let open_count = Pane::ALL.iter().filter(|p| pane_is_open(&tree, **p)).count();
                 for pane in Pane::ALL {
@@ -196,7 +201,7 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
                     }
                 }
                 ui.separator();
-                ui.label("Skin");
+                ui.label("Theme");
                 let mut sel = app.theme().id.clone();
                 for t in app.themes() {
                     if ui.selectable_label(t.id == sel, t.name.clone()).clicked() {
@@ -232,9 +237,8 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
                 // window controls live here, right-aligned via a right-to-left
                 // flush layout. Within it the platform convention holds: the
                 // first added (Close) lands rightmost, so reading left-to-right
-                // the order is minimize, maximize/restore, close. The glyphs
-                // come from the bundled emoji icon font (Ubuntu-Light has no
-                // box-drawing set).
+                // the order is minimize, maximize/restore, close. Icons are
+                // per-theme PNGs (text_primary chrome, ✕ close art).
                 let maximized = ui
                     .ctx()
                     .input(|i| i.viewport().maximized)
@@ -242,20 +246,17 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
                 ui.with_layout(
                     egui::Layout::right_to_left(egui::Align::Center),
                     |ui| {
-                        let close = ui
-                            .add(egui::Button::new("🗙").small().frame(false))
+                        let close = theme::icon_button(ui, win_close_tex.as_ref(), theme::Icon::Remove, 13.0, true, false)
                             .on_hover_text("Close");
                         if close.clicked() {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
-                        let maximize = ui
-                            .add(egui::Button::new("🗖").small().frame(false))
+                        let maximize = theme::icon_button(ui, win_max_tex.as_ref(), theme::Icon::Maximize, 13.0, true, false)
                             .on_hover_text(if maximized { "Restore" } else { "Maximize" });
                         if maximize.clicked() {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
                         }
-                        let minimize = ui
-                            .add(egui::Button::new("🗕").small().frame(false))
+                        let minimize = theme::icon_button(ui, win_min_tex.as_ref(), theme::Icon::Minimize, 13.0, true, false)
                             .on_hover_text("Minimize");
                         if minimize.clicked() {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
