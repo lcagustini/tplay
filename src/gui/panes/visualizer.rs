@@ -24,14 +24,15 @@ pub fn visualizer_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                 .font(egui::FontId::new(layout.text_meta, theme.metadata_font.clone())),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // Right-to-left adds leftmost-last, so iterate reversed to keep
-            // the labels in `VizView::ALL` order when read left-to-right.
-            for v in VizView::ALL.into_iter().rev() {
-                if ui.selectable_label(view == v, v.name()).clicked() {
-                    app.set_viz_view(v);
-                    view = v;
-                }
-            }
+            egui::ComboBox::from_id_salt("viz_view")
+                .selected_text(view.name())
+                .show_ui(ui, |ui| {
+                    for v in VizView::ALL {
+                        if ui.selectable_value(&mut view, v, v.name()).changed() {
+                            app.set_viz_view(view);
+                        }
+                    }
+                });
         });
     });
     ui.add_space(4.0);

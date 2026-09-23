@@ -96,7 +96,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 ## Visualizer
  
 - Dockable pane (**Visualizer**), closed by default, auto-listed in the ☰ menu. No new theme tokens, no new icons.
-- Header: the view selector iterates `VizView::ALL` (registry in `app.rs`), persisted in `config.json` (`viz_view`) so the choice survives restarts.
+- Header: the view selector is a dropdown (`ComboBox`) iterating `VizView::ALL`, persisted in `config.json` (`viz_view`) so the choice survives restarts.
 - **Views are modular, mirroring the panes pattern**: one file per view under `src/gui/panes/visualizer/views/`, each exposing a single `pub fn draw(painter, rect, viz, palette)`; `visualizer.rs` is the dispatcher (header + `match`). Views own their per-frame state privately in egui memory (bars keeps its smoothing buffer under its own key). **Adding a view** = a new `views/<name>.rs` + a `VizView` variant in `app.rs` (`ALL` + `name` + one match arm) — no coordinator/config changes.
 - Audio pipeline: `TapSource` wraps `EqSource` (post-EQ → visualizes exactly what you hear). Mono-downmixes, pushes into a capped ring buffer (`VizBuf`, ~100 ms / 4096 samples). `load_file` and `seek` append the tap; `load_file`/`stop()` clear the buffer.
 - **Bars view**: 1024-point radix-2 FFT with Hann window → 32 log-spaced bands → dB-normalized (-60..0) → per-bin attack/release smoothing (classic WMP feel).
