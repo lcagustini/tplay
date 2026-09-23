@@ -10,7 +10,7 @@ path = "src/lib.rs"
 [dependencies]
 eframe    = "0.30"
 # symphonia-all enables MP3, FLAC, OGG, WAV, AAC decoding
-rodio     = { version = "0.19", features = ["symphonia-all"] }
+rodio     = { version = "0.21", features = ["symphonia-all"] }
 rfd       = "0.14"
 # Direct symphonia access so we can probe MP3 duration ourselves
 symphonia = { version = "0.5", features = ["all"] }

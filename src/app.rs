@@ -4,13 +4,11 @@ use crate::audio;
 use crate::gui::theme::{self, Theme, Themes};
 use crate::library;
 use eframe::egui;
-use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
+use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink, Source};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::BufReader;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -131,8 +129,8 @@ pub const EQ_PRESETS: [(&str, [f32; 10]); 7] = [
 ];
 
 pub struct TPlayApp {
-    _stream: OutputStream,
-    stream_handle: OutputStreamHandle,
+    /// Owns the cpal output stream + mixer; must outlive every Sink.
+    output: OutputStream,
     sink: Sink,
 
     current_path: Option<PathBuf>,
@@ -148,11 +146,6 @@ pub struct TPlayApp {
     /// rodio's get_pos() only counts post-skip samples, so the fresh sink
     /// under-reports by exactly the skip amount. Compensate for it.
     position_offset: Duration,
-
-    /// Set to Some(flag) while the background seektable builder is running.
-    /// The flag flips to true when the thread finishes. None means the file
-    /// either already had a seektable or is not a FLAC.
-    seektable_ready: Option<Arc<AtomicBool>>,
 
     playlist: Vec<PathBuf>,
     /// Index into `playlist` of the track currently loaded, set when playback
@@ -223,9 +216,8 @@ pub struct TPlayApp {
 impl TPlayApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let ctx = cc.egui_ctx.clone();
-        let (_stream, stream_handle) =
-            OutputStream::try_default().expect("No audio output device found");
-        let sink = Sink::try_new(&stream_handle).expect("Failed to create audio sink");
+        let output = OutputStreamBuilder::open_default_stream().expect("No audio output device found");
+        let sink = Sink::connect_new(output.mixer());
 
         let themes = Themes::load();
 
@@ -238,15 +230,13 @@ impl TPlayApp {
         let icons = theme::load_icons(&ctx, &themes, &theme);
 
         let mut app = Self {
-            _stream,
-            stream_handle,
+            output,
             sink,
             current_path: None,
             total_duration: None,
             volume: config.volume,
             seek_target: None,
             position_offset: Duration::ZERO,
-            seektable_ready: None,
             playlist: Vec::new(),
             current_index: None,
             playlist_file: None,
@@ -358,26 +348,10 @@ impl TPlayApp {
     fn load_file(&mut self, path: PathBuf) {
         self.seek_target     = None;
         self.position_offset = Duration::ZERO;
-        self.seektable_ready = None;
         self.viz.clear();
 
-        match Sink::try_new(&self.stream_handle) {
-            Ok(s) => { self.sink = s; self.sink.set_volume(self.volume); }
-            Err(e) => { eprintln!("tplay: sink error: {e}"); return; }
-        }
-
-        let is_flac = path.extension().and_then(|e| e.to_str())
-            .map(|e| e.eq_ignore_ascii_case("flac")).unwrap_or(false);
-
-        if is_flac && !audio::flac_has_seektable(&path) {
-            let ready = Arc::new(AtomicBool::new(false));
-            self.seektable_ready = Some(Arc::clone(&ready));
-            let path_bg = path.clone();
-            std::thread::spawn(move || {
-                let _ = audio::build_flac_seektable(&path_bg);
-                ready.store(true, Ordering::Release);
-            });
-        }
+        self.sink = Sink::connect_new(self.output.mixer());
+        self.sink.set_volume(self.volume);
 
         // Tag the loaded track up front so Now Playing shows title · artist
         // immediately instead of waiting on a scan (one file, negligible cost).
@@ -386,11 +360,13 @@ impl TPlayApp {
         }
 
         match File::open(&path) {
-            Ok(file) => match Decoder::new(BufReader::new(file)) {
+            // try_from sets byte_len from file metadata, which is what lets
+            // the symphonia FLAC reader compute its binary-search range — with
+            // plain Decoder::new it's None and every FLAC seek fails.
+            Ok(file) => match Decoder::try_from(file) {
                 Ok(source) => {
                     self.total_duration = source.total_duration()
                         .or_else(|| audio::probe_duration(&path));
-                    let source = source.convert_samples::<f32>();
                     let eq_source = audio::eq::EqSource::new(source, Arc::clone(&self.eq_shared));
                     let tap_source = audio::viz::TapSource::new(eq_source, self.viz.clone());
                     self.sink.append(tap_source);
@@ -487,12 +463,7 @@ impl TPlayApp {
         let total_secs = match self.total_duration { Some(d) => d.as_secs_f32(), None => return };
         let target = Duration::from_secs_f32((progress * total_secs).max(0.0));
 
-        let table_ready = self.seektable_ready
-            .as_ref()
-            .map(|f| f.load(Ordering::Acquire))
-            .unwrap_or(true);
-
-        if table_ready && self.sink.try_seek(target).is_ok() {
+        if self.sink.try_seek(target).is_ok() {
             // The seek landed in-place: TrackPosition now reports the new
             // position, so the slow path's skip offset no longer applies.
             self.position_offset = Duration::ZERO;
@@ -502,13 +473,9 @@ impl TPlayApp {
         let was_paused = self.sink.is_paused();
 
         let file   = match File::open(&path)             { Ok(f) => f, Err(e) => { eprintln!("seek open: {e}");   return; } };
-        let source = match Decoder::new(BufReader::new(file)) { Ok(s) => s, Err(e) => { eprintln!("seek decode: {e}"); return; } };
-        let source = source.convert_samples::<f32>();
+        let source = match Decoder::try_from(file)         { Ok(s) => s, Err(e) => { eprintln!("seek decode: {e}"); return; } };
 
-        match Sink::try_new(&self.stream_handle) {
-            Ok(s) => self.sink = s,
-            Err(e) => { eprintln!("seek sink: {e}"); return; }
-        }
+        self.sink = Sink::connect_new(self.output.mixer());
         self.sink.set_volume(self.volume);
         // get_pos() on the fresh sink counts only post-skip samples; the
         // skipped `target` is the new position offset from here on.
@@ -582,7 +549,6 @@ impl TPlayApp {
         self.total_duration = None;
         self.seek_target = None;
         self.position_offset = Duration::ZERO;
-        self.seektable_ready = None;
         self.viz.clear();
         self.reset_shuffle();
     }

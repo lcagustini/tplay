@@ -34,7 +34,7 @@ impl Iterator for TestSrc {
 }
 
 impl Source for TestSrc {
-    fn current_frame_len(&self) -> Option<usize> {
+    fn current_span_len(&self) -> Option<usize> {
         Some(self.samples.len() - self.pos)
     }
     fn channels(&self) -> u16 {

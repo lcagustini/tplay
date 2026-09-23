@@ -45,7 +45,7 @@ pub fn write_wav(path: &Path) {
     fs::write(path, data).unwrap();
 }
 
-/// Creates a minimal FLAC file (just headers, no audio frames) for seektable testing.
+/// Creates a minimal FLAC file (just headers, no audio frames) for header-parse tests.
 /// This is a valid FLAC with STREAMINFO and PADDING but no audio data.
 pub fn write_minimal_flac(path: &Path) {
     let mut data = Vec::new();
@@ -61,28 +61,6 @@ pub fn write_minimal_flac(path: &Path) {
     data.extend_from_slice(&[0x81, 0x00, 0x00, 0x64]);
     data.extend_from_slice(&vec![0u8; 100]);
     fs::write(path, data).unwrap();
-}
-
-/// Creates a FLAC file with sample rate set in STREAMINFO for seektable builder.
-pub fn write_flac_with_sample_rate(path: &Path, sample_rate: u32, padding_bytes: usize) {
-    let mut data = Vec::new();
-    data.extend_from_slice(b"fLaC");
-    // STREAMINFO block
-    data.extend_from_slice(&[0x00, 0x00, 0x00, 0x22]);
-    data.extend_from_slice(&[0x00; 10]);
-    // Sample rate at bytes 10-12 (20 bits)
-    let sr_bytes = [
-        (sample_rate >> 12) as u8,
-        ((sample_rate >> 4) & 0xFF) as u8,
-        ((sample_rate & 0xF) << 4) as u8,
-    ];
-    data[10..13].copy_from_slice(&sr_bytes);
-    data.extend_from_slice(&[0x00; 24]); // rest of STREAMINFO
-    // PADDING block
-    let len = padding_bytes as u32;
-    data.extend_from_slice(&[0x81, (len >> 16) as u8, (len >> 8) as u8, len as u8]);
-    data.extend_from_slice(&vec![0u8; padding_bytes]);
-    fs::write(path, data).unwrap()
 }
 
 /// Asserts two durations are approximately equal (within 1 second).
