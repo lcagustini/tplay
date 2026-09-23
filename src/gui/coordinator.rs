@@ -10,6 +10,8 @@ use std::path::PathBuf;
 
 const DOCK_LAYOUT_FILE: &str = "dock_layout.json";
 const DOCK_ID: &str = "tplay.dock_state";
+/// egui memory key: serialized layout JSON currently on disk (seeded at startup).
+const DOCK_SAVED_JSON: &str = "tplay.dock_layout_saved";
 /// egui memory key: measured natural body height of a pane's content.
 const PANE_CONTENT_H: &str = "tplay.pane_content_h";
 /// egui memory key: measured minimum body width of a pane's content.
@@ -155,7 +157,11 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
     let mut tree = ctx.data_mut(|d| d.get_temp::<DockState<Pane>>(egui::Id::new(DOCK_ID)))
         .or_else(|| {
             layout_path().and_then(|p| std::fs::read_to_string(p).ok())
-                .and_then(|s| serde_json::from_str(&s).ok())
+                .and_then(|s| {
+                    // Seed the on-disk JSON string so we only write when it changes.
+                    ctx.data_mut(|d| d.insert_temp(egui::Id::new(DOCK_SAVED_JSON), s.clone()));
+                    serde_json::from_str(&s).ok()
+                })
         })
         .unwrap_or_else(default_tree);
 
@@ -306,10 +312,16 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
     }
     if corrected { ctx.request_repaint(); }
 
-    // Persist to egui memory (session) + disk (JSON, not RON)
+    // Persist to egui memory (session) + disk (JSON, not RON) — only on change or close.
     ctx.data_mut(|d| d.insert_temp(egui::Id::new(DOCK_ID), tree.clone()));
     if let Some(path) = layout_path() {
-        if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
-        let _ = std::fs::write(path, serde_json::to_string(&tree).unwrap_or_default());
+        let json = serde_json::to_string(&tree).unwrap_or_default();
+        let saved = ctx.data(|d| d.get_temp::<String>(egui::Id::new(DOCK_SAVED_JSON))).unwrap_or_default();
+        let closing = ctx.input(|i| i.viewport().close_requested());
+        if json != saved || closing {
+            if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
+            let _ = std::fs::write(&path, &json);
+            ctx.data_mut(|d| d.insert_temp(egui::Id::new(DOCK_SAVED_JSON), json));
+        }
     }
 }
