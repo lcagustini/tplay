@@ -20,6 +20,11 @@ fn config_round_trip_preserves_every_field() {
             last_dir: "/music".into(),
             show_hidden: true,
         },
+        balance: 0.25,
+        remaining: true,
+        gapless: true,
+        crossfade: true,
+        crossfade_secs: 5.0,
     };
 
     let json = serde_json::to_string(&c).unwrap();
@@ -36,6 +41,11 @@ fn config_round_trip_preserves_every_field() {
     assert_eq!(back.library.favorites, vec![PathBuf::from("/music/favs")]);
     assert_eq!(back.library.last_dir, "/music");
     assert_eq!(back.library.show_hidden, true);
+    assert_eq!(back.balance, 0.25);
+    assert!(back.remaining);
+    assert!(back.gapless);
+    assert!(back.crossfade);
+    assert_eq!(back.crossfade_secs, 5.0);
 }
 
 #[test]
@@ -56,6 +66,11 @@ fn config_missing_fields_fall_back_to_defaults() {
     assert!(c.library.favorites.is_empty());
     assert_eq!(c.library.last_dir, "");
     assert!(!c.library.show_hidden);
+    assert_eq!(c.balance, 0.0);
+    assert!(!c.remaining);
+    assert!(!c.gapless);
+    assert!(!c.crossfade);
+    assert_eq!(c.crossfade_secs, 3.0); // default_crossfade_secs
 }
 
 #[test]
@@ -86,4 +101,9 @@ fn config_json_shape_has_expected_keys() {
     assert!(lib.get("favorites").is_some());
     assert!(lib.get("last_dir").is_some());
     assert!(lib.get("show_hidden").is_some());
+    assert!(v.get("balance").is_some());
+    assert!(v.get("remaining").is_some());
+    assert!(v.get("gapless").is_some());
+    assert!(v.get("crossfade").is_some());
+    assert!(v.get("crossfade_secs").is_some());
 }

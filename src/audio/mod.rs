@@ -1,6 +1,8 @@
 //! Audio file handling — duration probing and visualization.
 
+pub mod balance;
 pub mod eq;
+pub mod transition;
 pub mod viz;
 
 use std::fs::File;

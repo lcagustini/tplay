@@ -15,7 +15,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 - `src/gui/mod.rs` — declares `coordinator` + `panes` + `theme`.
 - `src/gui/coordinator.rs` — `update_ui(app, ctx)`: applies the theme's egui visuals, then draws one frame's `DockArea` (egui_dock). Implements `TabViewer` for `Pane` enum; calls the six pane functions in `ui()`. Loads dock layout from egui memory + `~/.config/tplay/dock_layout.json`; saves to disk only when the layout changes or the app closes. The ☰ menu re-adds closed panes.
 - `src/gui/theme.rs` — data-driven theme system. `Themes::load()` scans `~/.config/tplay/themes/` (user, wins on id clash), `<exe_dir>/themes/` (shipped with the app), `./themes/` (dev: `cargo run` from repo root) and merges by theme id. Each `themes/<id>/theme.json` carries `id`, `name`, `base` (dark/light), `metadata_font` (monospace/…), and the 14-token `Palette` (`--bg`, `--accent`, `--row-even`, …) as hex strings; invalid files are skipped with an eprintln, and a hardcoded dark fallback theme guarantees a non-empty list (broken install). `apply(ctx, &Theme)` maps tokens onto egui `Visuals` each frame so a mid-session switch lands instantly. Selection persists to `~/.config/tplay/config.json` (the `theme` field); missing config = `dark`.
-- `themes/<id>/icons/*.png` — per-theme icon set (logo, play, pause, stop, prev, next, shuffle, repeat, volume, remove, sort_asc, sort_desc, star_on, star_off, folder, minimize, maximize, nocover). Missing PNGs fall back to the default theme's (`dark`), then to unicode glyphs. `theme::load_icons` decodes them synchronously into egui textures at startup and on skin switch (NO egui async loader — the URI loader path showed pending/error placeholders and stretched buttons).
+- `themes/<id>/icons/*.png` — per-theme icon set (logo, play, pause, stop, prev, next, shuffle, repeat, volume, remove, sort_asc, sort_desc, star_on, star_off, folder, minimize, maximize, nocover, gapless, crossfade). Missing PNGs fall back to the default theme's (`dark`), then to unicode glyphs. `theme::load_icons` decodes them synchronously into egui textures at startup and on skin switch (NO egui async loader — the URI loader path showed pending/error placeholders and stretched buttons).
 - `src/gui/panes/{now_playing,playlist,equalizer,library,visualizer,album_cover}.rs` — one free function per pane, each taking `(app: &mut TPlayApp, ui: &mut egui::Ui)`. Position-independent — work identically docked anywhere.
 - `src/library.rs` — pure logic: directory listing, tag/duration reading via `lofty`, background scan thread (`scan_files` + mpsc), `TrackInfo` cache, sorting (`sort_key` with DEL prefix for empty values), playlist read/write (`.tplay` JSON).
 - `src/audio/mod.rs` — file-level helpers, no playback logic:
@@ -211,13 +211,32 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 
 | file | purpose |
 |---|---|
-| `~/.config/tplay/config.json` | unified app settings (theme, EQ, shuffle, repeat, volume, last playlist, library state) |
+| `~/.config/tplay/config.json` | unified app settings (theme, EQ, shuffle, repeat, volume, last playlist, library state, balance, remaining, gapless, crossfade, crossfade_secs) |
 | `~/.config/tplay/dock_layout.json` | egui_dock layout (tabs, splits, floating windows) |
 | `~/.config/tplay/layouts/<name>.json` | named dock layout (tabs, splits, floating windows) — created via ☰ menu |
 | `~/.config/tplay/themes/<id>/theme.json` | user theme override (wins on id clash) |
 | `<exe_dir>/themes/<id>/theme.json` | shipped themes (dark, retro, neon) |
 | `./themes/<id>/theme.json` | dev themes (cargo run from repo root) |
 | `<playlist>.tplay` | playlist file: `{"paths": ["/abs/path", "relative/path"]}` — relative paths resolve against the playlist's own directory |
+
+**Config JSON structure** (added fields in **bold**):
+```json
+{
+  "theme": "dark",
+  "eq": { "enabled": false, "gains": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] },
+  "shuffle": false,
+  "repeat": false,
+  "viz_view": "Bars",
+  "volume": 1.0,
+  "last_playlist": "/path/to/playlist.tplay",
+  "library": { "favorites": ["/path/to/fav"], "last_dir": "/path/to/music", "show_hidden": false },
+  "**balance**": 0.0,
+  "**remaining**": false,
+  "**gapless**": false,
+  "**crossfade**": false,
+  "**crossfade_secs**": 3.0
+}
+```
 
 ---
 
@@ -244,6 +263,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 | `LIB_INIT` | gui/panes/library.rs | `"tplay.library.init"` (egui memory key) |
 | `LIB_QUERY` | gui/panes/library.rs | `"tplay.library.query"` (egui memory key) |
 | `AUDIO_EXTENSIONS` | library.rs | `["mp3","wav","ogg","flac","m4a"]` |
+| `PREROLL_SECS` | app.rs | `2.0` (gapless/crossfade arm trigger, seconds before track end) |
 
 ---
 
@@ -270,6 +290,181 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 | Add a config field | `app.rs` (`Config` struct + `save_config`/`load_config`) |
 | Change tag fields | `library.rs` (`TrackInfo`, `read_info`, `SORT_OPTIONS`, `sort_key`) |
 | Adjust seek behavior | `app.rs` (`seek`, `advance`, `load_file`) |
+
+---
+
+## Future milestones
+
+Not yet built — roadmap only. Each milestone is scoped to the existing
+architecture (the "File to touch" pointers below); nothing here is live until
+implemented and this section rewritten.
+
+### 1. Media Library database
+
+Turn the folder browser into a persistent library: the `tag_cache`
+(`HashMap<PathBuf, TrackInfo>` in `app.rs`, currently session-scoped) is the
+seed — persist it to `~/.config/tplay/` on scan completion (`drain_tag_scan`
+already has the hook; same pattern as `save_config`/`load_config`) so
+re-launch needs no re-scan. Add per-track metadata Winamp had that `TrackInfo`
+doesn't: **rating (1–5 ★)**, **play count**, **last-played date** (increment in
+`load_file`). Library-data fields go into `library.rs` (`TrackInfo` +
+`read_info` + `SORT_OPTIONS` + `sort_key`) and/or the `Config`/`LibraryData`
+structs — the same edit pattern as adding a config field. The headline:
+**Smart Views / auto playlists** — saved rule queries ("rating ≥ 4", "top 25
+played", "added last 90 days") evaluated against the persisted cache, rendered
+as a playlist (reuse the Playlist pane's load machinery; the result is just a
+`Vec<PathBuf>`). No new dependencies; lofty/scan_files already read everything.
+Out of scope: matching Winamp's network features (CDDB, online stores) — this
+app is no-network.
+
+### 2. Playlist editor depth
+
+Add Winamp Playlist Editor operations to `gui/panes/playlist.rs` + `app.rs`:
+
+- **Sort playlist** (by title/path/track #/album), **reverse**, **randomize**
+  — reuse `library::sort_key` (needs a `sort_key`-style call for the playlist's
+  untagged pre-scan rows too: `app.rs` already owns `tag_cache`); randomize
+  reuses the XorShift64 RNG (`rand_usize`).
+- **Remove duplicates** — a one-pass cleanup over `playlist: Vec<PathBuf>`
+  (dedup happens on add today, but not retroactively).
+- **Jump-to-file** — Winamp's `J` quick search over the playlist; same
+  egui-memory pattern as the Library's search (`LIB_QUERY` in
+  `gui/panes/library.rs`).
+- **Multiple concurrent playlists** — a list of named playlists instead of one
+  `playlist: Vec<PathBuf>`. Bigger change: touches `playlist_file`/
+  `playlist_dirty` semantics and the Playlist pane header. Defer until the
+  single-playlist ops above land.
+
+Sort/randomize/dups are pure-logic in scope for the `tests/` mirror-branch
+convention (`playlist_tests.rs` pattern).
+
+### 3. Interop
+
+- **`.m3u` / `.pls` import & export** — touch `library.rs` only:
+  `read_playlist`/`write_playlist` branch on extension (`.tplay` JSON today;
+  `.m3u` is plain text, one path per line), and `is_playlist` widens to the new
+  extensions so they appear in the Library + are picked up by the `.tplay`
+  row handling. Relative `.m3u` paths resolve against the playlist's own dir,
+  same as the existing `.tplay` rule.
+- **More audio formats** — Winamp played AIFF, WMA, APE, MOD/S3M/XM/IT
+  (tracked music is a Nullsoft hallmark), MIDI. Two paths: formats rodio can
+  already decode → extend `AUDIO_EXTENSIONS` (`library.rs`) + `audio_dialog`
+  filter (`app.rs`) + rodio features (`Cargo.toml`); MOD/tracked + MIDI need a
+  new decoder dependency — each new dep must justify itself per the deps
+  table. Several rodio-backed decoders are still considered future work, not a
+  milestone of their own.
+
+### 4. Playback-control niceties — IMPLEMENTED
+
+- **Balance (L/R)** — `balance: f32` field in `Config` (default 0.0, range -1..1).
+  Live, no sink rebuild: `src/audio/balance.rs` `BalanceSource` reads
+  `Arc<RwLock<f32>>` per audio frame (same pattern as `EqSource`/`EqShared`).
+  Slider in Now Playing pane next to volume.
+  **Note**: rodio 0.21 has no `Sink::set_pan`; implemented as a source wrapper
+  (`BalanceSource`) instead of sink-level panning.
+- **Elapsed ↔ remaining toggle** — persisted `Config.remaining: bool` + 
+  `TPlayApp::set_remaining()` (the `viz_view` pattern). Clickable elapsed/remaining
+  label in Now Playing pane toggles the mode.
+- **Gapless playback** — `Config.gapless: bool`. When enabled and within
+  `PREROLL_SECS` (2s) of track end, the **xf sink** pre-buffers the next track
+  at volume 0, holds it silent, and swaps on the current track's drain — zero
+  gap, zero overlap. No queue fusion.
+- **Crossfade** — `Config.crossfade: bool` + `Config.crossfade_secs: f32` (default 3s).
+  **Real two-sink crossfader** (see implementation notes): the outgoing track plays
+  full-length in the main sink while the incoming track plays simultaneously in a
+  second sink on the same mixer, faded in with equal-power gains per frame. Each
+  track is heard exactly once — no repeated tail. Crossfade supersedes gapless when
+  both on. ☰ menu: Crossfade checkbox + duration slider (0–10s).
+- **ReplayGain / loudness normalization** — read the `REPLAYGAIN_TRACK_GAIN`
+  tag (lofty exposes it) and apply as a per-track volume offset at `load_file`
+  time; or a pre-scan loudness pass. Speculative until users ask.
+- **Per-track EQ** — conflicts with the current single `EqShared` source of
+  truth (`audio/eq.rs`) and "EQ settings are live" design; would need a
+  per-track settings map consulted on `load_file`. Not recommended without a
+  product reason.
+
+Milestones 1–2 ship user-visible Winamp parity on the existing architecture;
+3–4 are smaller, mostly self-contained (3 = one file + Cargo.toml, 4 = config
+field + pane tweak). No new milestone may hardcode constants — theme tokens /
+shared-constant rules apply to milestones as much as to shipped code.
+
+---
+
+### 4. Playback-control niceties — implementation notes
+
+**New source modules** (pure, headless-testable, mirror `audio/eq.rs` pattern):
+- `src/audio/balance.rs` — `BalanceSource<S>` wraps any `Source<Item=f32>`,
+  applies per-channel gains from `Arc<RwLock<f32>>`, outputs stereo.
+  `balance_gains(f32) -> (f32,f32)` linear curve (center = 1.0/1.0 exact passthrough).
+  Tests: `tests/balance_tests.rs` (8 tests, identical harness to `eq_live.rs`).
+
+- `src/audio/transition.rs` — free functions `build_gapless_next()` (a full,
+  buffered EQ → Tap → Balance source — the unit both sinks play) and
+  `fade_gains(p) -> (f32, f32)` (equal-power cos/sin crossfade curve).
+  **Seek-first helper** `seek_or_skip()`: attempts `try_seek()` (fast path for
+  FLAC/WAV/OGG/M4A) before falling back to `skip_duration()` (eager decode for
+  unseekable streams). No UI code, pure logic. Tests:
+  `tests/gapless_crossfade.rs`.
+
+**App state additions** (`src/app.rs`):
+- `Config`: `balance`, `remaining`, `gapless`, `crossfade`, `crossfade_secs`.
+- `TPlayApp` fields: `balance: Arc<RwLock<f32>>`, `remaining: bool`,
+  `gapless: bool`, `crossfade: bool`, `crossfade_secs: f32`,
+  `xf_sink: Option<Sink>` (incoming track, second sink on the same mixer) and
+  `xf_out_total: Option<Duration>` (the outgoing track's duration, captured at
+  arm time — the arm flips `total_duration` to the incoming track for the seek
+  bar, so the fade math needs the outgoing total saved separately).
+- Getters/setters: `balance()/set_balance()`, `remaining()/set_remaining()`,
+  `gapless()/toggle_gapless()`, `crossfade()/toggle_crossfade()`,
+  `crossfade_secs()/set_crossfade_secs()`.
+
+**UI additions** (`src/gui/panes/now_playing.rs`, `src/gui/coordinator.rs`):
+- Now Playing: new second row under transport controls — Balance slider with "Balance" meta label (left-aligned, double-click resets to center 0.0) + Gapless/Crossfade **icon buttons** (18px, lit via `selected()` visual, same convention as lit shuffle/repeat icons).
+- Volume slider now stands alone in the transport row (no balance crowding).
+- ☰ menu: "Crossfade" section (constant height) — crossfade duration slider **always visible and editable** (no `ui.add_enabled` guard), Gapless/Crossfade checkboxes removed (now icon buttons in Now Playing row).
+- Icon set expanded to 20: `gapless.png` + `crossfade.png` (20×20, text_primary baked per theme, glyph fallbacks ⏩/🔗).
+
+**Real two-sink crossfader** (`src/app.rs`, `src/audio/transition.rs`):
+- **Two sinks, one mixer**: `self.sink` plays the current track full-length
+  (never truncated); the arm creates a second `Sink::connect_new(self.output.mixer())`
+  (`xf_sink`) holding the buffered incoming track. Both play simultaneously;
+  rodio mixes them. Each track is heard exactly once — the old three-piece
+  queue (`A_body` + `mix(A_tail,B_head)` + `B_body`) is deleted, which also
+  killed B's repeated tail (B_tail re-read at the end of B_body) and the
+  multi-second UI freeze from eager `skip_duration()`.
+- **Arm** (`advance()` step 2): within `crossfade_secs` of the outgoing track's
+  end (or `PREROLL_SECS` with gapless), `next_track_index()` is called ONCE and
+  the incoming source is built synchronously (buffered decode — header-only,
+  ms). `xf_out_total` = outgoing duration is captured, then
+  `current_index`/`current_path`/`total_duration` flip to the incoming track so
+  Now Playing and the seek bar already show it. `playback_position()`/
+  `playback_position_secs()` prefer `xf_sink` while present. Missing next file →
+  skip the arm; natural advance fails it gracefully via `load_file`. A next
+  track whose tagged duration is shorter than the hold/fade window is also
+  skipped (it would drain muted and be promoted empty) — it plays via natural
+  advance with a gap instead.
+- **Settle** (`advance()` step 1): fade progress `p = 1 − remaining/cf` from
+  `sink.get_pos()` vs `xf_out_total` (pause/seek-safe, no wall clock);
+  `fade_gains(p)` sets `sink`/`xf_sink` volumes each frame (equal-power, no
+  midpoint dip). Gapless: xf held at volume 0 until the swap — zero gap. When
+  the outgoing sink empties → `finish_xf()`: stop the outgoing sink, promote
+  `xf_sink` to `self.sink`, restore full volume, zero `position_offset`.
+- **Seek-first builders**: `transition::seek_or_skip()` tries `try_seek()`
+  (FLAC binary search ~µs, WAV/OGG/M4A fast) before falling back to
+  `skip_duration()` — turns the freeze into an instant seek for seekable formats.
+- **Cancellation** (`cancel_xf()`): stops + drops `xf_sink`, restores main volume. Called from `load_file`, `seek`,
+  `stop`, `remove_track`, `move_track` (seek/stop/remove/move/start invalidation
+  sites). `pause`/`play` drive both sinks.
+
+**Tests added**:
+- `tests/balance_tests.rs` — 8 tests: curve, mono/stereo routing, bit-transparent passthrough, live change mid-stream, seek clears half-frame.
+- `tests/gapless_crossfade.rs` — 10 tests: `fade_gains` (endpoints, midpoint ≈ 0.707, constant-power a²+b²=1, monotonicity, clamping) + `build_gapless_next` on a real WAV (full-length drain, 0 dB/center passthrough of a mid-file sample).
+- `tests/config_persistence.rs` — round-trip, defaults, JSON keys for all 5 new fields.
+
+**Deferred** (unchanged from roadmap): ReplayGain, per-track EQ. Accepted edge:
+duration-probe inaccuracy can make the swap (or fade completion) land a few
+samples early/late → a tiny volume pop on the incoming track; correction is a
+more accurate MP3 probe, not a design change.
 
 ---
 

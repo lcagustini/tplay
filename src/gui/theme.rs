@@ -323,10 +323,14 @@ pub enum Icon {
     Maximize,
     /// Album Cover pane placeholder shown when a track has no art.
     NoCover,
+    /// Gapless playback toggle (lit while active).
+    Gapless,
+    /// Crossfade playback toggle (lit while active).
+    Crossfade,
 }
 
 impl Icon {
-    pub const ALL: [Icon; 18] = [
+    pub const ALL: [Icon; 20] = [
         Icon::Logo,
         Icon::Play,
         Icon::Pause,
@@ -345,9 +349,11 @@ impl Icon {
         Icon::Minimize,
         Icon::Maximize,
         Icon::NoCover,
+        Icon::Gapless,
+        Icon::Crossfade,
     ];
 
-    const DATA: [(&'static str, &'static str); 18] = [
+    const DATA: [(&'static str, &'static str); 20] = [
         ("logo.png", "☰"),
         ("play.png", "▶"),
         ("pause.png", "⏸"),
@@ -366,6 +372,8 @@ impl Icon {
         ("minimize.png", "🗕"),
         ("maximize.png", "🗖"),
         ("nocover.png", "🎵"),
+        ("gapless.png", "⏩"),
+        ("crossfade.png", "🔗"),
     ];
 
     pub fn index(self) -> usize {

@@ -258,6 +258,16 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
                 if ui.checkbox(&mut show_hidden, "Show hidden folders").changed() {
                     app.set_show_hidden(show_hidden);
                 }
+                // Crossfade section
+                ui.separator();
+                ui.label("Crossfade");
+                // Crossfade duration always visible and editable (constant menu height).
+                let mut cf_secs = app.crossfade_secs();
+                if ui.add(
+                    egui::Slider::new(&mut cf_secs, 0.0..=10.0).suffix("s").trailing_fill(true),
+                ).changed() {
+                    app.set_crossfade_secs(cf_secs);
+                }
                 // Layouts section — panes + saved layouts + save/load
                 ui.separator();
                 ui.label("Layouts");

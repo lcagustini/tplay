@@ -1,6 +1,7 @@
 //! App state and logic — no UI code here.
 
 use crate::audio;
+use crate::audio::transition;
 use crate::gui::theme::{self, Theme, Themes};
 use crate::library;
 use eframe::egui;
@@ -12,6 +13,9 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+
+/// How far before track end (seconds) to arm gapless/crossfade next track.
+const PREROLL_SECS: f32 = 2.0;
 
 /// Tiny inline RNG (XorShift64) - replaces fastrand dependency.
 fn rand_u64(state: &mut u64) -> u64 {
@@ -72,9 +76,25 @@ pub struct Config {
     pub last_playlist: Option<String>,
     #[serde(default)]
     pub library: LibraryData,
+    /// Balance (L/R) — -1 = full left, 0 = center, 1 = full right.
+    #[serde(default)]
+    pub balance: f32,
+    /// Show remaining time instead of elapsed.
+    #[serde(default)]
+    pub remaining: bool,
+    /// Gapless playback — pre-buffer the next track.
+    #[serde(default)]
+    pub gapless: bool,
+    /// Crossfade playback — overlap tracks with a fade.
+    #[serde(default)]
+    pub crossfade: bool,
+    /// Crossfade duration in seconds.
+    #[serde(default = "default_crossfade_secs")]
+    pub crossfade_secs: f32,
 }
 
 fn default_volume() -> f32 { 1.0 }
+fn default_crossfade_secs() -> f32 { 3.0 }
 
 #[derive(Serialize, Deserialize, Default)]
 pub struct EqData {
@@ -178,6 +198,24 @@ pub struct TPlayApp {
     /// Visualizer pane view (index into `VizView::ALL`). Persisted in config.json.
     viz_view: VizView,
 
+    /// Balance (L/R) — shared with BalanceSource (live, like EqShared).
+    balance: Arc<RwLock<f32>>,
+    /// Show remaining time instead of elapsed.
+    remaining: bool,
+    /// Gapless playback — pre-buffer the next track.
+    gapless: bool,
+    /// Crossfade playback — overlap tracks with a fade.
+    crossfade: bool,
+    /// Crossfade duration in seconds.
+    crossfade_secs: f32,
+    /// Crossfade sink — incoming track during overlap. When Some, the current
+    /// track plays in `sink` and the next track plays in `xf_sink`; volumes
+    /// are faded (crossfade) or held (gapless) per frame in `advance()`.
+    xf_sink: Option<Sink>,
+    /// The outgoing track's total duration, captured at arm time. The arm
+    /// flips `total_duration` to the incoming track (for the seek bar), so
+    /// the fade math needs the outgoing total saved separately.
+    xf_out_total: Option<Duration>,
 
     /// Theme (loaded from themes/ dirs), applied to egui visuals by the GUI layer.
     theme: Arc<Theme>,
@@ -251,6 +289,13 @@ impl TPlayApp {
             })),
             viz: audio::viz::VizBuf::new(),
             viz_view: config.viz_view,
+            balance: Arc::new(RwLock::new(config.balance)),
+            remaining: config.remaining,
+            gapless: config.gapless,
+            crossfade: config.crossfade,
+            crossfade_secs: config.crossfade_secs,
+            xf_sink: None,
+            xf_out_total: None,
             theme,
             themes,
             icons,
@@ -310,6 +355,7 @@ impl TPlayApp {
     /// Save all settings to unified config.json
     fn save_config(&self) {
         let eq_shared = self.eq_shared.read().unwrap();
+        let balance = self.balance.read().unwrap();
         let config = Config {
             theme: self.theme.id.clone(),
             eq: EqData {
@@ -326,6 +372,11 @@ impl TPlayApp {
                 last_dir: self.library_dir.to_string_lossy().into_owned(),
                 show_hidden: self.show_hidden,
             },
+            balance: *balance,
+            remaining: self.remaining,
+            gapless: self.gapless,
+            crossfade: self.crossfade,
+            crossfade_secs: self.crossfade_secs,
         };
         save_config("config.json", &config);
     }
@@ -346,6 +397,9 @@ impl TPlayApp {
     }
 
     fn load_file(&mut self, path: PathBuf) {
+        // Cancel any live crossfade when a new track is loaded explicitly.
+        self.cancel_xf();
+
         self.seek_target     = None;
         self.position_offset = Duration::ZERO;
         self.viz.clear();
@@ -359,32 +413,35 @@ impl TPlayApp {
             self.tag_cache.insert(path.clone(), info);
         }
 
-        match File::open(&path) {
-            // try_from sets byte_len from file metadata, which is what lets
-            // the symphonia FLAC reader compute its binary-search range — with
-            // plain Decoder::new it's None and every FLAC seek fails.
-            Ok(file) => match Decoder::try_from(file) {
-                Ok(source) => {
-                    self.total_duration = source.total_duration()
-                        .or_else(|| audio::probe_duration(&path));
-                    let eq_source = audio::eq::EqSource::new(source, Arc::clone(&self.eq_shared));
-                    let tap_source = audio::viz::TapSource::new(eq_source, self.viz.clone());
-                    self.sink.append(tap_source);
-                    self.current_path = Some(path);
-                }
-                Err(e) => {
-                    eprintln!("tplay: decode error: {e}");
-                    self.current_path = None;
-                    self.total_duration = None;
-                }
-            },
-            Err(e) => {
-                eprintln!("tplay: open error: {e}");
-                self.current_path = None;
-                self.total_duration = None;
-            }
-        }
+        // Open file once, create decoder, get total_duration.
+        let file = match File::open(&path) {
+            Ok(f) => f,
+            Err(e) => { eprintln!("tplay: open error: {e}"); self.current_path = None; self.total_duration = None; return; }
+        };
+        let decoder = match Decoder::try_from(file) {
+            Ok(d) => d,
+            Err(e) => { eprintln!("tplay: decode error: {e}"); self.current_path = None; self.total_duration = None; return; }
+        };
+        let total_duration = decoder.total_duration().or_else(|| audio::probe_duration(&path));
+        self.total_duration = total_duration;
 
+        // Always load the full track (no truncation, no pre-mix).
+        // Crossfade/gapless are handled by the separate xf_sink in advance().
+        let eq_source = audio::eq::EqSource::new(decoder, Arc::clone(&self.eq_shared));
+        let tap_source = audio::viz::TapSource::new(eq_source, self.viz.clone());
+        let balance_source = audio::balance::BalanceSource::new(tap_source, Arc::clone(&self.balance));
+        self.sink.append(balance_source);
+        self.current_path = Some(path);
+    }
+
+    /// Cancel any live crossfade/gapless: stop the xf sink and restore main volume.
+    fn cancel_xf(&mut self) {
+        if let Some(xf) = self.xf_sink.take() {
+            let _ = xf.stop();
+        }
+        self.xf_out_total = None;
+        // Restore main sink to full volume.
+        self.sink.set_volume(self.volume);
     }
 
     fn next_track_index(&mut self) -> Option<usize> {
@@ -458,6 +515,8 @@ impl TPlayApp {
 
     pub fn seek(&mut self, progress: f32) {
         self.seek_target = Some(progress);
+        // Seeking cancels any live crossfade/gapless.
+        self.cancel_xf();
 
         let path = match self.current_path.clone() { Some(p) => p, None => return };
         let total_secs = match self.total_duration { Some(d) => d.as_secs_f32(), None => return };
@@ -480,18 +539,138 @@ impl TPlayApp {
         // get_pos() on the fresh sink counts only post-skip samples; the
         // skipped `target` is the new position offset from here on.
         self.position_offset = target;
-        let eq_source = audio::eq::EqSource::new(source.skip_duration(target), Arc::clone(&self.eq_shared));
+        // Use seek_or_skip (fast path for seekable formats, fallback to skip_duration)
+        let seeked_source = transition::seek_or_skip(source, target);
+        let eq_source = audio::eq::EqSource::new(seeked_source, Arc::clone(&self.eq_shared));
         let tap_source = audio::viz::TapSource::new(eq_source, self.viz.clone());
-        self.sink.append(tap_source);
+        let balance_source = audio::balance::BalanceSource::new(tap_source, Arc::clone(&self.balance));
+        self.sink.append(balance_source);
         if was_paused { self.sink.pause(); }
     }
 
     pub fn advance(&mut self) {
+        // 1) Settle a live xf: fade volumes toward the swap, promote when the
+        // outgoing track has drained. `xf_out_total` is the OUTGOING track's
+        // duration — `self.total_duration` was flipped to the incoming track
+        // at arm time (the seek bar reads the incoming track during the fade).
+        if let Some(xf) = &self.xf_sink {
+            let pos = self.sink.get_pos().saturating_add(self.position_offset);
+            let out_total = self.xf_out_total.unwrap_or_default();
+            if self.sink.empty() {
+                self.finish_xf();
+                return;
+            }
+            let remaining = out_total.saturating_sub(pos);
+            if self.crossfade {
+                // Equal-power fade over the crossfade window. Probe drift can
+                // push remaining past cf — the clamp keeps p in [0, 1].
+                let p = (1.0 - remaining.as_secs_f32() / self.crossfade_secs).clamp(0.0, 1.0);
+                let (out_gain, in_gain) = transition::fade_gains(p);
+                self.sink.set_volume(self.volume * out_gain);
+                xf.set_volume(self.volume * in_gain);
+            } else {
+                // Gapless: incoming sits silent until the swap — zero gap, no overlap.
+                self.sink.set_volume(self.volume);
+                xf.set_volume(0.0);
+            }
+            return;
+        }
+
+        // 2) No live xf — arm one when the current track nears its end.
+        // Playing from playlist, unpaused, exactly one item queued (the
+        // current track, nothing pre-buffered), and a mode enabled.
+        if self.current_index.is_some()
+            && self.current_path.is_some()
+            && !self.sink.is_paused()
+            && self.sink.len() == 1
+            && (self.crossfade || self.gapless)
+        {
+            let total = match self.total_duration { Some(d) => d, None => return };
+            let pos = self.sink.get_pos().saturating_add(self.position_offset);
+            let remaining_secs = total.saturating_sub(pos).as_secs_f32();
+
+            let cf = Duration::from_secs_f32(self.crossfade_secs);
+            // Crossfade: arm within cf seconds of end (track longer than cf).
+            // Gapless: arm within PREROLL_SECS (the silent pre-buffer hold).
+            let should_arm = if self.crossfade {
+                remaining_secs <= self.crossfade_secs && total > cf
+            } else {
+                remaining_secs <= PREROLL_SECS
+            };
+
+            if should_arm {
+                if let Some(next_idx) = self.next_track_index() {
+                    let next_path = self.playlist[next_idx].clone();
+                    // A missing file can't be pre-buffered — skip the arm and
+                    // let natural advance fail it gracefully via load_file.
+                    if !next_path.is_file() {
+                        return;
+                    }
+                    // A track shorter than the hold/fade window drains muted
+                    // before the swap (gapless) or mid-fade (crossfade) and
+                    // would be promoted empty — silently skipped. Prefer a
+                    // natural-advance gap instead. Untagged tracks are allowed
+                    // through (they're real music in practice).
+                    let hold = if self.crossfade {
+                        cf
+                    } else {
+                        Duration::from_secs_f32(remaining_secs)
+                    };
+                    if let Some(d) = self.tag_cache.get(&next_path).and_then(|i| i.duration) {
+                        if d < hold {
+                            return;
+                        }
+                    }
+                    // Capture the outgoing duration for the fade math BEFORE
+                    // flipping total_duration to the incoming track below.
+                    self.xf_out_total = Some(total);
+                    // Build the incoming track source (full track, buffered).
+                    let xf_source = transition::build_gapless_next(
+                        next_path.clone(),
+                        Arc::clone(&self.eq_shared),
+                        Arc::clone(&self.balance),
+                        self.viz.clone(),
+                    );
+                    // Second sink on the same mixer — plays simultaneously.
+                    let xf_sink = Sink::connect_new(self.output.mixer());
+                    xf_sink.append(xf_source);
+                    xf_sink.set_volume(0.0);
+                    self.xf_sink = Some(xf_sink);
+                    // Pre-flip the playlist metadata so Now Playing shows the new track.
+                    self.current_index = Some(next_idx);
+                    if let Some(info) = library::read_info(&next_path) {
+                        self.total_duration = info.duration;
+                        self.tag_cache.insert(next_path.clone(), info);
+                    }
+                    if self.total_duration.is_none() {
+                        self.total_duration = audio::probe_duration(&next_path);
+                    }
+                    self.current_path = Some(next_path);
+                    self.seek_target = None;
+                    return;
+                }
+            }
+        }
+
+        // 3) Natural advance (no xf armed, modes off, or conditions not met).
         if !self.sink.empty() || self.sink.is_paused() || self.current_path.is_none() {
             return;
         }
         if let Some(next) = self.next_track_index() {
             self.start(next);
+        }
+    }
+
+    /// Called when the outgoing track ends during a crossfade/gapless.
+    /// Promotes the incoming sink to the main sink, restores full volume.
+    fn finish_xf(&mut self) {
+        if let Some(xf) = self.xf_sink.take() {
+            let _ = self.sink.stop();
+            // Promote the incoming sink; its position is self-relative.
+            self.sink = xf;
+            self.sink.set_volume(self.volume);
+            self.xf_out_total = None;
+            self.position_offset = Duration::ZERO;
         }
     }
 
@@ -511,6 +690,9 @@ impl TPlayApp {
     pub fn play(&mut self) {
         if self.sink.is_paused() && !self.sink.empty() {
             self.sink.play();
+            if let Some(xf) = &self.xf_sink {
+                xf.play();
+            }
         } else if let Some(path) = self.current_path.clone() {
             self.load_file(path);
         } else if !self.playlist.is_empty() {
@@ -537,12 +719,16 @@ impl TPlayApp {
 
     pub fn pause(&mut self) {
         self.sink.pause();
+        if let Some(xf) = &self.xf_sink {
+            xf.pause();
+        }
     }
 
     /// Stop playback and reset song + playlist state: unloads the current
     /// track and rewinds the play position, so the next Play starts from the
     /// top of the playlist (or shuffle order) instead of resuming.
     pub fn stop(&mut self) {
+        self.cancel_xf();
         let _ = self.sink.stop();
         self.current_path = None;
         self.current_index = None;
@@ -556,6 +742,8 @@ impl TPlayApp {
     pub fn set_volume(&mut self, volume: f32) {
         self.volume = volume;
         self.sink.set_volume(volume);
+        // A live xf's volume is re-applied each frame in advance() scaled by
+        // `self.volume`, so changing volume mid-fade lands on the next frame.
         self.save_config();
     }
 
@@ -661,6 +849,7 @@ impl TPlayApp {
         if self.current_index.is_none() {
             self.current_path = None;
         }
+        self.cancel_xf();
         self.reset_shuffle();
     }
 
@@ -680,6 +869,7 @@ impl TPlayApp {
                     ci
                 }
             });
+            self.cancel_xf();
             self.reset_shuffle();
         }
     }
@@ -915,6 +1105,61 @@ impl TPlayApp {
         self.save_config();
     }
 
+    /// Current balance (-1.0..=1.0).
+    pub fn balance(&self) -> f32 {
+        *self.balance.read().unwrap()
+    }
+
+    /// Set balance; live, no sink rebuild. Clamped to [-1, 1].
+    pub fn set_balance(&mut self, v: f32) {
+        let clamped = v.clamp(-1.0, 1.0);
+        *self.balance.write().unwrap() = clamped;
+        self.save_config();
+    }
+
+    /// Whether to show remaining time instead of elapsed.
+    pub fn remaining(&self) -> bool { self.remaining }
+
+    /// Toggle remaining/elapsed mode; persists immediately.
+    pub fn set_remaining(&mut self, remaining: bool) {
+        if self.remaining == remaining {
+            return;
+        }
+        self.remaining = remaining;
+        self.save_config();
+    }
+
+    /// Whether gapless playback is enabled.
+    pub fn gapless(&self) -> bool { self.gapless }
+
+    /// Toggle gapless playback; persists immediately.
+    pub fn toggle_gapless(&mut self) {
+        self.gapless = !self.gapless;
+        self.save_config();
+    }
+
+    /// Whether crossfade playback is enabled.
+    pub fn crossfade(&self) -> bool { self.crossfade }
+
+    /// Toggle crossfade playback; persists immediately.
+    pub fn toggle_crossfade(&mut self) {
+        self.crossfade = !self.crossfade;
+        self.save_config();
+    }
+
+    /// Crossfade duration in seconds.
+    pub fn crossfade_secs(&self) -> f32 { self.crossfade_secs }
+
+    /// Set crossfade duration; persists immediately.
+    pub fn set_crossfade_secs(&mut self, secs: f32) {
+        let clamped = secs.clamp(0.0, 10.0);
+        if (self.crossfade_secs - clamped).abs() < f32::EPSILON {
+            return;
+        }
+        self.crossfade_secs = clamped;
+        self.save_config();
+    }
+
     pub fn library_dir(&self) -> &std::path::Path { &self.library_dir }
     pub fn library_entries(&self) -> &[library::Entry] { &self.library_entries }
     /// Tags/duration for any previously scanned or played track — the shared
@@ -1007,14 +1252,24 @@ impl TPlayApp {
     }
 
     pub fn playback_position(&self) -> f32 {
-        let pos = self.sink.get_pos().saturating_add(self.position_offset);
-        self.total_duration
+        // During crossfade/gapless, the xf_sink plays the incoming track.
+        // Its position starts at 0 and progresses normally.
+        let (pos, total) = if let Some(xf) = &self.xf_sink {
+            (xf.get_pos(), self.total_duration)
+        } else {
+            (self.sink.get_pos().saturating_add(self.position_offset), self.total_duration)
+        };
+        total
             .map(|d| (pos.as_secs_f32() / d.as_secs_f32()).clamp(0.0, 1.0))
             .unwrap_or(0.0)
     }
 
     pub fn playback_position_secs(&self) -> Duration {
-        self.sink.get_pos().saturating_add(self.position_offset)
+        if let Some(xf) = &self.xf_sink {
+            xf.get_pos()
+        } else {
+            self.sink.get_pos().saturating_add(self.position_offset)
+        }
     }
 
     pub fn is_empty(&self) -> bool {

@@ -60,7 +60,17 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
             let total_secs = app.total_duration().map(|d| d.as_secs_f32());
             let actual_ratio = app.playback_position();
 
-            let pos_str = TPlayApp::fmt_duration(Some(app.playback_position_secs()));
+            let pos_secs = app.playback_position_secs();
+            let pos_str = if app.remaining() {
+                if let Some(total) = app.total_duration() {
+                    let rem = total.saturating_sub(pos_secs);
+                    TPlayApp::fmt_duration(Some(rem))
+                } else {
+                    "--:--".to_string()
+                }
+            } else {
+                TPlayApp::fmt_duration(Some(pos_secs))
+            };
             let total_str = TPlayApp::fmt_duration(app.total_duration());
 
             let mut seek_normalized = ui.ctx().memory_mut(|m| m.data.get_temp::<f32>(seek_id()).unwrap_or(0.0));
@@ -75,7 +85,12 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
             let gaps = ui.spacing().item_spacing.x * 2.0;
             let bar_w = (ui.available_width() - label_w(&pos_str) - label_w(&total_str) - gaps).max(40.0);
 
-            ui.label(meta(pos_str, &theme, layout.text_time));
+            // Elapsed/remaining label — click to toggle mode
+            let pos_label = ui.label(meta(pos_str, &theme, layout.text_time));
+            if pos_label.clicked() {
+                app.set_remaining(!app.remaining());
+            }
+            pos_label.on_hover_text(if app.remaining() { "Click to show elapsed" } else { "Click to show remaining" });
 
             let bar = ui.add_enabled_ui(total_secs.is_some(), |ui| {
                 // A Slider ignores add_sized — it requests spacing().slider_width
@@ -158,11 +173,60 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                 // Volume
                 theme::icon(ui, app.theme_icon(Icon::Volume), Icon::Volume, 15.0);
                 let mut volume = app.volume();
-                if ui.add(egui::Slider::new(&mut volume, 0.0..=1.0).show_value(false)).changed() {
+                if ui.add(
+                    egui::Slider::new(&mut volume, 0.0..=1.0)
+                        .show_value(false)
+                        .trailing_fill(true),
+                ).changed() {
                     app.set_volume(volume);
                 }
             });
         });
+        });
+
+        // Second row: Balance (L/R) + Gapless/Crossfade toggles
+        ui.horizontal(|ui| {
+            // Balance slider (left) — double-click to reset to center
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.label(meta("Balance", &theme, layout.text_meta));
+                let mut balance = app.balance();
+                let bal_response = ui.add(
+                    egui::Slider::new(&mut balance, -1.0..=1.0)
+                        .show_value(false)
+                        .trailing_fill(true),
+                );
+                if bal_response.changed() {
+                    app.set_balance(balance);
+                }
+                if bal_response.double_clicked() {
+                    app.set_balance(0.0);
+                }
+            });
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Crossfade toggle (icon button, lit while active)
+                if theme::icon_button(
+                    ui,
+                    app.theme_icon(Icon::Crossfade),
+                    Icon::Crossfade,
+                    18.0,
+                    true,
+                    app.crossfade(),
+                ).clicked() {
+                    app.toggle_crossfade();
+                }
+                // Gapless toggle (icon button, lit while active)
+                if theme::icon_button(
+                    ui,
+                    app.theme_icon(Icon::Gapless),
+                    Icon::Gapless,
+                    18.0,
+                    true,
+                    app.gapless(),
+                ).clicked() {
+                    app.toggle_gapless();
+                }
+            });
         });
     });
 
