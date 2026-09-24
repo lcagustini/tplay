@@ -385,6 +385,33 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                         ui.add_space(8.0);
                     }
 
+                    // Volumes: local block partitions from /proc/self/mounts.
+                    let volumes = library::Volume::mounted_volumes();
+                    if !volumes.is_empty() {
+                        ui.label(egui::RichText::new("Volumes").small().strong().color(p.text_secondary));
+                        ui.add_space(4.0);
+                        for vol in volumes {
+                            let active = app.library_dir() == vol.path;
+                            if ui
+                                .add_sized(
+                                    egui::vec2(100.0, 18.0),
+                                    egui::Label::new(
+                                        egui::RichText::new(&vol.label)
+                                            .color(if active { p.accent } else { p.text_secondary })
+                                            .font(egui::FontId::new(layout.text_meta, theme.metadata_font.clone())),
+                                    )
+                                    .truncate()
+                                    .sense(egui::Sense::click()),
+                                )
+                                .on_hover_text(vol.path.display().to_string())
+                                .clicked()
+                            {
+                                jump = Some(vol.path.clone());
+                            }
+                        }
+                        ui.add_space(8.0);
+                    }
+
                     ui.label(egui::RichText::new("Favorites").small().strong().color(p.text_secondary));
                     ui.add_space(4.0);
                     for dir in app.favorite_dirs().to_vec() {

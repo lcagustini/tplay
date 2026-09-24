@@ -21,6 +21,105 @@ const COVER_FILES: [&str; 6] = [
     "folder.jpg", "Folder.jpg", "cover.jpg", "Cover.jpg", "folder.png", "cover.png",
 ];
 
+/// Pseudo/device-tree filesystems to exclude from Volumes.
+const PSEUDO_FSTYPES: &[&str] = &[
+    "devtmpfs", "devpts", "sysfs", "proc", "tmpfs", "cgroup2", "configfs", "debugfs",
+    "tracefs", "bpf", "mqueue", "hugetlbfs", "efivarfs", "securityfs", "pstore",
+    "autofs", "rpc_pipefs", "nfsd", "fusectl",
+];
+
+/// Boot/ESP mountpoints to exclude — system partitions, not user volumes.
+const BOOT_MOUNTPOINTS: &[&str] = &["/efi", "/boot", "/boot/efi"];
+
+/// Build a device -> label map from /dev/disk/by-label/ symlinks.
+/// Returns a map of device basename (e.g. "sdc1") -> label (e.g. "25-ssd-2").
+fn read_disk_labels() -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    if let Ok(entries) = std::fs::read_dir("/dev/disk/by-label") {
+        for entry in entries.flatten() {
+            let label = entry.file_name().to_string_lossy().into_owned();
+            if let Ok(target) = std::fs::read_link(entry.path()) {
+                if let Some(dev_name) = target.file_name().and_then(|s| s.to_str()) {
+                    map.insert(dev_name.to_string(), label);
+                }
+            }
+        }
+    }
+    map
+}
+
+/// A mountpoint that represents a local volume (block partition).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Volume {
+    /// Human-readable label (mountpoint leaf, or device basename for root).
+    pub label: String,
+    /// Mountpoint path.
+    pub path: PathBuf,
+}
+
+impl Volume {
+    /// Parse /proc/self/mounts and return local volumes (block partitions on /dev/*).
+    pub fn parse_mounts(mounts: &str) -> Vec<Volume> {
+        Self::parse_mounts_with_labels(mounts, &read_disk_labels())
+    }
+
+    /// Pure core of `parse_mounts` — label map injected, so tests are hermetic.
+    pub fn parse_mounts_with_labels(mounts: &str, disk_labels: &std::collections::HashMap<String, String>) -> Vec<Volume> {
+        let mut vols = Vec::new();
+        for line in mounts.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() < 3 {
+                continue;
+            }
+            let device = parts[0];
+            let mountpoint = parts[1];
+            let fstype = parts[2];
+
+            // Only /dev/* block devices, skip pseudo filesystems
+            if !device.starts_with("/dev/") {
+                continue;
+            }
+            if PSEUDO_FSTYPES.iter().any(|&p| fstype.starts_with(p)) {
+                continue;
+            }
+            // Skip boot/ESP partitions — system partitions, not user volumes.
+            if BOOT_MOUNTPOINTS.iter().any(|&b| mountpoint == b) {
+                continue;
+            }
+
+            let path = PathBuf::from(mountpoint);
+            let dev_name = Path::new(device)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(device);
+            let label = disk_labels
+                .get(dev_name)
+                .cloned()
+                .unwrap_or_else(|| {
+                    path.file_name()
+                        .and_then(|s| s.to_str())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| dev_name.to_string())
+                });
+
+            vols.push(Volume { label, path });
+        }
+        // Sort by label, case-insensitive
+        vols.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
+        vols
+    }
+
+    /// Read /proc/self/mounts and return mounted local volumes.
+    pub fn mounted_volumes() -> Vec<Volume> {
+        std::fs::read_to_string("/proc/self/mounts")
+            .ok()
+            .as_deref()
+            .map(Self::parse_mounts)
+            .unwrap_or_default()
+    }
+}
+
 pub fn is_audio(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
