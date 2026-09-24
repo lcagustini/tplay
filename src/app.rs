@@ -5,7 +5,7 @@ use crate::audio::transition;
 use crate::gui::theme::{self, Theme, Themes};
 use crate::library;
 use eframe::egui;
-use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink, Source};
+use rodio::{cpal::BufferSize, Decoder, OutputStream, OutputStreamBuilder, Sink, Source};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -72,6 +72,9 @@ pub struct Config {
     pub viz_view: VizView,
     #[serde(default = "default_volume")]
     pub volume: f32,
+    /// Output buffer size in frames — larger = more underrun slack, more latency.
+    #[serde(default = "default_buffer_size")]
+    pub buffer_size: u32,
     #[serde(default)]
     pub last_playlist: Option<String>,
     #[serde(default)]
@@ -95,6 +98,7 @@ pub struct Config {
 
 fn default_volume() -> f32 { 1.0 }
 fn default_crossfade_secs() -> f32 { 3.0 }
+fn default_buffer_size() -> u32 { 8192 }
 
 #[derive(Serialize, Deserialize, Default)]
 pub struct EqData {
@@ -157,6 +161,9 @@ pub struct TPlayApp {
     total_duration: Option<Duration>,
 
     volume: f32,
+
+    /// Output stream buffer size in frames, requested at stream open.
+    buffer_size: u32,
 
     /// Holds the slider at the intended position until get_pos() catches up,
     /// preventing snap-back to 0 during a skip_duration seek.
@@ -254,13 +261,23 @@ pub struct TPlayApp {
 impl TPlayApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let ctx = cc.egui_ctx.clone();
-        let output = OutputStreamBuilder::open_default_stream().expect("No audio output device found");
-        let sink = Sink::connect_new(output.mixer());
-
         let themes = Themes::load();
 
         // Load unified config
         let config = load_config::<Config>("config.json").unwrap_or_default();
+
+        // Output stream with a fixed, configurable buffer — a too-small buffer
+        // is the classic cause of ALSA "underrun occurred" at track
+        // transitions (the crossfade/gapless arm decodes two files at once).
+        // Fall back to the default open (device-chosen buffer) when the device
+        // rejects the fixed size.
+        let output = match OutputStreamBuilder::from_default_device()
+            .map(|b| b.with_buffer_size(BufferSize::Fixed(config.buffer_size.clamp(512, 65536))).open_stream())
+        {
+            Ok(Ok(s)) => s,
+            _ => OutputStreamBuilder::open_default_stream().expect("No audio output device found"),
+        };
+        let sink = Sink::connect_new(output.mixer());
         let theme = themes
             .get(&config.theme)
             .cloned()
@@ -273,6 +290,7 @@ impl TPlayApp {
             current_path: None,
             total_duration: None,
             volume: config.volume,
+            buffer_size: config.buffer_size,
             seek_target: None,
             position_offset: Duration::ZERO,
             playlist: Vec::new(),
@@ -366,6 +384,7 @@ impl TPlayApp {
             repeat: self.repeat,
             viz_view: self.viz_view,
             volume: self.volume,
+            buffer_size: self.buffer_size,
             last_playlist: self.playlist_file.as_ref().and_then(|p| p.to_str()).map(str::to_owned),
             library: LibraryData {
                 favorites: self.favorite_dirs.iter().filter_map(|d| d.to_str().map(str::to_owned)).collect(),

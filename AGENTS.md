@@ -198,6 +198,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
       "repeat": false,
       "viz_view": "Bars",
       "volume": 1.0,
+      "buffer_size": 8192,
       "last_playlist": "/path/to/playlist.tplay",
       "library": { "favorites": ["/path/to/fav"], "last_dir": "/path/to/music", "show_hidden": false }
     }
@@ -211,7 +212,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
 
 | file | purpose |
 |---|---|
-| `~/.config/tplay/config.json` | unified app settings (theme, EQ, shuffle, repeat, volume, last playlist, library state, balance, remaining, gapless, crossfade, crossfade_secs) |
+| `~/.config/tplay/config.json` | unified app settings (theme, EQ, shuffle, repeat, volume, **buffer_size**, last playlist, library state, balance, remaining, gapless, crossfade, crossfade_secs) |
 | `~/.config/tplay/dock_layout.json` | egui_dock layout (tabs, splits, floating windows) |
 | `~/.config/tplay/layouts/<name>.json` | named dock layout (tabs, splits, floating windows) — created via ☰ menu |
 | `~/.config/tplay/themes/<id>/theme.json` | user theme override (wins on id clash) |
@@ -228,6 +229,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window, no n
   "repeat": false,
   "viz_view": "Bars",
   "volume": 1.0,
+  "buffer_size": 8192,
   "last_playlist": "/path/to/playlist.tplay",
   "library": { "favorites": ["/path/to/fav"], "last_dir": "/path/to/music", "show_hidden": false },
   "**balance**": 0.0,
