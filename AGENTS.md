@@ -439,10 +439,12 @@ shared-constant rules apply to milestones as much as to shipped code.
   `current_index`/`current_path`/`total_duration` flip to the incoming track so
   Now Playing and the seek bar already show it. `playback_position()`/
   `playback_position_secs()` prefer `xf_sink` while present. Missing next file →
-  skip the arm; natural advance fails it gracefully via `load_file`. A next
-  track whose tagged duration is shorter than the hold/fade window is also
-  skipped (it would drain muted and be promoted empty) — it plays via natural
-  advance with a gap instead.
+  skip the arm; natural advance fails it gracefully via `load_file`.
+  **Short-incoming guard**: a track whose tagged duration is shorter than the
+  hold/fade window would drain shuffled while "playing" then be promoted empty
+  (silent skip). The arm consults `tag_cache` and bails when `duration < hold`
+  (gapless hold / crossfade window) — such tracks play via natural advance
+  with a gap instead. Untagged tracks are allowed through.
 - **Settle** (`advance()` step 1): fade progress `p = 1 − remaining/cf` from
   `sink.get_pos()` vs `xf_out_total` (pause/seek-safe, no wall clock);
   `fade_gains(p)` sets `sink`/`xf_sink` volumes each frame (equal-power, no
