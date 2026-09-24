@@ -441,7 +441,7 @@ shared-constant rules apply to milestones as much as to shipped code.
   `playback_position_secs()` prefer `xf_sink` while present. Missing next file →
   skip the arm; natural advance fails it gracefully via `load_file`.
   **Short-incoming guard**: a track whose tagged duration is shorter than the
-  hold/fade window would drain shuffled while "playing" then be promoted empty
+  hold/fade window would drain muted while "playing" then be promoted empty
   (silent skip). The arm consults `tag_cache` and bails when `duration < hold`
   (gapless hold / crossfade window) — such tracks play via natural advance
   with a gap instead. Untagged tracks are allowed through.
