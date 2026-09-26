@@ -6,7 +6,7 @@ use crate::config;
 use crate::library;
 use crate::network;
 use crate::tracks;
-use rodio::{cpal::BufferSize, Decoder, OutputStream, OutputStreamBuilder, Sink, Source};
+use rodio::{mixer::Mixer, Decoder, Sink, Source};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -50,8 +50,13 @@ impl Pane {
 pub use crate::config::{Config, EqData, LibraryData, VizView};
 
 pub struct TPlayApp {
-    /// Owns the cpal output stream + mixer; must outlive every Sink.
-    output: OutputStream,
+    /// Where every sink is attached. **Not a device**: the app only ever needs
+    /// something to hand `Sink::connect_new`, and `rodio::mixer::mixer` builds
+    /// one with no audio hardware involved — which is what lets a test build
+    /// this same struct (see `main.rs`'s `TPlay`, which owns the device and
+    /// passes its mixer in). A `Mixer` is a cheap `Arc` clone, so keeping it
+    /// costs nothing.
+    mixer: Mixer,
     sink: Sink,
 
     current_path: Option<PathBuf>,
@@ -140,26 +145,16 @@ impl TPlayApp {
     /// parameter: the app holds no `egui::Context` and owns no theme, so it
     /// cannot construct one — `main.rs`'s `TPlay` does both and hands over the
     /// settings `config.json` already carries.
-    pub fn new(config: &Config) -> Self {
+    pub fn new(config: &Config, mixer: Mixer) -> Self {
         // Seed the "what's on disk" baseline with what we just read, so the
         // first flush only writes if a setter has already changed something.
         let saved_config = serde_json::to_string_pretty(config).unwrap_or_default();
 
-        // A too-small buffer is the classic cause of ALSA "underrun occurred" at
-        // track transitions (the crossfade/gapless arm decodes two files at
-        // once). Fall back to the device-chosen default if it rejects the
-        // fixed size.
-        let output = match OutputStreamBuilder::from_default_device()
-            .map(|b| b.with_buffer_size(BufferSize::Fixed(config.buffer_size.clamp(512, 65536))).open_stream())
-        {
-            Ok(Ok(s)) => s,
-            _ => OutputStreamBuilder::open_default_stream().expect("No audio output device found"),
-        };
-        let sink = Sink::connect_new(output.mixer());
+        let sink = Sink::connect_new(&mixer);
 
         // Channels + worker are owned by `network::Network`.
         let mut app = Self {
-            output,
+            mixer,
             sink,
             current_path: None,
             total_duration: None,
@@ -298,7 +293,7 @@ impl TPlayApp {
         self.seek_target = None;
         self.position_offset = Duration::ZERO;
         self.viz.clear();
-        self.sink = Sink::connect_new(self.output.mixer());
+        self.sink = Sink::connect_new(&self.mixer);
         self.sink.set_volume(self.volume);
     }
 
@@ -497,7 +492,7 @@ impl TPlayApp {
         let file   = match tracks::open(&path)             { Some(f) => f, None => { eprintln!("seek: no file for {}", path.display()); return; } };
         let source = match Decoder::try_from(file)         { Ok(s) => s, Err(e) => { eprintln!("seek decode: {e}"); return; } };
 
-        self.sink = Sink::connect_new(self.output.mixer());
+        self.sink = Sink::connect_new(&self.mixer);
         self.sink.set_volume(self.volume);
         // get_pos() on the fresh sink counts only post-skip samples; the
         // skipped `target` is the new position offset from here on.
@@ -596,7 +591,7 @@ impl TPlayApp {
                 // flipping total_duration to the incoming track below.
                 self.xf_out_total = Some(armed.out_total);
                 // Second sink on the same mixer, so they play simultaneously.
-                let xf_sink = Sink::connect_new(self.output.mixer());
+                let xf_sink = Sink::connect_new(&self.mixer);
                 xf_sink.append(xf_source);
                 xf_sink.set_volume(0.0);
                 self.xf_sink = Some(xf_sink);
