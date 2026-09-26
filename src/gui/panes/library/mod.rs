@@ -34,7 +34,7 @@ fn dir_name(dir: &Path) -> String {
 }
 
 pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
-    let theme = app.theme().clone();
+    let theme = app.theme_state().current().clone();
     let browse = app.network().browse().cloned();
     let network_mode = browse.is_some();
 
@@ -47,7 +47,7 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
         // First frame this session: list the saved/current dir, start the scan.
         if !ui.ctx().memory_mut(|m| m.data.get_temp::<bool>(egui::Id::new(LIB_INIT)).unwrap_or(false)) {
             ui.ctx().memory_mut(|m| m.data.insert_temp(egui::Id::new(LIB_INIT), true));
-            app.navigate_to(app.library_dir().to_path_buf());
+            app.navigate_to(app.library().dir().to_path_buf());
         }
         header::local_header(app, ui, &theme);
     }

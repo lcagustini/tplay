@@ -69,6 +69,48 @@ fn a_drag_cannot_write_more_often_than_the_window() {
     );
 }
 
+/// The load-bearing property of the write decision: `TPlayApp::flush_config`
+/// asks "did anything change?" by serializing the config and comparing the
+/// string to the last one written, rather than trusting a flag every setter had
+/// to raise. That only works if equal content serializes equally — a field with
+/// nondeterministic order (a `HashMap`, a `HashSet`) would make every frame look
+/// changed and write the file 60×/sec again, which is the bug this replaced.
+///
+/// Two separately-built but equal configs must produce byte-identical JSON.
+#[test]
+fn equal_configs_serialize_identically() {
+    let build = || Config {
+        theme: "neon".into(),
+        eq: EqData { enabled: true, gains: [1.0; 10] },
+        shuffle: true,
+        repeat: true,
+        viz_view: VizView::Wave,
+        volume: 0.5,
+        buffer_size: 16384,
+        spool_cache_mb: 8192,
+        last_playlist: Some("/music/chill.tplay".into()),
+        library: LibraryData {
+            favorites: vec!["/music/a".into(), "/music/b".into()],
+            last_dir: "/music".into(),
+            show_hidden: true,
+        },
+        balance: 0.25,
+        remaining: true,
+        gapless: true,
+        crossfade: true,
+        crossfade_secs: 3.0,
+        servers: vec![ServerCfg { host: "10.0.0.1".into(), username: "guest".into() }],
+    };
+    let a = serde_json::to_string_pretty(&build()).unwrap();
+    let b = serde_json::to_string_pretty(&build()).unwrap();
+    assert_eq!(a, b, "equal configs must serialize identically");
+
+    // And a real difference must actually show up, or the compare is vacuous.
+    let mut changed = build();
+    changed.crossfade_secs = 4.0;
+    assert_ne!(a, serde_json::to_string_pretty(&changed).unwrap());
+}
+
 #[test]
 fn config_round_trip_preserves_every_field() {
     let c = Config {

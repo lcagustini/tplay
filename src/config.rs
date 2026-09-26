@@ -116,11 +116,12 @@ pub const MAX_CROSSFADE_SECS: f32 = 10.0;
 /// The user-tunable playback settings, as one owned group.
 ///
 /// The live counterpart of the matching `Config` fields: `from_config` reads them
-/// at startup, `TPlayApp::save_config` reads them back at save time. It exists
+/// at startup, `TPlayApp::snapshot` reads them back at save time. It exists
 /// because `TPlayApp` had **12** near-identical setters — six the same "if
 /// unchanged, return; set; mark dirty" shape — with the clamping duplicated in
-/// each. Setters here clamp and report whether anything changed, so a caller
-/// skips the dirty-marking entirely when nothing moved.
+/// each. The setters here clamp, and the "did anything change" question they
+/// used to answer is now asked once, by comparing the whole config against the
+/// copy on disk.
 pub struct Prefs {
     pub viz_view: VizView,
     pub remaining: bool,
@@ -149,24 +150,18 @@ impl Prefs {
 
     pub fn viz_view(&self) -> VizView { self.viz_view }
 
-    pub fn set_viz_view(&mut self, v: VizView) -> bool {
-        if self.viz_view == v { return false; }
+    pub fn set_viz_view(&mut self, v: VizView) {
         self.viz_view = v;
-        true
     }
 
     pub fn remaining(&self) -> bool { self.remaining }
 
-    pub fn set_remaining(&mut self, v: bool) -> bool {
-        if self.remaining == v { return false; }
+    pub fn set_remaining(&mut self, v: bool) {
         self.remaining = v;
-        true
     }
 
     pub fn gapless(&self) -> bool { self.gapless }
 
-    /// Always changes, so it reports nothing — there is no "unchanged" case to
-    /// skip a dirty-mark for.
     pub fn toggle_gapless(&mut self) { self.gapless = !self.gapless; }
 
     pub fn crossfade(&self) -> bool { self.crossfade }
@@ -175,19 +170,16 @@ impl Prefs {
 
     pub fn crossfade_secs(&self) -> f32 { self.crossfade_secs }
 
-    pub fn set_crossfade_secs(&mut self, secs: f32) -> bool {
-        let clamped = secs.clamp(0.0, MAX_CROSSFADE_SECS);
-        if (self.crossfade_secs - clamped).abs() < f32::EPSILON { return false; }
-        self.crossfade_secs = clamped;
-        true
+    /// Clamped to what the UI offers, so a hand-edited value that survives
+    /// `from_config`'s clamp cannot be re-widened from here.
+    pub fn set_crossfade_secs(&mut self, secs: f32) {
+        self.crossfade_secs = secs.clamp(0.0, MAX_CROSSFADE_SECS);
     }
 
     pub fn balance(&self) -> f32 { *self.balance.read().unwrap() }
 
-    pub fn set_balance(&mut self, v: f32) -> bool {
-        let clamped = v.clamp(-1.0, 1.0);
-        *self.balance.write().unwrap() = clamped;
-        true
+    pub fn set_balance(&mut self, v: f32) {
+        *self.balance.write().unwrap() = v.clamp(-1.0, 1.0);
     }
 
     /// The handle `BalanceSource` holds. Cloned, not shared by reference — the
@@ -220,11 +212,12 @@ pub const CONFIG_SAVE_DEBOUNCE_SECS: f64 = 0.5;
 
 /// Whether config.json should be written right now.
 ///
-/// The debounce exists because every settings setter used to write immediately,
-/// and the widgets that call them — the EQ pane's 10 vertical sliders, volume,
-/// balance — fire `resp.changed()` on **every frame of a drag**. Dragging one
-/// band serialized and `fs::write`d the whole file ~60×/sec, synchronously, on
-/// the UI thread.
+/// `changed` is "the config's content differs from the copy on disk", computed
+/// by the caller (`TPlayApp::flush_config`) — not a hand-set flag, so no setter
+/// has to remember to raise it. The debounce exists because the widgets behind
+/// those setters — the EQ pane's 10 vertical sliders, volume, balance — fire
+/// `resp.changed()` on **every frame of a drag**, and the file is ~500 bytes of
+/// JSON; a changed-and-changed-back drag writes nothing at all.
 ///
 /// Pure and time-injected so the policy is testable without an eframe `Context`:
 /// `now` and `last_save` are both seconds on the same clock
@@ -233,8 +226,8 @@ pub const CONFIG_SAVE_DEBOUNCE_SECS: f64 = 0.5;
 /// `closing` is the counterpart to the debounce: it costs at most one debounce
 /// window of settings on a hard kill, which the close flush buys back. Same
 /// shape `gui/coordinator.rs` uses for dock_layout.json.
-pub fn should_flush(dirty: bool, now: f64, last_save: f64, closing: bool) -> bool {
-    if !dirty {
+pub fn should_flush(changed: bool, now: f64, last_save: f64, closing: bool) -> bool {
+    if !changed {
         return false;
     }
     if closing {

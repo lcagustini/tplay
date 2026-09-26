@@ -98,7 +98,7 @@ fn confirm_modal(app: &mut TPlayApp, ctx: &egui::Context) {
     let Some(armed) = take_state::<Armed>(ctx, CONFIRM_ID) else {
         return;
     };
-    let p = app.theme().palette;
+    let p = app.theme_state().current().palette;
 
     // None = still open, Some(true) = Yes, Some(false) = dismissed.
     let mut answer: Option<bool> = None;
@@ -142,7 +142,7 @@ fn run(app: &mut TPlayApp, ctx: &egui::Context, action: ConfirmAction) {
         ConfirmAction::NewPlaylist => app.new_playlist(),
         ConfirmAction::LoadPlaylist { path, remote } => {
             if remote {
-                app.fetch_remote_playlist(path.to_string_lossy().into_owned());
+                app.network_mut().fetch(path.to_string_lossy().into_owned());
             } else {
                 app.load_playlist_from(path);
             }
@@ -166,7 +166,7 @@ fn save_name_modal(app: &mut TPlayApp, tree: &mut DockState<Pane>, ctx: &egui::C
         return;
     };
 
-    let p = app.theme().palette;
+    let p = app.theme_state().current().palette;
     // Some(None) = dismissed, Some(Some(name)) = confirmed.
     let mut action: Option<Option<String>> = None;
     let resp = egui::Modal::new(egui::Id::new(SAVE_NAME_ID)).show(ctx, |ui| {

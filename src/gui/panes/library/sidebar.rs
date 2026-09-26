@@ -73,7 +73,7 @@ fn sidebar_row(
             out = Some(RowClick::Jump);
         }
         if removable
-            && theme::icon_button(ui, app.theme_icon(theme::Icon::Remove), theme::Icon::Remove, 13.0, true, false)
+            && theme::icon_button(ui, app.theme_state().icon(theme::Icon::Remove), theme::Icon::Remove, 13.0, true, false)
                 .clicked()
         {
             out = Some(RowClick::Remove);
@@ -141,10 +141,10 @@ pub fn sidebar_ui(
                 // time: the server when browsing, else the local folder. (The
                 // other direction already worked — clicking a local folder calls
                 // `leave_network`, so the server row un-highlights.)
-                let current_local = (!network_mode).then(|| app.library_dir().to_path_buf());
+                let current_local = (!network_mode).then(|| app.library().dir().to_path_buf());
 
                 // Places: Home + XDG shortcuts — the favorites row style, no ✕.
-                let places = app.quick_folders();
+                let places = library::quick_folders();
                 if !places.is_empty() {
                     section_label(ui, p, "Places");
                     for (label, path) in places {
@@ -254,7 +254,7 @@ pub fn sidebar_ui(
                                 // credentials are asked for in the main pane, so a
                                 // saved server is reusable without retyping.
                                 if let Some((h, share, rel)) = network::parse_server_input(host) {
-                                    app.add_network_server(h.clone(), String::new());
+                                    app.network_mut().add_server(h.clone(), String::new());
                                     *form = None;
                                     if let Some(share) = share.filter(|s| !s.is_empty()) {
                                         app.network_mut().browse_open(
@@ -292,10 +292,10 @@ pub fn sidebar_ui(
                             {
                                 app.network_mut().browse_server(s.host.clone());
                             }
-                            if theme::icon_button(ui, app.theme_icon(theme::Icon::Remove), theme::Icon::Remove, 13.0, true, false)
+                            if theme::icon_button(ui, app.theme_state().icon(theme::Icon::Remove), theme::Icon::Remove, 13.0, true, false)
                                 .clicked()
                             {
-                                app.remove_network_server(&s.host);
+                                app.network_mut().remove_server(&s.host);
                             }
                         });
                     }
@@ -303,12 +303,12 @@ pub fn sidebar_ui(
                 }
 
                 section_label(ui, p, "Favorites");
-                for dir in app.favorite_dirs().to_vec() {
+                for dir in app.library().favorites().to_vec() {
                     let name = dir_name(&dir);
                     let active = current_local.as_deref() == Some(dir.as_path());
                     match sidebar_row(ui, app, theme, &layout, &name, &dir, active, true) {
                         Some(RowClick::Jump) => jump = Some(dir),
-                        Some(RowClick::Remove) => app.toggle_favorite(dir),
+                        Some(RowClick::Remove) => { app.library_mut().toggle_favorite(dir); }
                         None => {}
                     }
                 }

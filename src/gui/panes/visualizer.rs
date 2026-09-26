@@ -8,12 +8,12 @@ use eframe::egui;
 pub mod views;
 
 pub fn visualizer_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
-    let theme = app.theme().clone();
+    let theme = app.theme_state().current().clone();
     let p = theme.palette;
     let layout = theme.layout.with_defaults();
 
     // Selected view — persisted in config.json via `TPlayApp::viz_view`.
-    let mut view = app.viz_view();
+    let mut view = app.prefs().viz_view();
 
     // Header: title + view selector
     ui.horizontal(|ui| {
@@ -29,7 +29,7 @@ pub fn visualizer_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                 .show_ui(ui, |ui| {
                     for v in VizView::ALL {
                         if ui.selectable_value(&mut view, v, v.name()).changed() {
-                            app.set_viz_view(view);
+                            app.prefs_mut().set_viz_view(view);
                         }
                     }
                 });

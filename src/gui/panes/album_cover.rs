@@ -19,7 +19,7 @@ fn cover_id() -> egui::Id {
 type CoverCache = (String, Option<egui::TextureHandle>);
 
 pub fn album_cover_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
-    let theme = app.theme().clone();
+    let theme = app.theme_state().current().clone();
     let p = theme.palette;
 
     let rect = ui.available_rect_before_wrap();
@@ -84,7 +84,7 @@ pub fn album_cover_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
             // No art: themed placeholder, centered at a pane-relative size.
             let size = rect.width().min(rect.height()) * 0.35;
             let center = rect.center();
-            match app.theme_icon(Icon::NoCover) {
+            match app.theme_state().icon(Icon::NoCover) {
                 Some(icon) => {
                     painter.image(
                         icon.id(),

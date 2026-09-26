@@ -118,7 +118,7 @@ impl TabViewer for PaneViewer<'_> {
     type Tab = Pane;
 
     fn title(&mut self, pane: &mut Pane) -> egui::WidgetText {
-        let accent = self.app.theme().palette.accent;
+        let accent = self.app.theme_state().current().palette.accent;
         pane_title(*pane).color(accent)
     }
 
@@ -191,7 +191,7 @@ fn list_layouts(dir: &std::path::Path) -> Vec<PathBuf> {
 pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
     // Theme tokens -> egui visuals, every frame so a mid-session switch lands
     // instantly.
-    theme::apply(ctx, app.theme());
+    theme::apply(ctx, app.theme_state().current());
     // egui selects label text on drag by default; the playlist reorders by
     // dragging track titles, so kill text selection app-wide.
     ctx.style_mut(|s| s.interaction.selectable_labels = false);
@@ -230,12 +230,12 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
                 ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
             }
 
-            let logo = app.theme_icon(theme::Icon::Logo).cloned();
+            let logo = app.theme_state().icon(theme::Icon::Logo).cloned();
             // Window-chrome textures are cloned before the closures below so they
             // don't have to capture `app` (menu_contents already does).
-            let win_close_tex = app.theme_icon(theme::Icon::Remove).cloned();
-            let win_max_tex = app.theme_icon(theme::Icon::Maximize).cloned();
-            let win_min_tex = app.theme_icon(theme::Icon::Minimize).cloned();
+            let win_close_tex = app.theme_state().icon(theme::Icon::Remove).cloned();
+            let win_max_tex = app.theme_state().icon(theme::Icon::Maximize).cloned();
+            let win_min_tex = app.theme_state().icon(theme::Icon::Minimize).cloned();
 
             // Precompute layouts dir and tracked layout once per frame for the menu.
             let layouts_dir = layouts_dir();
@@ -244,19 +244,21 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
 
             let menu_contents = |ui: &mut egui::Ui| {
                 ui.label("Theme");
-                let mut sel = app.theme().id.clone();
-                for t in app.themes() {
+                let mut sel = app.theme_state().current().id.clone();
+                for t in app.theme_state().list() {
                     if ui.selectable_label(t.id == sel, t.name.clone()).clicked() {
                         sel = t.id.clone();
                     }
                 }
-                if sel != app.theme().id {
-                    app.set_theme(&sel);
+                if sel != app.theme_state().current().id {
+                    // `set` owns the icon re-decode a switch needs, and the
+                    // config compare persists the new id — nothing to flag here.
+                    app.theme_state_mut().set(ctx, &sel);
                     ui.close_menu();
                 }
                 ui.separator();
                 ui.label("Library");
-                let mut show_hidden = app.show_hidden();
+                let mut show_hidden = app.library().show_hidden();
                 if ui.checkbox(&mut show_hidden, "Show hidden folders").changed() {
                     app.set_show_hidden(show_hidden);
                 }
@@ -264,11 +266,11 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
                 ui.separator();
                 ui.label("Crossfade");
                 // Crossfade duration always visible and editable (constant menu height).
-                let mut cf_secs = app.crossfade_secs();
+                let mut cf_secs = app.prefs().crossfade_secs();
                 if ui.add(
                     egui::Slider::new(&mut cf_secs, 0.0..=10.0).suffix("s").trailing_fill(true),
                 ).changed() {
-                    app.set_crossfade_secs(cf_secs);
+                    app.prefs_mut().set_crossfade_secs(cf_secs);
                 }
                 // Layouts section — panes + saved layouts + save/load
                 ui.separator();

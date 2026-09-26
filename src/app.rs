@@ -3,7 +3,7 @@
 use crate::audio;
 use crate::audio::transition;
 use crate::config;
-use crate::gui::theme::{self, Theme, Themes};
+use crate::gui::theme::{self, Themes};
 use crate::library;
 use crate::network;
 use crate::tracks;
@@ -11,7 +11,6 @@ use eframe::egui;
 use rodio::{cpal::BufferSize, Decoder, OutputStream, OutputStreamBuilder, Sink, Source};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 /// Tiny inline RNG (XorShift64) - replaces fastrand dependency.
@@ -101,8 +100,10 @@ pub struct TPlayApp {
     /// math needs the old total.
     xf_out_total: Option<Duration>,
 
-    /// A setting changed since the last write; `flush_config` clears it.
-    config_dirty: bool,
+    /// The config.json content currently on disk. `flush_config` compares the
+    /// live snapshot against it, so *what* changed is never tracked by hand —
+    /// a setter that forgets to flag itself cannot lose a setting.
+    saved_config: String,
     /// `ctx` time of the last config.json write, for the debounce window.
     last_config_save: f64,
 
@@ -133,6 +134,9 @@ impl TPlayApp {
         let themes = Themes::load();
 
         let config = config::load();
+        // Seed the "what's on disk" baseline with what we just read, so the
+        // first flush only writes if a setter has already changed something.
+        let saved_config = serde_json::to_string_pretty(&config).unwrap_or_default();
 
         // A too-small buffer is the classic cause of ALSA "underrun occurred" at
         // track transitions (the crossfade/gapless arm decodes two files at
@@ -171,7 +175,7 @@ impl TPlayApp {
             prefs: config::Prefs::from_config(&config),
             xf_sink: None,
             xf_out_total: None,
-            config_dirty: false,
+            saved_config,
             last_config_save: 0.0,
             theme,
             ctx,
@@ -200,7 +204,7 @@ impl TPlayApp {
         if let Some(pl_path) = config.last_playlist {
             let path = PathBuf::from(pl_path);
             if network::is_remote(&path) {
-                app.fetch_remote_playlist(path.to_string_lossy().into_owned());
+                app.network.fetch(path.to_string_lossy().into_owned());
             } else if path.exists() {
                 app.load_playlist_from(path);
             }
@@ -210,33 +214,33 @@ impl TPlayApp {
         app
     }
 
-    /// Record that a setting changed; `update()` writes it out (throttled).
+    /// Write config.json if its content differs from the last write, at most
+    /// once per `CONFIG_SAVE_DEBOUNCE_SECS`, and unconditionally when closing.
     ///
-    /// This used to *be* `save_config()`, and every settings setter called it —
-    /// so a slider drag serialized the whole config.json ~60×/sec on the UI
-    /// thread. `flush_config` is now the only writer.
-    fn mark_config_dirty(&mut self) {
-        self.config_dirty = true;
-    }
-
-    /// Write config.json if anything changed, at most once per
-    /// `CONFIG_SAVE_DEBOUNCE_SECS`, and unconditionally when closing.
+    /// The "did it change" test is a string compare against the previous
+    /// snapshot, not a dirty flag raised by each setter: the flag was a manual
+    /// obligation with ~20 call sites, and a missed one silently lost a
+    /// setting. This is the shape `gui/coordinator.rs` already used for
+    /// dock_layout.json. Cost is one ~500-byte serialization per frame.
     fn flush_config(&mut self, ctx: &egui::Context) {
         let now = ctx.input(|i| i.time);
         let closing = ctx.input(|i| i.viewport().close_requested());
-        if !config::should_flush(self.config_dirty, now, self.last_config_save, closing) {
+        let config = self.snapshot();
+        let json = serde_json::to_string_pretty(&config).unwrap_or_default();
+        if !config::should_flush(json != self.saved_config, now, self.last_config_save, closing) {
             return;
         }
-        self.save_config();
-        self.config_dirty = false;
+        self.saved_config = json;
         self.last_config_save = now;
+        config::save(&config);
     }
 
-    /// Save all settings to unified config.json
-    fn save_config(&self) {
-        // Every field listed explicitly, no `..Default::default()`: a new
-        // `Config` field must be a compile error here, not a silent reset.
-        let config = Config {
+    /// Every setting, as the file wants it.
+    ///
+    /// Every field listed explicitly, no `..Default::default()`: a new
+    /// `Config` field must be a compile error here, not a silent reset.
+    fn snapshot(&self) -> Config {
+        Config {
             theme: self.theme.current().id.clone(),
             eq: EqData {
                 enabled: self.eq.enabled(),
@@ -260,8 +264,7 @@ impl TPlayApp {
                 show_hidden: self.library.show_hidden(),
             },
             servers: self.network.servers().to_vec(),
-        };
-        config::save(&config);
+        }
     }
 
     pub fn add_files(&mut self, paths: Vec<PathBuf>) {
@@ -705,54 +708,6 @@ impl TPlayApp {
         self.sink.set_volume(volume);
         // A live xf's volume is re-applied each frame in `advance()` scaled by
         // `self.volume`, so a change mid-fade lands on the next frame.
-        self.mark_config_dirty();
-    }
-
-    /// Set one band's gain in dB, live on the running source — no sink rebuild,
-    /// no audio restart. `EqSettings` clamps to ±12 dB and ignores an
-    /// out-of-range band, so a slider re-reporting the same value costs one `if`
-    /// and no config write. (The preset label is *derived* from the gains by
-    /// `eq::preset_for`, so a manual tweak needs nothing marking.)
-    pub fn set_eq_gain(&mut self, band: usize, gain_db: f32) {
-        if self.eq.set_band(band, gain_db) { self.mark_config_dirty(); }
-    }
-
-    /// Select an EQ preset by name (see `EQ_PRESETS`), or None for custom.
-    pub fn set_eq_preset(&mut self, name: Option<String>) {
-        if self.eq.set_preset(name.as_deref()) { self.mark_config_dirty(); }
-    }
-
-    pub fn eq_enabled(&self) -> bool { self.eq.enabled() }
-
-    pub fn eq_gains(&self) -> [f32; 10] { self.eq.gains() }
-
-    /// The preset the current gains match, or `None` = Custom (the ComboBox
-    /// holds a `None` option, so the caller needs the Option, not the label).
-    pub fn eq_preset(&self) -> Option<&'static str> { self.eq.preset() }
-
-    pub fn eq_preset_name(&self) -> &'static str { self.eq.preset_name() }
-
-    /// Switch theme by id. The icon re-decode lives in `ThemeState::set` — the
-    /// app no longer knows that switching a theme invalidates the textures.
-    pub fn set_theme(&mut self, id: &str) {
-        if self.theme.set(&self.ctx, id) { self.mark_config_dirty(); }
-    }
-
-    pub fn theme(&self) -> &Arc<Theme> { self.theme.current() }
-
-    /// All loadable themes, for the Theme dropdown.
-    pub fn themes(&self) -> &[Arc<Theme>] { self.theme.list() }
-
-    /// Texture for a pane icon in the current theme (falls back to the
-    /// default theme's), or `None` → the pane renders a unicode glyph.
-    pub fn theme_icon(&self, icon: theme::Icon) -> Option<&egui::TextureHandle> {
-        self.theme.icon(icon)
-    }
-
-    /// Toggle EQ on/off. Applies live — the source starts/stops filtering in place.
-    pub fn toggle_eq(&mut self) {
-        self.eq.toggle();
-        self.mark_config_dirty();
     }
 
     pub fn next_track(&mut self) {
@@ -815,12 +770,10 @@ impl TPlayApp {
     pub fn toggle_shuffle(&mut self) {
         self.shuffle = !self.shuffle;
         self.reset_shuffle();
-        self.mark_config_dirty();
     }
 
     pub fn toggle_repeat(&mut self) {
         self.repeat = !self.repeat;
-        self.mark_config_dirty();
     }
 
     // ── Playlists — plain `.tplay` files on disk, found in the Library like
@@ -851,7 +804,6 @@ impl TPlayApp {
         }
         self.playlist_file = Some(path);
         self.playlist_dirty = false;
-        self.mark_config_dirty();
     }
 
     /// Re-list the current remote directory. Called after a playlist lands on a
@@ -880,12 +832,6 @@ impl TPlayApp {
         self.apply_playlist(paths, path);
     }
 
-    /// Ask the worker to download a remote `.tplay`. The reply arrives as
-    /// `Event::Fetched` and is applied by `load_fetched_playlist`.
-    pub fn fetch_remote_playlist(&mut self, uri: String) {
-        self.network.fetch(uri);
-    }
-
     /// Apply a downloaded remote playlist. `base` is the share directory the
     /// playlist was browsed at — relative entries must resolve against THAT,
     /// not against the spool cache copy we just read from.
@@ -907,7 +853,6 @@ impl TPlayApp {
         self.ensure_tags(self.playlist.clone());
         self.playlist_file = Some(file);
         self.playlist_dirty = false;
-        self.mark_config_dirty();
     }
 
     /// Clear the playlist for a fresh build (confirm dialog lives in the GUI).
@@ -917,7 +862,6 @@ impl TPlayApp {
         self.playlist.clear();
         self.playlist_file = None;
         self.playlist_dirty = false;
-        self.mark_config_dirty();
     }
 
     /// The `.tplay` file this playlist is saved to / was loaded from, if any.
@@ -954,15 +898,13 @@ impl TPlayApp {
     pub fn navigate_to(&mut self, dir: PathBuf) {
         let Some(scan) = self.library.open(dir, &self.tag_cache) else { return };
         self.ensure_tags(scan);
-        self.mark_config_dirty();
     }
 
     /// Header click: pick a new column (ascending) or flip the active one and
     /// re-sort the current folder in place.
     pub fn set_library_sort(&mut self, key: usize) {
         if self.library.set_sort(key, &self.tag_cache) {
-            self.mark_config_dirty();
-        }
+            }
     }
 
     /// Ensure the given audio files have tag info in the cache.
@@ -1039,15 +981,12 @@ impl TPlayApp {
         }
     }
 
-    pub fn toggle_favorite(&mut self, dir: PathBuf) {
-        self.library.toggle_favorite(dir);
-        self.mark_config_dirty();
-    }
-
     // ── SMB network ────────────────────────────────────────────────────────
-    // State lives in `network::Network`; these are the persistence-aware seams
-    // (config.json ownership stays in app.rs) + accessors for the GUI and
-    // `update()`. Browsing/spool/creds/drain are methods on the network object.
+    // State lives in `network::Network`, and the GUI reaches it through these two
+    // accessors — browsing, spooling, credentials and the worker channels are
+    // its own methods, not the app's. Persistence is the config compare in
+    // `flush_config`, so `servers` is written whenever that list actually
+    // changes and there is no wrapper here to forget to flag it.
 
     pub fn network(&self) -> &network::Network {
         &self.network
@@ -1055,25 +994,6 @@ impl TPlayApp {
 
     pub fn network_mut(&mut self) -> &mut network::Network {
         &mut self.network
-    }
-
-    /// Add a server (dedup by host; re-adding updates the username). Persists.
-    pub fn add_network_server(&mut self, host: String, username: String) {
-        self.network.add_server(host, username);
-        self.mark_config_dirty();
-    }
-
-    /// Remove a saved server; persists. Passwords stay in the session map and
-    /// are never written.
-    pub fn remove_network_server(&mut self, host: &str) {
-        self.network.remove_server(host);
-        self.mark_config_dirty();
-    }
-
-    /// Session-memory password for a host, never persisted — set at add-time
-    /// via the Library's add-server form, consumed per connect.
-    pub fn set_network_password(&mut self, host: String, password: String) {
-        self.network.set_password(host, password);
     }
 
     // Read-only getters
@@ -1088,62 +1008,36 @@ impl TPlayApp {
     /// Visualization buffer (shared with the tap source).
     pub fn viz(&self) -> &audio::viz::VizBuf { &self.viz }
 
-    // ── Playback settings ────────────────────────────────────────────────
+    // ── Owned state groups ───────────────────────────────────────────────
     //
-    // The values live in `config::Prefs`; these are delegates, kept because the
-    // GUI reaches state through `TPlayApp` and nothing else. The setters are
-    // three lines rather than six because `Prefs` owns the clamping and reports
-    // whether anything changed — so an unchanged value costs one `if` and never
-    // marks the config dirty.
+    // The app *owns* four groups that have an owner of their own, and these
+    // accessors are the whole boundary: a pane that draws the equalizer depends
+    // on `EqSettings`, not on a set of method names this file invented for it.
+    //
+    // Anything that was a bare forward to one of these — a getter per value, a
+    // setter per setting — is gone. What remains on `TPlayApp` either touches
+    // state only the app has, or performs an effect that spans owners (persist,
+    // re-list, scan, rebuild the sink, drain the network).
 
-    /// Visualizer pane view — see `VizView::ALL`.
-    pub fn viz_view(&self) -> VizView { self.prefs.viz_view() }
+    /// The six user-tunable playback settings. Their clamping lives in
+    /// `Prefs`; persistence is the config compare in `flush_config`, so a
+    /// caller just sets the value and forgets about the file.
+    pub fn prefs(&self) -> &config::Prefs { &self.prefs }
+    pub fn prefs_mut(&mut self) -> &mut config::Prefs { &mut self.prefs }
 
-    pub fn set_viz_view(&mut self, view: VizView) {
-        if self.prefs.set_viz_view(view) { self.mark_config_dirty(); }
-    }
+    pub fn library(&self) -> &library::LibraryState { &self.library }
+    pub fn library_mut(&mut self) -> &mut library::LibraryState { &mut self.library }
 
-    /// Current balance (-1.0..=1.0).
-    pub fn balance(&self) -> f32 { self.prefs.balance() }
+    /// The 10-band EQ. Gains live in an `Arc` the running source reads, so
+    /// setting one is live: no sink rebuild, no audio restart.
+    pub fn eq(&self) -> &audio::eq::EqSettings { &self.eq }
+    pub fn eq_mut(&mut self) -> &mut audio::eq::EqSettings { &mut self.eq }
 
-    /// Set balance, live with no sink rebuild — `Prefs` holds the handle the
-    /// audio source reads per frame, so there is no sink to rebuild here.
-    pub fn set_balance(&mut self, v: f32) {
-        if self.prefs.set_balance(v) { self.mark_config_dirty(); }
-    }
+    /// The active theme, its alternatives and the decoded icon set.
+    /// `ThemeState::set` owns the icon re-decode a switch needs.
+    pub fn theme_state(&self) -> &theme::ThemeState { &self.theme }
+    pub fn theme_state_mut(&mut self) -> &mut theme::ThemeState { &mut self.theme }
 
-    /// Whether to show remaining time instead of elapsed.
-    pub fn remaining(&self) -> bool { self.prefs.remaining() }
-
-    pub fn set_remaining(&mut self, remaining: bool) {
-        if self.prefs.set_remaining(remaining) { self.mark_config_dirty(); }
-    }
-
-    /// Whether gapless playback is enabled.
-    pub fn gapless(&self) -> bool { self.prefs.gapless() }
-
-    pub fn toggle_gapless(&mut self) {
-        self.prefs.toggle_gapless();
-        self.mark_config_dirty();
-    }
-
-    /// Whether crossfade playback is enabled.
-    pub fn crossfade(&self) -> bool { self.prefs.crossfade() }
-
-    pub fn toggle_crossfade(&mut self) {
-        self.prefs.toggle_crossfade();
-        self.mark_config_dirty();
-    }
-
-    /// Crossfade duration in seconds.
-    pub fn crossfade_secs(&self) -> f32 { self.prefs.crossfade_secs() }
-
-    pub fn set_crossfade_secs(&mut self, secs: f32) {
-        if self.prefs.set_crossfade_secs(secs) { self.mark_config_dirty(); }
-    }
-
-    pub fn library_dir(&self) -> &std::path::Path { self.library.dir() }
-    pub fn library_entries(&self) -> &[library::Entry] { self.library.entries() }
     /// The whole tag cache, so a caller can sort a list of entries against it
     /// (`library::sort_entries`) rather than sorting entry-by-entry. Keys are
     /// track ids, so a remote one is an `smb://` URI.
@@ -1157,35 +1051,22 @@ impl TPlayApp {
     /// Whether any file in the browsed folder is still missing from the tag
     /// cache (i.e. its scan is pending or underway).
     ///
-    /// Local by construction, not by filtering: `library_entries` is only ever
-    /// filled by `navigate_to`, from `library::list_dir` on a `library_dir` that
-    /// had to pass `dir.is_dir()` — and an `smb://` URI never does. So there is
-    /// no remote entry here to skip, and the share browser computes its own
-    /// count over its own entries.
+    /// Local by construction, not by filtering: `LibraryState::entries` is only
+    /// ever filled by `navigate_to`, from `library::list_dir` on a `dir` that
+    /// had to pass `is_dir()` — and an `smb://` URI never does. So there is no
+    /// remote entry here to skip, and the share browser computes its own count
+    /// over its own entries. Spans two owners (browse state + tag cache), which
+    /// is why it is here and not on either.
     pub fn library_scanning(&self) -> bool {
         self.library
             .entries()
             .iter()
             .any(|e| !e.is_dir() && !library::is_playlist(e.path()) && !self.tag_cache.contains_key(e.path()))
     }
-    pub fn favorite_dirs(&self) -> &[PathBuf] { self.library.favorites() }
-    pub fn is_favorite(&self, dir: &std::path::Path) -> bool { self.library.is_favorite(dir) }
-
-    /// Fixed user-folder shortcuts (Home + XDG user dirs) shown above the
-    /// Favorites list in the Library pane. The logic is `library`'s — it never
-    /// touched app state — so this delegate exists only to keep the GUI's
-    /// uniform `app.*()` call shape.
-    pub fn quick_folders(&self) -> Vec<(String, PathBuf)> {
-        library::quick_folders()
-    }
-
-    pub fn show_hidden(&self) -> bool { self.library.show_hidden() }
-
-    pub fn library_sort(&self) -> usize { self.library.sort() }
-    pub fn library_sort_asc(&self) -> bool { self.library.sort_asc() }
 
     /// Toggle hidden-folder display and re-list the current dir so the change
-    /// lands immediately (also persists it).
+    /// lands immediately. The re-list is why this is an app method and not a
+    /// `library_mut().set_show_hidden(..)`.
     pub fn set_show_hidden(&mut self, show: bool) {
         if self.library.set_show_hidden(show) {
             self.navigate_to(self.library.dir().to_path_buf());
@@ -1216,19 +1097,21 @@ impl TPlayApp {
         self.peek_prev_index().is_some()
     }
 
+    /// Where the playhead is, as a fraction of the track. Derived from
+    /// `playback_position_secs` rather than re-reading the sink: two copies of
+    /// the xf-else-main branch is how the seek bar and the time label would
+    /// come to disagree about which sink is playing.
     pub fn playback_position(&self) -> f32 {
         // During crossfade/gapless the xf_sink plays the incoming track, whose
         // position starts at 0 and progresses normally.
-        let (pos, total) = if let Some(xf) = &self.xf_sink {
-            (xf.get_pos(), self.total_duration)
-        } else {
-            (self.sink.get_pos().saturating_add(self.position_offset), self.total_duration)
-        };
-        total
-            .map(|d| (pos.as_secs_f32() / d.as_secs_f32()).clamp(0.0, 1.0))
+        let pos = self.playback_position_secs().as_secs_f32();
+        self.total_duration
+            .map(|d| (pos / d.as_secs_f32()).clamp(0.0, 1.0))
             .unwrap_or(0.0)
     }
 
+    /// The playhead in seconds — the primitive both the seek bar (as a fraction)
+    /// and the time label read, so they cannot disagree.
     pub fn playback_position_secs(&self) -> Duration {
         if let Some(xf) = &self.xf_sink {
             xf.get_pos()
@@ -1286,8 +1169,7 @@ impl eframe::App for TPlayApp {
                     Ok(()) => {
                         self.playlist_file = Some(PathBuf::from(uri));
                         self.playlist_dirty = false;
-                        self.mark_config_dirty();
-                        self.refresh_network_dir();
+                                        self.refresh_network_dir();
                     }
                     Err(e) => eprintln!("tplay: could not save playlist to {uri}: {e}"),
                 },

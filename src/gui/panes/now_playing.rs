@@ -17,7 +17,7 @@ fn meta(s: impl Into<String>, theme: &Theme, size: f32) -> egui::RichText {
 
 pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
     // Owned Arc copy — panes take `&mut app` while `meta` needs `&Theme`.
-    let theme = app.theme().clone();
+    let theme = app.theme_state().current().clone();
     let layout = theme.layout.with_defaults();
 
     // Fill pane (dock-sized, resizable — the Fixed pin is gone), so pad the top
@@ -69,7 +69,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
             let actual_ratio = app.playback_position();
 
             let pos_secs = app.playback_position_secs();
-            let pos_str = if app.remaining() {
+            let pos_str = if app.prefs().remaining() {
                 if let Some(total) = app.total_duration() {
                     let rem = total.saturating_sub(pos_secs);
                     TPlayApp::fmt_duration(Some(rem))
@@ -95,10 +95,11 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
 
             // Elapsed/remaining label — click to toggle mode
             let pos_label = ui.label(meta(pos_str, &theme, layout.text_time));
+            let remaining = app.prefs().remaining();
             if pos_label.clicked() {
-                app.set_remaining(!app.remaining());
+                app.prefs_mut().set_remaining(!remaining);
             }
-            pos_label.on_hover_text(if app.remaining() { "Click to show elapsed" } else { "Click to show remaining" });
+            pos_label.on_hover_text(if remaining { "Click to show elapsed" } else { "Click to show remaining" });
 
             let bar = ui.add_enabled_ui(total_secs.is_some(), |ui| {
                 // A Slider ignores add_sized and requests
@@ -142,7 +143,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             // Prev track
             let prev_enabled = app.has_prev_track();
-            if theme::icon_button(ui, app.theme_icon(Icon::Prev), Icon::Prev, 18.0, prev_enabled, false).clicked() {
+            if theme::icon_button(ui, app.theme_state().icon(Icon::Prev), Icon::Prev, 18.0, prev_enabled, false).clicked() {
                 app.prev_track();
             }
 
@@ -152,36 +153,36 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
             if is_paused || is_empty {
                 // Nothing loaded and an empty playlist: greyed out, since
                 // `play()` would have nothing to start.
-                if theme::icon_button(ui, app.theme_icon(Icon::Play), Icon::Play, 18.0, app.can_play(), false).clicked() {
+                if theme::icon_button(ui, app.theme_state().icon(Icon::Play), Icon::Play, 18.0, app.can_play(), false).clicked() {
                     app.play();
                 }
-            } else if theme::icon_button(ui, app.theme_icon(Icon::Pause), Icon::Pause, 18.0, true, false).clicked() {
+            } else if theme::icon_button(ui, app.theme_state().icon(Icon::Pause), Icon::Pause, 18.0, true, false).clicked() {
                 app.pause();
             }
 
-            if theme::icon_button(ui, app.theme_icon(Icon::Stop), Icon::Stop, 18.0, true, false).clicked() {
+            if theme::icon_button(ui, app.theme_state().icon(Icon::Stop), Icon::Stop, 18.0, true, false).clicked() {
                 app.stop();
             }
 
             // Next track
             let next_enabled = app.has_next_track();
-            if theme::icon_button(ui, app.theme_icon(Icon::Next), Icon::Next, 18.0, next_enabled, false).clicked() {
+            if theme::icon_button(ui, app.theme_state().icon(Icon::Next), Icon::Next, 18.0, next_enabled, false).clicked() {
                 app.next_track();
             }
 
             // Shuffle / repeat — lit while active.
             ui.separator();
-            if theme::icon_button(ui, app.theme_icon(Icon::Shuffle), Icon::Shuffle, 18.0, true, app.shuffle()).clicked() {
+            if theme::icon_button(ui, app.theme_state().icon(Icon::Shuffle), Icon::Shuffle, 18.0, true, app.shuffle()).clicked() {
                 app.toggle_shuffle();
             }
-            if theme::icon_button(ui, app.theme_icon(Icon::Repeat), Icon::Repeat, 18.0, true, app.repeat()).clicked() {
+            if theme::icon_button(ui, app.theme_state().icon(Icon::Repeat), Icon::Repeat, 18.0, true, app.repeat()).clicked() {
                 app.toggle_repeat();
             }
 
             ui.separator();
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                theme::icon(ui, app.theme_icon(Icon::Volume), Icon::Volume, 15.0);
+                theme::icon(ui, app.theme_state().icon(Icon::Volume), Icon::Volume, 15.0);
                 let mut volume = app.volume();
                 if ui.add(
                     egui::Slider::new(&mut volume, 0.0..=1.0)
@@ -199,17 +200,17 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
             // Balance slider (left); double-click resets to center
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.label(meta("Balance", &theme, layout.text_meta));
-                let mut balance = app.balance();
+                let mut balance = app.prefs().balance();
                 let bal_response = ui.add(
                     egui::Slider::new(&mut balance, -1.0..=1.0)
                         .show_value(false)
                         .trailing_fill(true),
                 );
                 if bal_response.changed() {
-                    app.set_balance(balance);
+                    app.prefs_mut().set_balance(balance);
                 }
                 if bal_response.double_clicked() {
-                    app.set_balance(0.0);
+                    app.prefs_mut().set_balance(0.0);
                 }
             });
 
@@ -217,24 +218,24 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                 // Crossfade toggle (icon button, lit while active)
                 if theme::icon_button(
                     ui,
-                    app.theme_icon(Icon::Crossfade),
+                    app.theme_state().icon(Icon::Crossfade),
                     Icon::Crossfade,
                     18.0,
                     true,
-                    app.crossfade(),
+                    app.prefs().crossfade(),
                 ).clicked() {
-                    app.toggle_crossfade();
+                    app.prefs_mut().toggle_crossfade();
                 }
                 // Gapless toggle (icon button, lit while active)
                 if theme::icon_button(
                     ui,
-                    app.theme_icon(Icon::Gapless),
+                    app.theme_state().icon(Icon::Gapless),
                     Icon::Gapless,
                     18.0,
                     true,
-                    app.gapless(),
+                    app.prefs().gapless(),
                 ).clicked() {
-                    app.toggle_gapless();
+                    app.prefs_mut().toggle_gapless();
                 }
             });
         });

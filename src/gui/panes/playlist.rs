@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
     // Owned Arc copy — panes take `&mut app` while using theme data.
-    let theme = app.theme().clone();
+    let theme = app.theme_state().current().clone();
     let p = theme.palette;
     let layout = theme.layout.with_defaults();
 
@@ -107,7 +107,7 @@ pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                 }
 
                 row.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if theme::icon_button(ui, app.theme_icon(Icon::Remove), Icon::Remove, 13.0, true, false).clicked() {
+                    if theme::icon_button(ui, app.theme_state().icon(Icon::Remove), Icon::Remove, 13.0, true, false).clicked() {
                         to_delete = Some(i);
                     }
                     if !fmt.is_empty() {
@@ -215,7 +215,7 @@ pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                 dialogs::ask_save_name(
                     ui.ctx(),
                     dialogs::SaveTarget::PlaylistLocal,
-                    app.library_dir().to_string_lossy().into_owned(),
+                    app.library().dir().to_string_lossy().into_owned(),
                     library::default_playlist_name(app.playlist_file()),
                 );
             }

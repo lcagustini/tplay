@@ -248,7 +248,7 @@ fn file_list_ui(
     remote: bool,
 ) -> Option<Act> {
     let p = theme.palette;
-    let folder_tex = app.theme_icon(theme::Icon::Folder).cloned();
+    let folder_tex = app.theme_state().icon(theme::Icon::Folder).cloned();
     let mut out = None;
 
     // Search box. State is the one `LIB_QUERY` key, so the query deliberately
@@ -274,9 +274,9 @@ fn file_list_ui(
         .iter()
         .any(|e| !e.is_dir() && !library::is_playlist(e.path()));
     if has_audio {
-        let (cur, asc) = (app.library_sort(), app.library_sort_asc());
-        let asc_tex = app.theme_icon(theme::Icon::SortAsc).cloned();
-        let desc_tex = app.theme_icon(theme::Icon::SortDesc).cloned();
+        let (cur, asc) = (app.library().sort(), app.library().sort_asc());
+        let asc_tex = app.theme_state().icon(theme::Icon::SortAsc).cloned();
+        let desc_tex = app.theme_state().icon(theme::Icon::SortDesc).cloned();
         ui.horizontal(|ui| {
             let (head, _) = ui.allocate_exact_size(
                 egui::vec2(ui.available_width(), 22.0),
@@ -393,7 +393,7 @@ fn file_list_ui(
 /// the shared file list. `remote_list_ui` is the same two steps with
 /// `browse_open` behind `Nav`, which is why both end in `file_list_ui`.
 pub fn local_list_ui(app: &mut TPlayApp, ui: &mut egui::Ui, theme: &theme::Theme) {
-    let entries = app.library_entries().to_vec();
+    let entries = app.library().entries().to_vec();
     list_header_right(app, ui, theme.palette, &entries);
     ui.add_space(4.0);
     let act = file_list_ui(
@@ -491,7 +491,7 @@ pub fn remote_list_ui(
     browse: &network::NetworkBrowse,
 ) {
     let p = theme.palette;
-    let folder_tex = app.theme_icon(theme::Icon::Folder).cloned();
+    let folder_tex = app.theme_state().icon(theme::Icon::Folder).cloned();
 
     // Busy / error states replace the list entirely: nothing to show while a
     // listing is in flight, and on a logon failure the main pane owes the user a
@@ -566,7 +566,7 @@ pub fn remote_list_ui(
             is_dir: e.is_dir,
         })
         .collect();
-    library::sort_entries(&mut entries, app.tag_cache(), app.library_sort(), app.library_sort_asc());
+    library::sort_entries(&mut entries, app.tag_cache(), app.library().sort(), app.library().sort_asc());
 
     // Ask for the tags of everything on screen that isn't cached yet. Safe to
     // do every frame: `ensure_tags` skips cached paths, and the network side
@@ -616,7 +616,7 @@ pub fn remote_list_ui(
         }
         Some(Act::Play(path)) => app.play_file(path),
         Some(Act::Add(path)) => app.add_files(vec![path]),
-        Some(Act::LoadPlaylist(uri)) => app.fetch_remote_playlist(uri.to_string_lossy().into_owned()),
+        Some(Act::LoadPlaylist(uri)) => app.network_mut().fetch(uri.to_string_lossy().into_owned()),
         None => {}
     }
 }
@@ -701,8 +701,8 @@ fn login_form_ui(app: &mut TPlayApp, ui: &mut egui::Ui, theme: &theme::Theme, br
         let (user, pass) = (creds.0.clone(), creds.1.clone());
         // Username goes to the saved server (persisted); the password only ever
         // reaches the session map — never config.json.
-        app.add_network_server(host.clone(), user);
-        app.set_network_password(host.clone(), pass);
+        app.network_mut().add_server(host.clone(), user);
+        app.network_mut().set_password(host.clone(), pass);
         // Retry the stage we were actually on, so a login deep inside a share
         // does not bounce the user back out to the share list.
         match &browse.share {

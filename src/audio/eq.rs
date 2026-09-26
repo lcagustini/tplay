@@ -114,13 +114,11 @@ impl EqSettings {
     }
 
     /// The preset the current gains match, or `None` for Custom. The ComboBox
-    /// holds a `None` option, so it needs the Option, not the label.
+    /// holds a `None` option, so it needs the Option, not the label — and the
+    /// label is just this or "Custom", derived by the caller so there is one
+    /// derivation of the name rather than two accessors over it.
     pub fn preset(&self) -> Option<&'static str> {
         preset_for(self.gains())
-    }
-
-    pub fn preset_name(&self) -> &'static str {
-        self.preset().unwrap_or("Custom")
     }
 }
 

@@ -4,9 +4,9 @@ use eframe::egui;
 
 pub fn equalizer_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
     // Owned Arc copy — panes take `&mut app` while using theme data.
-    let theme = app.theme().clone();
+    let theme = app.theme_state().current().clone();
     let p = theme.palette;
-    let gains = app.eq_gains();
+    let gains = app.eq().gains();
     let layout = theme.layout.with_defaults();
 
     // Header — grouped controls; the tab already names the pane. Measured via
@@ -14,26 +14,30 @@ pub fn equalizer_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
     let header_h = ui
         .scope(|ui| {
             ui.horizontal(|ui| {
-                let on = app.eq_enabled();
+                let on = app.eq().enabled();
                 if ui.add(egui::Button::new("ON").selected(on)).clicked() {
-                    app.toggle_eq();
+                    app.eq_mut().toggle();
                 }
                 if ui.button("Reset").clicked() {
                     for i in 0..10 {
-                        app.set_eq_gain(i, 0.0);
+                        app.eq_mut().set_band(i, 0.0);
                     }
                 }
-                let mut sel = app.eq_preset().map(|s| s.to_string());
+                // One read of the derived preset: the ComboBox needs the `Option`
+                // (it holds a `None` = Custom entry), and the label is that or
+                // "Custom".
+                let current = app.eq().preset();
+                let mut sel = current.map(|s| s.to_string());
                 egui::ComboBox::from_id_salt("tplay.eq.preset")
-                    .selected_text(app.eq_preset_name())
+                    .selected_text(current.unwrap_or("Custom"))
                     .show_ui(ui, |ui| {
                         for (name, _) in EQ_PRESETS {
                             ui.selectable_value(&mut sel, Some(name.to_string()), name);
                         }
                         ui.selectable_value(&mut sel, None, "Custom");
                     });
-                if sel != app.eq_preset().map(|s| s.to_string()) {
-                    app.set_eq_preset(sel);
+                if sel != current.map(|s| s.to_string()) {
+                    app.eq_mut().set_preset(sel.as_deref());
                 }
             });
         })
@@ -110,7 +114,7 @@ pub fn equalizer_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                             .trailing_fill(true);
                         let resp = ui.add(slider);
                         if resp.changed() {
-                            app.set_eq_gain(i, gain);
+                            app.eq_mut().set_band(i, gain);
                         }
                     });
                     ui.add_space(layout.eq_band_gap);

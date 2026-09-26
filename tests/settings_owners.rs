@@ -30,20 +30,25 @@ fn prefs() -> Prefs {
     Prefs::from_config(&Config::default())
 }
 
-/// The whole point of the setters returning `bool`: an unchanged value must not
-/// dirty the config, so a slider that re-reports the same number 60 times a
-/// second does not schedule 60 writes.
+/// A repeated write of the same value is a no-op, and a real write is a
+/// read-back. The setters no longer *report* a change — the config compare in
+/// `TPlayApp::flush_config` is what decides that, by serializing the whole
+/// config and comparing it to the copy on disk (pinned by
+/// `equal_configs_serialize_identically` in `config_persistence.rs`).
 #[test]
-fn prefs_setters_report_whether_anything_changed() {
+fn prefs_writes_are_idempotent() {
     let mut p = prefs();
     assert!(!p.remaining());
-    assert!(p.set_remaining(true), "a real change must report true");
-    assert!(!p.set_remaining(true), "setting the same value again must report false");
-    assert!(p.set_remaining(false), "flipping back is a change");
+    p.set_remaining(true);
+    assert!(p.remaining());
+    p.set_remaining(true);
+    assert!(p.remaining(), "writing the same value again changes nothing");
+    p.set_remaining(false);
+    assert!(!p.remaining(), "flipping back is a write");
 
     let mut p = prefs();
-    assert!(p.set_viz_view(tplay::app::VizView::Wave));
-    assert!(!p.set_viz_view(tplay::app::VizView::Wave));
+    p.set_viz_view(tplay::app::VizView::Wave);
+    assert_eq!(p.viz_view(), tplay::app::VizView::Wave);
 }
 
 #[test]
@@ -145,7 +150,7 @@ fn eq_settings_reports_no_change_for_the_same_gain() {
 #[test]
 fn eq_settings_derives_the_preset_name_from_the_gains() {
     let eq = EqSettings::new(false, [0.0; 10]);
-    assert_eq!(eq.preset_name(), "Flat", "all-zero is the Flat preset");
+    assert_eq!(eq.preset(), Some("Flat"), "all-zero is the Flat preset");
     for (name, gains) in EQ_PRESETS {
         eq.set_preset(Some(name));
         assert_eq!(eq.gains(), gains, "{name} must apply its own curve");
@@ -154,7 +159,6 @@ fn eq_settings_derives_the_preset_name_from_the_gains() {
     // A hand-tweaked curve is Custom, not silently the nearest preset.
     eq.set_band(0, 0.1);
     assert_eq!(eq.preset(), None);
-    assert_eq!(eq.preset_name(), "Custom");
 }
 
 #[test]

@@ -151,18 +151,18 @@ fn apply(app: &mut TPlayApp, seg: &Seg) {
 /// in `breadcrumb`.
 pub fn local_header(app: &mut TPlayApp, ui: &mut egui::Ui, theme: &theme::Theme) {
     let p = theme.palette;
-    let dir = app.library_dir().to_path_buf();
+    let dir = app.library().dir().to_path_buf();
     let segs = local_segs(&dir);
     // 1 = only the filesystem root is exempt from the `…` collapse.
     if let Some(seg) = breadcrumb(ui, p, &segs, 1) {
         apply(app, seg);
     }
 
-    let fav = app.is_favorite(&dir);
+    let fav = app.library().is_favorite(&dir);
     let tex = if fav {
-        app.theme_icon(theme::Icon::StarOn).cloned()
+        app.theme_state().icon(theme::Icon::StarOn).cloned()
     } else {
-        app.theme_icon(theme::Icon::StarOff).cloned()
+        app.theme_state().icon(theme::Icon::StarOff).cloned()
     };
     let fav_btn = match tex {
         Some(tex) => egui::Button::image(egui::Image::new(&tex).fit_to_exact_size(egui::vec2(14.0, 14.0)))
@@ -170,7 +170,7 @@ pub fn local_header(app: &mut TPlayApp, ui: &mut egui::Ui, theme: &theme::Theme)
         None => egui::Button::new(if fav { "★" } else { "☆" }).selected(fav),
     };
     if ui.add(fav_btn).on_hover_text("Favorite folder").clicked() {
-        app.toggle_favorite(dir);
+        app.library_mut().toggle_favorite(dir);
     }
 }
 
