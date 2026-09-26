@@ -16,8 +16,7 @@
     "row_even": "#171717",
     "row_odd": "#202020",
     "btn_hover": "#2a2a2a",
-    "focus_ring": "#2ea3f0",
-    "disabled_text": "#555555"
+    "focus_ring": "#2ea3f0"
   },
   "layout": {
     "eq_slider_min_h": 60,
