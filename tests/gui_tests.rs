@@ -337,3 +337,109 @@ fn higher_priority_dir_wins_and_icons_fall_back() {
 
     let _ = std::fs::remove_dir_all(&base);
 }
+/// Regression: the Library pane's right-hand header row (counts + Add All)
+/// pushed the whole file list below the pane.
+///
+/// `Ui::with_layout` with a **horizontal** layout whose cross-axis align is
+/// `Center`/`Max` hands its child a `min_rect` spanning the parent's whole
+/// remaining height instead of the height actually used, and `scope_dyn` ends
+/// with `advance_cursor_after_rect(child.min_rect())` — so the parent cursor
+/// jumps by that entire span and `available_height()` collapses to 0. Measured
+/// in a 460px window: `Center` consumed 430px of a 444px column, `Min` consumed
+/// the 21px it used.
+///
+/// This asserts the *geometry the user sees* (is the list still on screen, and
+/// did the header row leave room for it), not the align token, because the
+/// token is an implementation detail and the geometry is the bug.
+#[test]
+fn right_to_left_center_does_not_swallow_the_column() {
+    use eframe::egui::{pos2, vec2, Rect, Sense};
+
+    /// Build one frame of `CentralPanel > horizontal_top > [sidebar, column]`
+    /// with the header row in `align`, and report (header height consumed,
+    /// scroll content top, window height).
+    fn measure(align: egui::Align) -> (f32, f32, f32) {
+        const WIN_H: f32 = 460.0;
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(680.0, WIN_H))),
+            ..Default::default()
+        };
+        let mut consumed = 0.0;
+        let mut scroll_top = f32::NAN;
+        ctx.run(raw, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.horizontal_top(|ui| {
+                    // Sidebar, exactly as the pane allocates it.
+                    let (_, side) = ui.allocate_space(vec2(120.0, ui.available_height()));
+                    let mut su = ui.new_child(egui::UiBuilder::new().max_rect(side));
+                    su.vertical(|ui| {
+                        for i in 0..12 {
+                            ui.label(format!("place {i}"));
+                        }
+                    });
+
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("breadcrumb");
+                        });
+                        let before = ui.min_rect().height();
+                        ui.with_layout(egui::Layout::right_to_left(align), |ui| {
+                            ui.button("Add All");
+                            ui.label("12 tracks · 3 folders · 1 playlist");
+                        });
+                        consumed = ui.min_rect().height() - before;
+                        ui.horizontal(|ui| {
+                            ui.label("Search");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut String::new())
+                                    .desired_width(220.0),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Title");
+                            ui.label("Artist");
+                        });
+                        let scroll_h = (ui.available_height() - 24.0).max(40.0);
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .max_height(scroll_h)
+                            .show(ui, |ui| {
+                                let (r, _) = ui
+                                    .allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
+                                scroll_top = r.min.y;
+                            });
+                    });
+                });
+            });
+        });
+        (consumed, scroll_top, WIN_H)
+    }
+
+    // Premise: this really is a trap, and it is the align token that decides.
+    // Without this, the real assertions below could pass for the wrong reason.
+    let (center_h, center_top, win_h) = measure(egui::Align::Center);
+    assert!(
+        center_h > 200.0,
+        "premise: right_to_left(Center) is expected to swallow the column, consumed {center_h:.1}px"
+    );
+    assert!(
+        center_top > win_h,
+        "premise: with Center the list lands below the pane (top {center_top:.1} > {win_h:.1})"
+    );
+
+    // The fix: Min consumes one row's worth, leaving the list on screen.
+    let (min_h, min_top, win_h) = measure(egui::Align::Min);
+    assert!(
+        min_h < 40.0,
+        "Align::Min must consume only the row it uses, got {min_h:.1}px"
+    );
+    assert!(
+        min_top < win_h,
+        "the file list must be inside the pane, got top {min_top:.1} vs window {win_h:.1}"
+    );
+    assert!(
+        min_h < center_h,
+        "Align::Min must consume strictly less than Center ({min_h:.1} vs {center_h:.1})"
+    );
+}

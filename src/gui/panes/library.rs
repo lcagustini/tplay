@@ -411,13 +411,36 @@ fn file_list_ui(
 /// The right-hand end of a file-list header: composition counts and Add All.
 /// Shared because both browsers now work from `&[library::Entry]` — a share's
 /// entries carry `smb://` URIs, which go into the playlist unchanged.
+///
+/// **`Align::Min` is load-bearing, not cosmetic.** A horizontal `with_layout`
+/// whose cross-axis align is `Center` or `Max` gives its child a `min_rect`
+/// spanning the parent's *whole remaining height*, not the height actually used
+/// — `scope_dyn` ends with `advance_cursor_after_rect(child.min_rect())`, so
+/// the parent cursor jumps by that entire span. Measured in a 460px window with
+/// this pane's real shape: `right_to_left(Center)` consumed **430px** of a
+/// 444px column (leaving `available_height() == 0`), while `right_to_left(Min)`
+/// consumed the **21px** it used. With `Center` the file list's ScrollArea was
+/// positioned at y≈497 — below the pane — and only the Add All row was visible
+/// beside the sidebar.
+///
+/// The damage scales with the parent's available height, which is why this went
+/// unnoticed elsewhere: every other `with_layout` in the app sits under a
+/// *horizontal* parent (`coordinator.rs` top bar, `now_playing.rs` balance row,
+/// `playlist.rs` rows, `visualizer.rs` header), where the child's available
+/// height is one row tall. The one other vertical-parent site is
+/// `now_playing.rs`'s transport block, whose pane is ~15% of the window, so the
+/// over-consumption is bounded by an already-short height.
+/// Regression test: `right_to_left_center_does_not_swallow_the_column` in
+/// `tests/gui_tests.rs`.
 fn list_header_right(
     app: &mut TPlayApp,
     ui: &mut egui::Ui,
     p: theme::Palette,
     entries: &[library::Entry],
 ) {
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+    // `Align::Min`, NOT `Center` — see the note below. It looks like a cosmetic
+    // choice (top-align vs vertically centre a ~21px row) and is anything but.
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
         if ui
             .button("Add All")
             .on_hover_text("Add this folder's tracks to the playlist")
