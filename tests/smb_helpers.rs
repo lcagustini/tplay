@@ -328,3 +328,40 @@ fn tag_attempts_are_bounded_and_cleared_on_success() {
     attempts.remove(uri);
     assert_eq!(attempts.get(uri).copied().unwrap_or(0), 0);
 }
+
+/// Servers commonly include `.` and `..` in a directory listing. They are
+/// navigation artifacts, not content, and they used to survive into the share
+/// browser as real folder rows — passing the `is_dir` filter, inflating the
+/// "N folders" count, and producing a URI with a `.` segment the server then
+/// rejects when clicked.
+///
+/// This is NOT a general hidden-file test: a real folder named `.config` is
+/// content and must stay reachable, because the share browser has no
+/// "show hidden" toggle to reveal it with.
+#[test]
+fn dot_entries_are_dropped_but_dot_folders_are_not() {
+    use tplay::network::is_self_or_parent;
+
+    for artifact in [".", ".."] {
+        assert!(is_self_or_parent(artifact), "{artifact} must be dropped");
+    }
+    for real in [
+        "",
+        ".",
+        // A leading dot is content, not an artifact.
+        ".config",
+        "..hidden",
+        "...",
+        "music",
+        "song.mp3",
+        "a.tplay",
+        // Case matters: these are not the artifacts.
+        ".TIF",
+        ".. ",
+    ] {
+        if real == "." {
+            continue; // already asserted above
+        }
+        assert!(!is_self_or_parent(real), "{real:?} is content and must survive");
+    }
+}

@@ -733,8 +733,22 @@ async fn run_list_dir(uri: &str, creds: &SmbCreds) -> CmdResult<Vec<RemoteEntry>
     let entries = client.list_directory(&mut tree, &rel).await.map_err(|e| e.to_string())?;
     Ok(entries
         .into_iter()
+        // Servers commonly include `.` and `..` in a directory listing. They are
+        // navigation artifacts, not content: they pass the `is_dir` filter and
+        // become real folder rows, and browsing one produces a URI with a `.`
+        // segment the server then rejects. Dropped here, at the source, so no
+        // consumer has to know — including the folder count in the header.
+        .filter(|e| !is_self_or_parent(&e.name))
         .map(|e| RemoteEntry { name: e.name, size: e.size, is_dir: e.is_directory })
         .collect())
+}
+
+/// Is this listing entry the `.` / `..` navigation artifact? Not a general
+/// "is hidden" test: a real folder named `.config` is content and is left
+/// alone (the share browser has no "show hidden" toggle, so hiding dot-names
+/// wholesale would make such folders unreachable).
+pub fn is_self_or_parent(name: &str) -> bool {
+    name == "." || name == ".."
 }
 
 /// Download `uri` to its spool cache path. Already cached → return immediately.
