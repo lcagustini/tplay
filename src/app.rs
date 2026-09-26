@@ -581,6 +581,18 @@ impl TPlayApp {
         self.cancel_xf();
 
         let path = match self.current_path.clone() { Some(p) => p, None => return };
+        // The slow path reopens the file, so it needs the LOCAL path — for a
+        // remote track `current_path` is an `smb://` URI and there is no such
+        // file on disk, which made this return early and silently do nothing.
+        // `local_file_now` covers the ordinary case: a local track is its own
+        // path, a remote one is its spool-cache copy.
+        let local = match tracks::local_file_now(&path) {
+            Some(l) => l,
+            None => {
+                eprintln!("tplay: seek: no local file for {}", path.display());
+                return;
+            }
+        };
         let total_secs = match self.total_duration { Some(d) => d.as_secs_f32(), None => return };
         let target = Duration::from_secs_f32((progress * total_secs).max(0.0));
 
@@ -593,7 +605,7 @@ impl TPlayApp {
 
         let was_paused = self.sink.is_paused();
 
-        let file   = match File::open(&path)             { Ok(f) => f, Err(e) => { eprintln!("seek open: {e}");   return; } };
+        let file   = match File::open(&local)            { Ok(f) => f, Err(e) => { eprintln!("seek open: {e}");   return; } };
         let source = match Decoder::try_from(file)         { Ok(s) => s, Err(e) => { eprintln!("seek decode: {e}"); return; } };
 
         self.sink = Sink::connect_new(self.output.mixer());
@@ -672,9 +684,13 @@ impl TPlayApp {
                     // and crossfade stop being a source-based rule and become the
                     // same data-availability rule local tracks already follow.
                     // Either way: skip the arm, and let natural advance handle it.
-                    if tracks::local_file_now(&next_path).is_none() {
+                    // Everything below opens a FILE, so it must use the local
+                    // path — `next_path` is an `smb://` URI for a remote track
+                    // and there is no such file on disk. The URI stays the id:
+                    // it is what `current_path` and the `tag_cache` key on.
+                    let Some(next_local) = tracks::local_file_now(&next_path) else {
                         return;
-                    }
+                    };
                     // A track shorter than the hold/fade window drains muted
                     // before the swap (gapless) or mid-fade (crossfade) and
                     // would be promoted empty — silently skipped. Prefer a
@@ -690,16 +706,22 @@ impl TPlayApp {
                             return;
                         }
                     }
-                    // Capture the outgoing duration for the fade math BEFORE
-                    // flipping total_duration to the incoming track below.
-                    self.xf_out_total = Some(total);
-                    // Build the incoming track source (full track, buffered).
-                    let xf_source = transition::build_gapless_next(
-                        next_path.clone(),
+                    // Build the incoming track source (full track, buffered)
+                    // BEFORE any state flips, so a build failure leaves the
+                    // arm cleanly skipped rather than half-applied. A `None`
+                    // here is a gap, not a crash: `advance` returns and natural
+                    // advance picks the track up a moment later.
+                    let Some(xf_source) = transition::build_gapless_next(
+                        &next_local,
                         Arc::clone(&self.eq_shared),
                         Arc::clone(&self.balance),
                         self.viz.clone(),
-                    );
+                    ) else {
+                        return;
+                    };
+                    // Capture the outgoing duration for the fade math BEFORE
+                    // flipping total_duration to the incoming track below.
+                    self.xf_out_total = Some(total);
                     // Second sink on the same mixer — plays simultaneously.
                     let xf_sink = Sink::connect_new(self.output.mixer());
                     xf_sink.append(xf_source);
@@ -707,12 +729,14 @@ impl TPlayApp {
                     self.xf_sink = Some(xf_sink);
                     // Pre-flip the playlist metadata so Now Playing shows the new track.
                     self.current_index = Some(next_idx);
-                    if let Some(info) = library::read_info(&next_path) {
+                    // Tags and duration are read from the local file; the cache
+                    // entry is keyed by the URI so every pane still finds it.
+                    if let Some(info) = library::read_info(&next_local) {
                         self.total_duration = info.duration;
                         self.tag_cache.insert(next_path.clone(), info);
                     }
                     if self.total_duration.is_none() {
-                        self.total_duration = audio::probe_duration(&next_path);
+                        self.total_duration = audio::probe_duration(&next_local);
                     }
                     self.current_path = Some(next_path);
                     self.seek_target = None;

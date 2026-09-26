@@ -36,15 +36,32 @@ pub fn fade_gains(p: f32) -> (f32, f32) {
 /// Open a file and return a fully-wrapped decoder (EQ → Tap → Balance),
 /// *buffered* so decode happens off the audio thread.
 /// Used for the crossfade incoming track and gapless next track.
+///
+/// Returns `None` if the file cannot be opened or decoded. This is called from
+/// `advance()` every frame, and a crossfade is a nicety: failing to pre-buffer
+/// must cost a gap, not the whole app. It previously `.expect()`ed, which meant
+/// an unreadable file aborted the process from inside a per-frame path.
 pub fn build_gapless_next(
-    path: std::path::PathBuf,
+    path: &std::path::Path,
     eq_shared: Arc<RwLock<EqShared>>,
     balance: Arc<RwLock<f32>>,
     viz: VizBuf,
-) -> impl Source<Item = f32> + Send + 'static {
-    let file = File::open(path).expect("gapless/crossfade: file open failed");
-    let decoder = Decoder::try_from(file).expect("gapless/crossfade: decode failed");
+) -> Option<Box<dyn Source<Item = f32> + Send + 'static>> {
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("tplay: gapless/crossfade: open {}: {e}", path.display());
+            return None;
+        }
+    };
+    let decoder = match Decoder::try_from(file) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("tplay: gapless/crossfade: decode {}: {e}", path.display());
+            return None;
+        }
+    };
     let eq_source = EqSource::new(decoder, eq_shared);
     let tap_source = TapSource::new(eq_source, viz);
-    BalanceSource::new(tap_source, balance).buffered()
+    Some(Box::new(BalanceSource::new(tap_source, balance).buffered()))
 }

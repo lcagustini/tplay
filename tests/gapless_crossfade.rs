@@ -11,6 +11,7 @@ use tplay::audio::viz::{TapSource, VizBuf};
 use tplay::audio::balance::{BalanceSource, balance_gains};
 use rodio::buffer::SamplesBuffer;
 use rodio::Source;
+use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -82,7 +83,8 @@ fn build_gapless_next_produces_full_track_source() {
     common::write_wav(&wav);
     let (eq_shared, balance, viz) = dummy_shared();
 
-    let mut src = build_gapless_next(wav, eq_shared, balance, viz);
+    let mut src = build_gapless_next(&wav, eq_shared, balance, viz)
+        .expect("a real wav must build");
     assert_eq!(src.channels(), 2); // BalanceSource upmixes mono → stereo
     assert_eq!(src.sample_rate(), 8000);
     common::assert_duration_approx(src.total_duration(), Duration::from_secs(1), "wav duration");
@@ -95,6 +97,47 @@ fn build_gapless_next_produces_full_track_source() {
     assert!(count >= 15_998, "full track must drain ~16000 stereo samples, got {count}");
 }
 
+/// A build failure must cost a gap, not the app.
+///
+/// `build_gapless_next` is called from `advance()` every frame, and it used to
+/// `.expect()` on the open and the decode. Any file it could not read therefore
+/// aborted the process from inside a per-frame path. The reachable cases are not
+/// exotic: a track deleted between the availability check and the open, a
+/// truncated or non-audio file, and — the one that actually bit — an `smb://` URI
+/// passed where a file path was expected, since there is no such file on disk.
+#[test]
+fn build_gapless_next_fails_instead_of_panicking() {
+    let dir = common::test_dir("gapless_xf_unreadable");
+
+    // Missing file.
+    let (eq_shared, balance, viz) = dummy_shared();
+    assert!(
+        build_gapless_next(&dir.join("nope.wav"), eq_shared, balance, viz).is_none(),
+        "a missing file must return None, not panic"
+    );
+
+    // Present but not decodable — the open succeeds, the decode fails.
+    let junk = dir.join("junk.mp3");
+    std::fs::write(&junk, b"this is definitely not audio").unwrap();
+    let (eq_shared, balance, viz) = dummy_shared();
+    assert!(
+        build_gapless_next(&junk, eq_shared, balance, viz).is_none(),
+        "an undecodable file must return None, not panic"
+    );
+
+    // The `smb://` URI itself: the exact input that crashed the xf arm. It is
+    // not a local path, so it cannot be opened. The caller's job is to hand over
+    // a resolved local file (`tracks::local_file_now`); if one ever gets here,
+    // the result is a skipped crossfade, not a dead app.
+    let (eq_shared, balance, viz) = dummy_shared();
+    assert!(
+        build_gapless_next(Path::new("smb://nas/media/song.mp3"), eq_shared, balance, viz).is_none(),
+        "an smb:// URI is not a file — must return None, not panic"
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// 0 dB EQ + centered balance = bit-transparent passthrough of the decoded file.
 #[test]
 fn build_gapless_next_identity_when_flags_nominal() {
@@ -103,7 +146,8 @@ fn build_gapless_next_identity_when_flags_nominal() {
     common::write_wav(&wav);
     let (eq_shared, balance, viz) = dummy_shared();
 
-    let mut src = build_gapless_next(wav, eq_shared, balance, viz);
+    let mut src = build_gapless_next(&wav, eq_shared, balance, viz)
+        .expect("a real wav must build");
     let first = src.next().expect("sample");
     // write_wav's first sample is i16 value 0.
     assert!(first.abs() < 1e-4, "first sample should be silence, got {first}");
