@@ -5,7 +5,7 @@
 
 use std::path::Path;
 use tplay::network::{
-    cache_path_in, child_browse, child_uri, dir_uri, fnv1a64, is_remote, parse_server_input,
+    cache_path_in, child_uri, dir_uri, fnv1a64, is_remote, parse_server_input,
     server_uri, share_uri, spool_key, split_uri,
 };
 
@@ -156,19 +156,6 @@ fn playlist_files_are_recognized_by_name() {
 }
 
 #[test]
-fn child_browse_distinguishes_share_entry_from_subdirectory() {
-    let (uri, share, rel) = child_browse("nas", None, "", "music");
-    assert_eq!(uri, "smb://nas/music");
-    assert_eq!(share.as_deref(), Some("music"));
-    assert!(rel.is_empty());
-
-    let (uri, share, rel) = child_browse("nas", share.as_deref(), &rel, "Rock");
-    assert_eq!(uri, "smb://nas/music/Rock");
-    assert_eq!(share.as_deref(), Some("music"));
-    assert_eq!(rel, "Rock");
-}
-
-#[test]
 fn spool_key_is_stable_and_distinct() {
     // Known FNV-1a 64 vector (hand-computed) — the key is a cache filename,
     // so it must never drift between Rust releases (that's the point of
@@ -202,4 +189,44 @@ fn cache_path_keeps_extension_and_uses_injected_dir() {
         cache_path_in("smb://nas/music/a.mp3", dir),
         cache_path_in("smb://nas/music/b.mp3", dir)
     );
+}
+/// A share-browser entry's `path` is the FULL child URI, and descending into it
+/// must be a no-op round trip.
+///
+/// This is a real bug that shipped once: the folder click passed that URI to
+/// it through the deleted `child_browse` helper as if it were a bare name,
+/// producing a `rel` of
+/// `"music/smb://nas/media/music/Rock"`, which the server rejects with
+/// PATH_NOT_FOUND. Both halves are asserted — the correct derivation round-trips
+/// exactly, and the wrong one is detectably different — so a future refactor
+/// can't reintroduce it by "simplifying" the split back into a re-join.
+#[test]
+fn nav_uri_round_trips_but_renaming_one_does_not() {
+    let host = "nas";
+    let share = "media";
+    let rel = "music";
+    let dir = dir_uri(host, share, rel);
+
+    // How `remote_list_ui` builds its entries: path = child_uri(dir, name).
+    let entry = child_uri(&dir, "Rock");
+
+    // The fix: split the entry URI back into what `browse_open` wants. Because
+    // it is already a child URI this is the identity.
+    let (h, s, r) = split_uri(&entry).expect("entry is a valid uri");
+    assert_eq!(h, host);
+    assert_eq!(s.as_deref(), Some(share));
+    assert_eq!(r, "music/Rock");
+    assert_eq!(dir_uri(&h, &s.unwrap(), &r), entry, "split must round-trip");
+
+    // Premise for the negative half: treating the URI as a name is NOT identity.
+    // Built by hand, not via a helper — `child_browse` was deleted precisely
+    // because its `(host, share, rel, name)` signature invited this mistake.
+    let bad_rel = format!("{rel}/{entry}");
+    assert_eq!(bad_rel, "music/smb://nas/media/music/Rock");
+    assert_ne!(dir_uri(host, share, &bad_rel), entry);
+    assert!(dir_uri(host, share, &bad_rel).contains("smb://nas/media/music/smb://"));
+
+    // And the local `..` shape still works the other way: from a share root.
+    let root_entry = child_uri(&dir_uri(host, share, ""), "");
+    assert_eq!(split_uri(&root_entry).unwrap().2, "");
 }

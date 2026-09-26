@@ -497,32 +497,6 @@ pub fn uri_parent(uri: &str) -> &str {
     }
 }
 
-/// Resolve a click on a share-list entry or a directory entry.
-///
-/// A `None` share means the server's share list is showing, so the clicked name
-/// is the share itself. Once a share is selected, the same click extends its
-/// share-relative path.
-pub fn child_browse(
-    host: &str,
-    share: Option<&str>,
-    rel: &str,
-    name: &str,
-) -> (String, Option<String>, String) {
-    match share {
-        None => {
-            let share = name.to_owned();
-            (share_uri(host, &share), Some(share), String::new())
-        }
-        Some(share) => {
-            let new_rel = if rel.is_empty() {
-                name.to_owned()
-            } else {
-                format!("{rel}/{name}")
-            };
-            (dir_uri(host, share, &new_rel), Some(share.to_owned()), new_rel)
-        }
-    }
-}
 
 // ── Spool cache ──────────────────────────────────────────────────────────────
 

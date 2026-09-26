@@ -585,20 +585,22 @@ fn remote_list_ui(app: &mut TPlayApp, ui: &mut egui::Ui) {
     // "Local" is the way back out.
     if browse.share.is_none() {
         let mut i = 0usize;
-        let mut nav: Option<PathBuf> = None;
+        // A share name, NOT a URI — unlike every other row in this pane, the
+        // share list is built from `RemoteEntry::name` and has no Entry to
+        // carry a path. Named `share_name` so it can't be confused with one.
+        let mut share_name: Option<String> = None;
         let mut names: Vec<&network::RemoteEntry> = browse.entries.iter().collect();
         names.sort_by_key(|e| e.name.to_lowercase());
         for e in names {
             if draw_dir_row(ui, &theme, 24.0, i, &e.name, folder_tex.as_ref()) {
-                nav = Some(PathBuf::from(e.name.clone()));
+                share_name = Some(e.name.clone());
             }
             i += 1;
         }
         if i == 0 {
             ui.label(egui::RichText::new("No shares").small().color(p.text_secondary));
         }
-        if let Some(name) = nav {
-            let share = name.to_string_lossy().into_owned();
+        if let Some(share) = share_name {
             app.network_mut().browse_open(
                 network::share_uri(&browse.host, &share),
                 Some(share),
@@ -646,10 +648,19 @@ fn remote_list_ui(app: &mut TPlayApp, ui: &mut egui::Ui) {
     let act = file_list_ui(app, ui, &theme, &entries, None, scanning);
 
     match act {
-        Some(Act::Nav(name)) => {
-            let name = name.to_string_lossy().into_owned();
-            let (uri, share, rel) = network::child_browse(&browse.host, Some(&share), &browse.rel, &name);
-            app.network_mut().browse_open(uri, share, rel);
+        Some(Act::Nav(path)) => {
+            // The shared list hands back `entry.path()`, which for a share is
+            // the FULL child URI the entry was built from — not a bare folder
+            // name. Re-joining it with `child_browse` appended the whole URI as
+            // a name segment, giving a `rel` of
+            // "music/smb://nas/media/music/Rock" and a PATH_NOT_FOUND from the
+            // server. Split it instead: for a URI already in child form that is
+            // a no-op round trip. (See `nav_uri_round_trips_but_renaming_one_does_not`
+            // in `tests/smb_helpers.rs`.)
+            let uri = path.to_string_lossy().into_owned();
+            if let Some((_host, share, rel)) = network::split_uri(&uri) {
+                app.network_mut().browse_open(uri, share, rel);
+            }
         }
         Some(Act::Play(path)) => app.play_file(path),
         Some(Act::Add(path)) => app.add_files(vec![path]),
