@@ -252,9 +252,15 @@ fn draw_file_row(
 /// share browser have real tag columns, sorting and search instead of the
 /// name+size list it started with.
 ///
-/// `parent_dir` draws the `..` row (local only — a share's breadcrumb already
-/// has "Local" and every ancestor as jump targets). `scanning` is passed in
-/// because each source computes it differently.
+/// There is deliberately **no `..` row**: the breadcrumb is the only way up.
+/// It walks every ancestor and makes each non-last segment a jump target, so
+/// "one level up" is the second-to-last segment — a dedicated row duplicated
+/// navigation, consumed a banded row, and counted toward the folder total in
+/// the composition counts ("3 folders" when only 2 are). A share's breadcrumb
+/// works the same way (Local / host / share / dir), which is why that view
+/// never had one either.
+///
+/// `scanning` is passed in because each source computes it differently.
 ///
 /// Returns the row the user clicked, if any; the caller carries it out, since
 /// only it knows whether a `Nav` means `navigate_to` or `browse_open`.
@@ -263,7 +269,6 @@ fn file_list_ui(
     ui: &mut egui::Ui,
     theme: &theme::Theme,
     entries: &[library::Entry],
-    parent_dir: Option<&Path>,
     scanning: bool,
 ) -> Option<Act> {
     let p = theme.palette;
@@ -335,13 +340,7 @@ fn file_list_ui(
             let mut i = 0usize;
             let mut action: Option<Act> = None;
 
-            // Parent dir row, then the sorted folder + file rows.
-            if let Some(up) = parent_dir {
-                if draw_dir_row(ui, theme, row_h, i, "..", folder_tex.as_ref()) {
-                    action = Some(Act::Nav(up.to_path_buf()));
-                }
-                i += 1;
-            }
+            // Sorted folder + file rows. No `..` row — see `file_list_ui`.
             for entry in entries {
                 let path = entry.path();
                 if entry.is_dir {
@@ -645,7 +644,7 @@ fn remote_list_ui(app: &mut TPlayApp, ui: &mut egui::Ui) {
 
     list_header_right(app, ui, p, &entries);
     ui.add_space(4.0);
-    let act = file_list_ui(app, ui, &theme, &entries, None, scanning);
+    let act = file_list_ui(app, ui, &theme, &entries, scanning);
 
     match act {
         Some(Act::Nav(path)) => {
@@ -1119,17 +1118,9 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                 remote_list_ui(app, ui);
             } else {
             let entries = app.library_entries().to_vec();
-            let parent = app.library_dir().parent().map(Path::to_path_buf);
             list_header_right(app, ui, p, &entries);
             ui.add_space(4.0);
-            let act = file_list_ui(
-                app,
-                ui,
-                &theme,
-                &entries,
-                parent.as_deref(),
-                app.library_scanning(),
-            );
+            let act = file_list_ui(app, ui, &theme, &entries, app.library_scanning());
             match act {
                 Some(Act::Nav(dir)) => app.navigate_to(dir),
                 Some(Act::Play(path)) => app.play_file(path),
