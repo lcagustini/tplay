@@ -22,6 +22,20 @@ fn rand_usize(state: &mut u64, max: usize) -> usize {
     (rand_u64(state) as usize) % max
 }
 
+/// Where the playhead really is, given what the sink reports.
+///
+/// The slow-path seek rebuilds the sink with a `skip_duration(target)` source,
+/// and `get_pos()` counts only post-skip samples from there — so the fresh sink
+/// under-reports by exactly the skip, and `position_offset` holds it. Every read
+/// goes through this so the three call sites can't drift.
+///
+/// `saturating_add` because the two are independent: rodio's position is real
+/// playback time and the offset is a *previous* skip, so a bad pair could
+/// overflow where a plain `+` would panic in the audio path.
+pub fn effective_pos(sink_pos: Duration, offset: Duration) -> Duration {
+    sink_pos.saturating_add(offset)
+}
+
 // Docking panes (egui_dock) - used by GUI layer only
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Debug)]
 pub enum Pane { NowPlaying, Playlist, Equalizer, Library, Visualizer, AlbumCover }
@@ -503,7 +517,7 @@ impl TPlayApp {
         // `self.total_duration` was flipped to the incoming track at arm time
         // (the seek bar reads the incoming track during the fade).
         if let Some(xf) = &self.xf_sink {
-            let pos = self.sink.get_pos().saturating_add(self.position_offset);
+            let pos = effective_pos(self.sink.get_pos(), self.position_offset);
             let out_total = self.xf_out_total.unwrap_or_default();
             if self.sink.empty() {
                 self.finish_xf();
@@ -551,7 +565,7 @@ impl TPlayApp {
                 gapless: self.prefs.gapless(),
                 crossfade_secs: self.prefs.crossfade_secs(),
                 total: self.total_duration,
-                pos: self.sink.get_pos().saturating_add(self.position_offset),
+                pos: effective_pos(self.sink.get_pos(), self.position_offset),
                 next: next.as_ref().map(|(i, p)| (*i, p.as_path())),
                 next_ready: ready.unwrap_or(false),
                 next_duration: tagged.flatten(),
@@ -1100,9 +1114,11 @@ impl TPlayApp {
     /// and the time label read, so they cannot disagree.
     pub fn playback_position_secs(&self) -> Duration {
         if let Some(xf) = &self.xf_sink {
+            // The xf sink was built by seeking the *incoming* track, so its
+            // position is already absolute — no offset.
             xf.get_pos()
         } else {
-            self.sink.get_pos().saturating_add(self.position_offset)
+            effective_pos(self.sink.get_pos(), self.position_offset)
         }
     }
 
