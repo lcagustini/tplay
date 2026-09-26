@@ -7,6 +7,7 @@
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::tag::ItemKey;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::Duration;
@@ -250,26 +251,72 @@ impl Entry {
     pub fn is_dir(&self) -> bool { self.is_dir }
 }
 
-/// Read tags + duration for one file. `None` only when the file isn't a
-/// parseable audio file at all.
-pub fn read_info(path: &Path) -> Option<TrackInfo> {
-    let tagged = lofty::read_from_path(path).ok()?;
+/// Pull the display fields out of a parsed file. Shared by `read_info` (a real
+/// file) and `read_info_bytes` (a prefix fetched off a share) so both produce
+/// identical rows from identical tags.
+pub fn info_of(tagged: &lofty::file::TaggedFile) -> TrackInfo {
     let tag = tagged.primary_tag().or_else(|| tagged.first_tag());
     let get = |k: ItemKey| tag.and_then(|t| t.get_string(k)).map(str::to_owned).unwrap_or_default();
     let get_opt = |k: ItemKey| tag.and_then(|t| t.get_string(k)).map(str::to_owned);
-    Some(TrackInfo {
+    TrackInfo {
         title: get(ItemKey::TrackTitle),
         artist: get(ItemKey::TrackArtist),
         album: get(ItemKey::AlbumTitle),
         genre: get(ItemKey::Genre),
         year: get_opt(ItemKey::Year),
         track_no: get_opt(ItemKey::TrackNumber),
-        // lofty reports Duration::ZERO for streams with unknown length.
+        // Whatever lofty derived from the bytes it was given. Callers that can
+        // afford a full read (see `read_info`) replace a zero value with a
+        // duration probe; a prefix cannot, so remote rows may show none.
         duration: {
             let d = tagged.properties().duration();
-            if d.is_zero() { crate::audio::probe_duration(path) } else { Some(d) }
+            if d.is_zero() { None } else { Some(d) }
         },
-    })
+    }
+}
+
+/// Read tags + duration for one file. `None` only when the file isn't a
+/// parseable audio file at all.
+pub fn read_info(path: &Path) -> Option<TrackInfo> {
+    let tagged = lofty::read_from_path(path).ok()?;
+    let mut info = info_of(&tagged);
+    // lofty reports Duration::ZERO for streams with unknown length (mainly MP3).
+    if info.duration.is_none() {
+        info.duration = crate::audio::probe_duration(path);
+    }
+    Some(info)
+}
+
+/// Read tags from a byte prefix — the first few KB of a file fetched off a
+/// share, which is all a tag reader needs for formats that keep tags at the
+/// front (MP3/ID3v2, FLAC, Ogg Vorbis).
+///
+/// This exists because `lofty::read_from`/`read_from_path` both demand a real
+/// file on disk, but `lofty::probe::Probe` wraps any `Read + Seek`, so a
+/// `Cursor` over the downloaded bytes parses with no temp file. Format is
+/// sniffed from content, so no filename is needed.
+///
+/// **Duration is always dropped.** lofty derives it from the bytes it was
+/// given, so on a prefix it returns a value proportional to the *prefix*
+/// length, not the file's (measured: a 64 KB prefix of a 7.8 s MP3 reports
+/// 4.1 s, an 8 KB prefix reports 0.5 s). A wrong duration is worse than none,
+/// and a remote track's real duration arrives when it is played and spooled.
+///
+/// Best-effort by nature, and the failure is silent — the caller falls back to
+/// the filename. A format that needs more than the prefix yields `None`:
+/// **WAV** (lofty wants the whole `data` chunk) and **M4A** (its `moov` atom
+/// usually sits at the *end* of the file). Those stay untitled on a share
+/// until played. # ponytail: prefix-only, no whole-file fallback — a fallback
+/// would pull an entire library over the LAN to decorate rows, which is worse
+/// than untitled rows. Add it (writing the fallback into the spool cache, so it
+/// is not wasted) if real libraries turn out to be WAV/M4A-heavy.
+pub fn read_info_bytes(bytes: &[u8]) -> Option<TrackInfo> {
+    use lofty::probe::Probe;
+    use std::io::Cursor;
+    let tagged = Probe::new(Cursor::new(bytes)).guess_file_type().ok()?.read().ok()?;
+    let mut info = info_of(&tagged);
+    info.duration = None;
+    Some(info)
 }
 
 /// Embedded album art for one file, falling back to a cover file beside it
@@ -334,6 +381,26 @@ pub fn scan_files(files: Vec<PathBuf>, tx: Sender<(PathBuf, TrackInfo)>) {
 /// folders to theirs, so it reads as the classic name sort everything mixes
 /// into.
 pub const SORT_OPTIONS: [&str; 6] = ["Title", "Artist", "Album", "Year", "Genre", "Duration"];
+
+/// Sort a file list in place by column `col`, ascending or descending. Shared
+/// by the local folder list and the SMB share list — both are `Vec<Entry>`, and
+/// for a share `path` is an `smb://` URI, which every key here handles like any
+/// other path (its `file_name`/`file_stem` are the remote name).
+///
+/// Descending is a `reverse()` after an ascending sort rather than a reversed
+/// comparator, so equal keys keep their relative order instead of flipping on
+/// every toggle.
+pub fn sort_entries(
+    entries: &mut [Entry],
+    cache: &HashMap<PathBuf, TrackInfo>,
+    col: usize,
+    asc: bool,
+) {
+    entries.sort_by_cached_key(|e| sort_key(e, cache.get(e.path()), col));
+    if !asc {
+        entries.reverse();
+    }
+}
 
 /// Tagged title, falling back to the file stem — matches what rows display.
 pub fn title_or_stem(path: &Path, info: Option<&TrackInfo>) -> String {

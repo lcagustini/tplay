@@ -63,6 +63,56 @@ pub fn write_minimal_flac(path: &Path) {
     fs::write(path, data).unwrap();
 }
 
+/// A minimal ID3v2.3 tag block: `TIT2`/`TPE1`/`TALB` frames, latin1 text.
+fn id3v2(title: &str, artist: &str, album: &str) -> Vec<u8> {
+    let mut frames = Vec::new();
+    for (id, text) in [("TIT2", title), ("TPE1", artist), ("TALB", album)] {
+        let mut body = vec![0u8]; // latin1 encoding byte
+        body.extend_from_slice(text.as_bytes());
+        frames.extend_from_slice(id.as_bytes());
+        frames.extend_from_slice(&(body.len() as u32).to_be_bytes()); // v2.3: plain u32
+        frames.extend_from_slice(&[0, 0]); // frame flags
+        frames.extend_from_slice(&body);
+    }
+    let mut out = b"ID3".to_vec();
+    out.extend_from_slice(&[3, 0, 0]); // version 2.3, no flags
+    let n = frames.len() as u32;
+    // syncsafe size: 7 bits per byte
+    out.extend_from_slice(&[
+        ((n >> 21) & 0x7f) as u8,
+        ((n >> 14) & 0x7f) as u8,
+        ((n >> 7) & 0x7f) as u8,
+        (n & 0x7f) as u8,
+    ]);
+    out.extend_from_slice(&frames);
+    out
+}
+
+/// `count` silent MPEG-1 Layer III frames (128 kbps, 44.1 kHz, joint stereo),
+/// which is 417 bytes each. The frame bodies are zero-filled; only the sync
+/// headers matter for tag/duration parsing.
+fn mpeg_frames(count: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(count * 417);
+    for _ in 0..count {
+        out.extend_from_slice(&[0xFF, 0xFB, 0x90, 0x00]);
+        out.resize(out.len() + 413, 0);
+    }
+    out
+}
+
+/// A real MP3 with real ID3v2 tags, ~125 KB. Hand-built because no decoder or
+/// encoder dependency exists here and lofty ships no test assets.
+///
+/// This is the fixture the remote-tag path is verified against: it is the
+/// format whose tags live at the *front* of the file, so a byte prefix off a
+/// share yields them without downloading the whole track.
+pub fn write_tagged_mp3(path: &Path, title: &str, artist: &str, album: &str) -> Vec<u8> {
+    let mut bytes = id3v2(title, artist, album);
+    bytes.extend(mpeg_frames(300));
+    fs::write(path, &bytes).unwrap();
+    bytes
+}
+
 /// Asserts two durations are approximately equal (within 1 second).
 pub fn assert_duration_approx(actual: Option<Duration>, expected: Duration, msg: &str) {
     match actual {

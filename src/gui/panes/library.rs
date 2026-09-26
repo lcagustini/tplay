@@ -143,6 +143,31 @@ fn draw_playlist_row(ui: &mut egui::Ui, theme: &theme::Theme, row_h: f32, i: usi
     title_resp.clicked()
 }
 
+/// What a track row's click asked for, before it becomes a full `Act` (the
+/// caller supplies the path, since it owns the entry list).
+enum FileAct {
+    Play,
+    Add,
+}
+
+/// What the user asked for by clicking a file-list row.
+///
+/// The local folder browser and the SMB share browser render identical rows, so
+/// they share one list widget and differ only in how they carry the action
+/// out: `Nav` is `navigate_to` locally and `browse_open` on a share,
+/// `LoadPlaylist` is `load_playlist_from` locally and `fetch_remote_playlist`
+/// (spool, then load) on one.
+pub enum Act {
+    /// Enter a subdirectory — a local path, or an `smb://` share directory URI.
+    Nav(PathBuf),
+    /// Play a track (local path or `smb://` URI; `play_file` routes both).
+    Play(PathBuf),
+    /// Append a track to the playlist.
+    Add(PathBuf),
+    /// Load a `.tplay` — local path, or an `smb://` URI to fetch first.
+    LoadPlaylist(PathBuf),
+}
+
 fn draw_file_row(
     app: &TPlayApp,
     ui: &mut egui::Ui,
@@ -151,9 +176,11 @@ fn draw_file_row(
     i: usize,
     path: &Path,
     info: Option<&library::TrackInfo>,
-) -> Option<fn(&mut TPlayApp, PathBuf)> {
+) -> Option<FileAct> {
     let p = theme.palette;
     let layout = theme.layout.with_defaults();
+    // A spooled `smb://` track is "current" under its URI, which is what the
+    // playlist holds — so the highlight follows the track across both sources.
     let is_current = app.current_path().is_some_and(|c| c == path);
     let (rect, mut row) = theme::row(ui, i, is_current, row_h, theme);
     row.spacing_mut().item_spacing.x = 4.0;
@@ -206,82 +233,231 @@ fn draw_file_row(
         .clicked();
 
     if title_resp.clicked() {
-        Some(TPlayApp::play_file)
+        Some(FileAct::Play)
     } else if add_clicked {
-        Some(|app: &mut TPlayApp, path: PathBuf| app.add_files(vec![path]))
+        Some(FileAct::Add)
     } else {
         None
     }
 }
 
-/// One remote file row in the Network browser: name + size + `+`. Returns
-/// (play_clicked, add_clicked); the caller builds the `smb://` URI.
-fn draw_remote_file_row(
+/// The file list shared by the local folder browser and the SMB share browser:
+/// the search box, the sortable 6-column header, the folder/track/playlist rows
+/// and the "Scanning…" note.
+///
+/// Both sources are `&[library::Entry]`. For a share, `path` is the `smb://`
+/// URI, which every key here treats like any other path — `file_name` and
+/// `file_stem` return the remote name, so `title_or_stem`/`sort_key` and the
+/// playlist-file check all work without a special case. That is what lets the
+/// share browser have real tag columns, sorting and search instead of the
+/// name+size list it started with.
+///
+/// `parent_dir` draws the `..` row (local only — a share's breadcrumb already
+/// has "Local" and every ancestor as jump targets). `scanning` is passed in
+/// because each source computes it differently.
+///
+/// Returns the row the user clicked, if any; the caller carries it out, since
+/// only it knows whether a `Nav` means `navigate_to` or `browse_open`.
+fn file_list_ui(
+    app: &mut TPlayApp,
     ui: &mut egui::Ui,
     theme: &theme::Theme,
-    row_h: f32,
-    i: usize,
-    name: &str,
-    size: u64,
-) -> (bool, bool) {
+    entries: &[library::Entry],
+    parent_dir: Option<&Path>,
+    scanning: bool,
+) -> Option<Act> {
     let p = theme.palette;
-    let (rect, mut row) = theme::row(ui, i, false, row_h, theme);
-    row.spacing_mut().item_spacing.x = 4.0;
-    let name_resp = row
-        .add_sized(
-            egui::vec2((rect.width() - 66.0).max(40.0), row_h),
-            egui::Label::new(
-                egui::RichText::new(name).color(p.text_primary.gamma_multiply(0.85)),
-            )
-            .truncate()
-            .sense(egui::Sense::click()),
-        )
-        .on_hover_text_at_pointer("Play");
-    row.add_sized(
-        egui::vec2(48.0, row_h),
-        egui::Label::new(egui::RichText::new(network::fmt_size(size)).small().color(p.text_secondary)),
-    );
-    let add_clicked = row
-        .add(egui::Button::new("+").small().frame(false))
-        .on_hover_text_at_pointer("Add to playlist")
-        .clicked();
-    (name_resp.clicked(), add_clicked)
+    let folder_tex = app.theme_icon(theme::Icon::Folder).cloned();
+    let mut out = None;
+
+    // Search box. State is the one `LIB_QUERY` key, so the query deliberately
+    // survives a trip between the local and share browsers.
+    let mut q = ui
+        .ctx()
+        .memory_mut(|m| m.data.get_temp::<String>(egui::Id::new(LIB_QUERY)).unwrap_or_default());
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Search").small().color(p.text_secondary));
+        ui.add(
+            egui::TextEdit::singleline(&mut q)
+                .hint_text("title, artist, album…")
+                .desired_width(220.0),
+        );
+    });
+    ui.ctx().memory_mut(|m| m.data.insert_temp(egui::Id::new(LIB_QUERY), q.clone()));
+    let query = q.trim().to_lowercase();
+    ui.add_space(4.0);
+
+    // Sortable column header only when the folder has audio files —
+    // folders/playlists-only rows have no tag columns to align to.
+    let has_audio = entries
+        .iter()
+        .any(|e| !e.is_dir() && !library::is_playlist(e.path()));
+    if has_audio {
+        let (cur, asc) = (app.library_sort(), app.library_sort_asc());
+        let asc_tex = app.theme_icon(theme::Icon::SortAsc).cloned();
+        let desc_tex = app.theme_icon(theme::Icon::SortDesc).cloned();
+        ui.horizontal(|ui| {
+            let (head, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), 22.0),
+                egui::Sense::hover(),
+            );
+            ui.painter().rect_filled(head, 0.0, p.row_odd);
+            let mut h = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(egui::Rect::from_min_max(head.min + egui::vec2(6.0, 0.0), head.max))
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            );
+            h.spacing_mut().item_spacing.x = 4.0;
+            for (key, label) in library::SORT_OPTIONS.iter().enumerate() {
+                let w = if key == 0 {
+                    (head.width() - ROW_FIXED_W).max(2.0)
+                } else {
+                    CELL_WIDTHS[key]
+                };
+                let arrow = if key == cur {
+                    if asc { asc_tex.as_ref() } else { desc_tex.as_ref() }
+                } else {
+                    None
+                };
+                if header_cell(&mut h, p, label, key == cur, arrow, w, 22.0) {
+                    app.set_library_sort(key);
+                }
+            }
+        });
+    }
+
+    let scroll_h = (ui.available_height() - 24.0).max(40.0);
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .max_height(scroll_h)
+        .show(ui, |ui| {
+            let row_h = 24.0;
+            let mut i = 0usize;
+            let mut action: Option<Act> = None;
+
+            // Parent dir row, then the sorted folder + file rows.
+            if let Some(up) = parent_dir {
+                if draw_dir_row(ui, theme, row_h, i, "..", folder_tex.as_ref()) {
+                    action = Some(Act::Nav(up.to_path_buf()));
+                }
+                i += 1;
+            }
+            for entry in entries {
+                let path = entry.path();
+                if entry.is_dir {
+                    let name = dir_name(path);
+                    if !query.is_empty() && !name.to_lowercase().contains(&query) {
+                        i += 1;
+                        continue;
+                    }
+                    if draw_dir_row(ui, theme, row_h, i, &name, folder_tex.as_ref()) {
+                        action = Some(Act::Nav(path.to_path_buf()));
+                    }
+                } else if library::is_playlist(path) {
+                    if !query.is_empty() && !path.to_string_lossy().to_lowercase().contains(&query)
+                    {
+                        i += 1;
+                        continue;
+                    }
+                    if draw_playlist_row(ui, theme, row_h, i, path) {
+                        let stem = path
+                            .file_stem()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        // Replacing a playlist with unsaved edits asks first —
+                        // on a share exactly as on disk.
+                        if TPlayApp::confirm(
+                            "Load playlist",
+                            &format!("Replace the current playlist with '{stem}'?"),
+                            app.playlist_dirty(),
+                        ) {
+                            action = Some(Act::LoadPlaylist(path.to_path_buf()));
+                        }
+                    }
+                } else {
+                    let info = app.track_info(path);
+                    let title = library::title_or_stem(path, info);
+                    let hay = format!(
+                        "{} {} {} {title}",
+                        info.map(|i| i.title.as_str()).unwrap_or_default(),
+                        info.map(|i| i.artist.as_str()).unwrap_or_default(),
+                        info.map(|i| i.album.as_str()).unwrap_or_default(),
+                    );
+                    if !query.is_empty() && !hay.to_lowercase().contains(&query) {
+                        i += 1;
+                        continue;
+                    }
+                    match draw_file_row(app, ui, theme, row_h, i, path, info) {
+                        Some(FileAct::Play) => action = Some(Act::Play(path.to_path_buf())),
+                        Some(FileAct::Add) => action = Some(Act::Add(path.to_path_buf())),
+                        None => {}
+                    }
+                }
+                i += 1;
+            }
+            if i == 0 {
+                ui.label(egui::RichText::new("No files").small().color(p.text_secondary));
+            }
+            if action.is_some() {
+                out = action;
+            }
+        });
+    if scanning {
+        ui.label(egui::RichText::new("Scanning…").small().color(p.text_secondary));
+    }
+    out
 }
 
-/// A `.tplay` file on a share: name + size + "Playlist" tag, no `+` (a
-/// playlist is not a track). Returns whether the row was clicked.
-fn draw_remote_playlist_row(
+/// The right-hand end of a file-list header: composition counts and Add All.
+/// Shared because both browsers now work from `&[library::Entry]` — a share's
+/// entries carry `smb://` URIs, which go into the playlist unchanged.
+fn list_header_right(
+    app: &mut TPlayApp,
     ui: &mut egui::Ui,
-    theme: &theme::Theme,
-    row_h: f32,
-    i: usize,
-    name: &str,
-    size: u64,
-) -> bool {
-    let p = theme.palette;
-    let (rect, mut row) = theme::row(ui, i, false, row_h, theme);
-    row.spacing_mut().item_spacing.x = 4.0;
-    let name_resp = row
-        .add_sized(
-            egui::vec2((rect.width() - 66.0).max(40.0), row_h),
-            egui::Label::new(
-                egui::RichText::new(name).color(p.text_primary.gamma_multiply(0.85)),
-            )
-            .truncate()
-            .sense(egui::Sense::click()),
-        )
-        .on_hover_text_at_pointer("Load playlist");
-    row.add(egui::Label::new(egui::RichText::new("Playlist").small().color(p.accent)));
-    row.add_sized(
-        egui::vec2(48.0, row_h),
-        egui::Label::new(egui::RichText::new(network::fmt_size(size)).small().color(p.text_secondary)),
-    );
-    name_resp.clicked()
+    p: theme::Palette,
+    entries: &[library::Entry],
+) {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        if ui
+            .button("Add All")
+            .on_hover_text("Add this folder's tracks to the playlist")
+            .clicked()
+        {
+            let files: Vec<PathBuf> = entries
+                .iter()
+                .filter(|e| !e.is_dir() && !library::is_playlist(e.path()))
+                .map(|e| e.path().to_path_buf())
+                .collect();
+            app.add_files(files);
+        }
+        // "1 track" stays singular.
+        let n = |n: usize, s: &str| format!("{n} {s}{}", if n == 1 { "" } else { "s" });
+        let (mut tracks, mut dirs, mut playlists) = (0usize, 0usize, 0usize);
+        for e in entries {
+            if e.is_dir() {
+                dirs += 1;
+            } else if library::is_playlist(e.path()) {
+                playlists += 1;
+            } else {
+                tracks += 1;
+            }
+        }
+        ui.label(
+            egui::RichText::new(format!(
+                "{} · {} · {}",
+                n(tracks, "track"),
+                n(dirs, "folder"),
+                n(playlists, "playlist"),
+            ))
+            .small()
+            .color(p.text_secondary),
+        );
+    });
 }
 
 /// The remote browser: swaps the main column when a server is selected.
-/// Breadcrumb (Local / host / share / dir) + playlist-style rows with
-/// `..`/folder descent, click-to-play and `+` for audio files.
+/// Breadcrumb (Local / host / share / dir) + the shared file list, with
+/// `browse_open` standing in for `navigate_to`.
 fn remote_list_ui(app: &mut TPlayApp, ui: &mut egui::Ui) {
     let Some(browse) = app.network().browse().cloned() else { return };
     let theme = app.theme().clone();
@@ -353,116 +529,110 @@ fn remote_list_ui(app: &mut TPlayApp, ui: &mut egui::Ui) {
     });
 
     ui.add_space(4.0);
-    let scroll_h = (ui.available_height() - 24.0).max(40.0);
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .max_height(scroll_h)
-        .show(ui, |ui| {
-            let row_h = 24.0;
-            if browse.busy {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(egui::RichText::new("Connecting…").small().color(p.text_secondary));
-                });
-                return;
-            }
-            if let Some(err) = &browse.error {
-                // SessionSetup is where a server rejects the *identity*, so a
-                // bare NTSTATUS is not actionable — ask for the credentials
-                // here instead, with the saved address already filled in.
-                if err.contains("LOGON_FAILURE") || err.contains("ACCESS_DENIED") {
-                    login_form_ui(app, ui, &browse);
-                } else {
-                    ui.label(egui::RichText::new(err).small().color(p.text_secondary));
-                    ui.label(
-                        egui::RichText::new("Check the address, username/password, and that the share allows access.")
-                            .small()
-                            .color(p.text_secondary),
-                    );
-                }
-                return;
-            }
 
-            let mut i = 0usize;
-            // Up: dir → parent, share root → shares list, shares → Local.
-            if draw_dir_row(ui, &theme, row_h, i, "..", folder_tex.as_ref()) {
-                if browse.share.is_none() {
-                    app.network_mut().leave_network();
-                } else if browse.rel.is_empty() {
-                    app.network_mut().browse_server(browse.host.clone());
-                } else {
-                    let up_rel = browse.rel[..browse.rel.rfind('/').unwrap_or(0)].to_string();
-                    let share = browse.share.clone().unwrap_or_default();
-                    app.network_mut().browse_open(
-                        network::dir_uri(&browse.host, &share, &up_rel),
-                        Some(share),
-                        up_rel,
-                    );
-                }
+    // Busy / error states replace the list entirely — there is nothing to show
+    // while a listing is in flight, and on a logon failure the main pane owes
+    // the user a credential prompt rather than a file list.
+    if browse.busy {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(egui::RichText::new("Connecting…").small().color(p.text_secondary));
+        });
+        return;
+    }
+    if let Some(err) = &browse.error {
+        // SessionSetup is where a server rejects the *identity*, so a bare
+        // NTSTATUS is not actionable — ask for the credentials here
+        // instead, with the saved address already filled in.
+        if err.contains("LOGON_FAILURE") || err.contains("ACCESS_DENIED") {
+            login_form_ui(app, ui, &browse);
+        } else {
+            ui.label(egui::RichText::new(err).small().color(p.text_secondary));
+            ui.label(
+                egui::RichText::new("Check the address, username/password, and that the share allows access.")
+                    .small()
+                    .color(p.text_secondary),
+            );
+        }
+        return;
+    }
+
+    // At the share-list stage there is no directory, so the shared list has
+    // nothing to show — shares are a flat list of names, and the breadcrumb's
+    // "Local" is the way back out.
+    if browse.share.is_none() {
+        let mut i = 0usize;
+        let mut nav: Option<PathBuf> = None;
+        let mut names: Vec<&network::RemoteEntry> = browse.entries.iter().collect();
+        names.sort_by_key(|e| e.name.to_lowercase());
+        for e in names {
+            if draw_dir_row(ui, &theme, 24.0, i, &e.name, folder_tex.as_ref()) {
+                nav = Some(PathBuf::from(e.name.clone()));
             }
             i += 1;
+        }
+        if i == 0 {
+            ui.label(egui::RichText::new("No shares").small().color(p.text_secondary));
+        }
+        if let Some(name) = nav {
+            let share = name.to_string_lossy().into_owned();
+            app.network_mut().browse_open(
+                network::share_uri(&browse.host, &share),
+                Some(share),
+                String::new(),
+            );
+        }
+        return;
+    }
 
-            // Dirs first, then audio files, each name-sorted.
-            let mut dirs: Vec<&network::RemoteEntry> = browse.entries.iter().filter(|e| e.is_dir).collect();
-            let mut files: Vec<&network::RemoteEntry> = browse.entries.iter().filter(|e| !e.is_dir).collect();
-            dirs.sort_by_key(|e| e.name.to_lowercase());
-            files.sort_by_key(|e| e.name.to_lowercase());
-            for e in dirs {
-                if draw_dir_row(ui, &theme, row_h, i, &e.name, folder_tex.as_ref()) {
-                    let (uri, share, rel) = network::child_browse(
-                        &browse.host,
-                        browse.share.as_deref(),
-                        &browse.rel,
-                        &e.name,
-                    );
-                    app.network_mut().browse_open(uri, share, rel);
-                }
-                i += 1;
-            }
-            for e in files {
-                // `.tplay` files on a share get a row like anywhere else: the
-                // bytes live on the server, so a click spools them and applies
-                // the result rather than reading a local file.
-                let is_playlist = library::is_playlist(Path::new(&e.name));
-                if !library::is_audio(Path::new(&e.name)) && !is_playlist {
-                    i += 1;
-                    continue;
-                }
-                let share = browse.share.clone().unwrap_or_default();
-                let dir = network::dir_uri(&browse.host, &share, &browse.rel);
-                let uri = network::child_uri(&dir, &e.name);
-                if is_playlist {
-                    if draw_remote_playlist_row(ui, &theme, row_h, i, &e.name, e.size) {
-                        // Same gate as a local `.tplay` click: replacing a
-                        // playlist with unsaved edits asks first, on a share
-                        // exactly as on disk.
-                        let stem = Path::new(&e.name)
-                            .file_stem()
-                            .map(|s| s.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        if TPlayApp::confirm(
-                            "Load playlist",
-                            &format!("Replace the current playlist with '{stem}'?"),
-                            app.playlist_dirty(),
-                        ) {
-                            app.fetch_remote_playlist(uri);
-                        }
-                    }
-                } else {
-                    let (play, add) = draw_remote_file_row(ui, &theme, row_h, i, &e.name, e.size);
-                    if play {
-                        app.play_file(PathBuf::from(&uri));
-                    }
-                    if add {
-                        app.add_files(vec![PathBuf::from(&uri)]);
-                    }
-                }
-                i += 1;
-            }
-            if i <= 1 {
-                ui.label(egui::RichText::new("No files").small().color(p.text_secondary));
-            }
-        });
+    let share = browse.share.clone().unwrap_or_default();
+    let dir = network::dir_uri(&browse.host, &share, &browse.rel);
+
+    // Share rows become ordinary `library::Entry` values whose `path` is the
+    // file's URI, which is what lets the shared list treat a share exactly like
+    // a folder: same tag columns, same sort keys, same playlist-file rows.
+    // Anything that is neither audio nor a `.tplay` is not listed, same as a
+    // local folder.
+    let entries: Vec<library::Entry> = browse
+        .entries
+        .iter()
+        .filter(|e| e.is_dir || library::is_audio(Path::new(&e.name)) || library::is_playlist(Path::new(&e.name)))
+        .map(|e| library::Entry {
+            path: PathBuf::from(network::child_uri(&dir, &e.name)),
+            is_dir: e.is_dir,
+        })
+        .collect();
+    let mut entries = entries;
+    library::sort_entries(&mut entries, app.tag_cache(), app.library_sort(), app.library_sort_asc());
+
+    // Ask for the tags of everything on screen that isn't cached yet. Safe to
+    // do every frame: `ensure_tags` skips cached paths and the network side
+    // keeps an in-flight set, so a running batch is never re-queued. Rows start
+    // as filenames and fill in as the replies land — exactly like a
+    // local folder filling in from the scan thread.
+    let audio: Vec<PathBuf> = entries
+        .iter()
+        .filter(|e| !e.is_dir() && !library::is_playlist(e.path()))
+        .map(|e| e.path().to_path_buf())
+        .collect();
+    let scanning = audio.iter().any(|p| app.track_info(p).is_none());
+    app.ensure_tags(audio);
+
+    list_header_right(app, ui, p, &entries);
+    ui.add_space(4.0);
+    let act = file_list_ui(app, ui, &theme, &entries, None, scanning);
+
+    match act {
+        Some(Act::Nav(name)) => {
+            let name = name.to_string_lossy().into_owned();
+            let (uri, share, rel) = network::child_browse(&browse.host, Some(&share), &browse.rel, &name);
+            app.network_mut().browse_open(uri, share, rel);
+        }
+        Some(Act::Play(path)) => app.play_file(path),
+        Some(Act::Add(path)) => app.add_files(vec![path]),
+        Some(Act::LoadPlaylist(uri)) => app.fetch_remote_playlist(uri.to_string_lossy().into_owned()),
+        None => {}
+    }
 }
 
 /// Credential prompt for a server that rejected our identity.
@@ -571,15 +741,11 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
     let layout = theme.layout.with_defaults();
 
     // Network mode swaps the main column for the remote browser; the local
-    // header + search only apply to the local folder browser (the Places
-    // column below stays in both modes).
+    // header (breadcrumb + favorite) only applies to the local folder browser
+    // (the Places column below stays in both modes). Everything below the
+    // header — search, sort header, rows, counts, Add All — is the shared
+    // `file_list_ui`, so both browsers get it.
     let network_mode = app.network().browse().is_some();
-    let folder_tex = app.theme_icon(theme::Icon::Folder).cloned();
-    // Search filter state lives in egui memory, so it survives a network
-    // browse detour; the widget itself only renders in local mode.
-    let mut q = ui
-        .ctx()
-        .memory_mut(|m| m.data.get_temp::<String>(egui::Id::new(LIB_QUERY)).unwrap_or_default());
     if !network_mode {
     // First frame this session: list the saved/current dir and start the scan.
     if !ui.ctx().memory_mut(|m| m.data.get_temp::<bool>(egui::Id::new(LIB_INIT)).unwrap_or(false)) {
@@ -588,20 +754,8 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
     }
 
     // Header: breadcrumb to the current dir (clickable ancestors) + favorite
-    // toggle; composition counts + Add All on the right.
-    let (n_tracks, n_dirs, n_playlists) = {
-        let mut c = (0usize, 0usize, 0usize);
-        for e in app.library_entries() {
-            if e.is_dir() {
-                c.1 += 1;
-            } else if library::is_playlist(e.path()) {
-                c.2 += 1;
-            } else {
-                c.0 += 1;
-            }
-        }
-        c
-    };
+    // toggle. The composition counts and Add All live in `list_header_right`,
+    // drawn just above the list so the share browser gets them too.
     ui.horizontal(|ui| {
         // Breadcrumb: root → current, every ancestor clickable; middle
         // segments collapse to "…" beyond depth 3 so deep paths fit narrow
@@ -667,47 +821,11 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
         if ui.add(fav_btn).on_hover_text("Favorite folder").clicked() {
             app.toggle_favorite(dir);
         }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .button("Add All")
-                .on_hover_text("Add this folder's tracks to the playlist")
-                .clicked()
-            {
-                let files: Vec<PathBuf> = app
-                    .library_entries()
-                    .iter()
-                    .filter(|e| !e.is_dir() && !library::is_playlist(e.path()))
-                    .map(|e| e.path().to_path_buf())
-                    .collect();
-                app.add_files(files);
-            }
-            // "1 track" stays singular.
-            let n = |n: usize, s: &str| format!("{n} {s}{}", if n == 1 { "" } else { "s" });
-            ui.label(
-                egui::RichText::new(format!(
-                    "{} · {} · {}",
-                    n(n_tracks, "track"),
-                    n(n_dirs, "folder"),
-                    n(n_playlists, "playlist"),
-                ))
-                .small()
-                .color(p.text_secondary),
-            );
-        });
     });
 
-    // Search filter over the current folder's rows.
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("Search").small().color(p.text_secondary));
-        ui.add(
-            egui::TextEdit::singleline(&mut q)
-                .hint_text("title, artist, album…")
-                .desired_width(220.0),
-        );
-    });
-    ui.ctx().memory_mut(|m| m.data.insert_temp(egui::Id::new(LIB_QUERY), q.clone()));
+    // The counts + Add All that used to sit at the end of the header now live
+    // in `list_header_right`, drawn by both browsers just above their list.
     }
-    let query = q.trim().to_lowercase();
 
     ui.add_space(4.0);
 
@@ -966,134 +1084,24 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
             if network_mode {
                 remote_list_ui(app, ui);
             } else {
-            // Sortable column header only when the folder has audio files —
-            // folders/playlists-only rows have no tag columns to align to.
-            let has_audio = app
-                .library_entries()
-                .iter()
-                .any(|e| !e.is_dir() && !library::is_playlist(e.path()));
-            if has_audio {
-                let (cur, asc) = (app.library_sort(), app.library_sort_asc());
-                let asc_tex = app.theme_icon(theme::Icon::SortAsc).cloned();
-                let desc_tex = app.theme_icon(theme::Icon::SortDesc).cloned();
-                ui.horizontal(|ui| {
-                    let (head, _) = ui.allocate_exact_size(
-                        egui::vec2(ui.available_width(), 22.0),
-                        egui::Sense::hover(),
-                    );
-                    ui.painter().rect_filled(head, 0.0, p.row_odd);
-                    let mut h = ui.new_child(
-                        egui::UiBuilder::new()
-                            .max_rect(egui::Rect::from_min_max(head.min + egui::vec2(6.0, 0.0), head.max))
-                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                    );
-                    h.spacing_mut().item_spacing.x = 4.0;
-                    for (key, label) in library::SORT_OPTIONS.iter().enumerate() {
-                        let w = if key == 0 {
-                            (head.width() - ROW_FIXED_W).max(2.0)
-                        } else {
-                            CELL_WIDTHS[key]
-                        };
-                        let arrow = if key == cur {
-                            // Ascending → up triangle; descending → down.
-                            if asc { asc_tex.as_ref() } else { desc_tex.as_ref() }
-                        } else {
-                            None
-                        };
-                        if header_cell(&mut h, p, label, key == cur, arrow, w, 22.0) {
-                            app.set_library_sort(key);
-                        }
-                    }
-                });
-            }
-
-            let scroll_h = (ui.available_height() - 24.0).max(40.0);
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .max_height(scroll_h)
-                .show(ui, |ui| {
-                    let row_h = 24.0;
-                    let mut i = 0usize;
-                    enum Act { Nav(PathBuf), Action(fn(&mut TPlayApp, PathBuf), PathBuf) }
-                    let mut action: Option<Act> = None;
-                    let mut load: Option<PathBuf> = None;
-
-                    // Parent dir row, then the sorted folder + file rows.
-                    if let Some(up) = app.library_dir().parent() {
-                        if draw_dir_row(ui, &theme, row_h, i, "..", folder_tex.as_ref()) {
-                            action = Some(Act::Nav(up.to_path_buf()));
-                        }
-                        i += 1;
-                    }
-                    for entry in app.library_entries() {
-                        if entry.is_dir {
-                            let name = dir_name(entry.path());
-                            if !query.is_empty() && !name.to_lowercase().contains(&query) {
-                                i += 1;
-                                continue;
-                            }
-                            if draw_dir_row(ui, &theme, row_h, i, &name, folder_tex.as_ref()) {
-                                action = Some(Act::Nav(entry.path().to_path_buf()));
-                            }
-                        } else {
-                            let file = entry.path();
-                            if library::is_playlist(file) {
-                                let name = file
-                                    .file_name()
-                                    .map(|s| s.to_string_lossy().into_owned())
-                                    .unwrap_or_default();
-                                if !query.is_empty() && !name.to_lowercase().contains(&query) {
-                                    i += 1;
-                                    continue;
-                                }
-                                if draw_playlist_row(ui, &theme, row_h, i, file) {
-                                    let stem = file
-                                        .file_stem()
-                                        .map(|s| s.to_string_lossy().into_owned())
-                                        .unwrap_or_default();
-                                    if TPlayApp::confirm(
-                                        "Load playlist",
-                                        &format!("Replace the current playlist with '{stem}'?"),
-                                        app.playlist_dirty(),
-                                    ) {
-                                        load = Some(file.to_path_buf());
-                                    }
-                                }
-                            } else {
-                                let info = app.track_info(file);
-                                let title = library::title_or_stem(file, info);
-                                let hay = format!(
-                                    "{} {} {} {title}",
-                                    info.map(|i| i.title.as_str()).unwrap_or_default(),
-                                    info.map(|i| i.artist.as_str()).unwrap_or_default(),
-                                    info.map(|i| i.album.as_str()).unwrap_or_default(),
-                                );
-                                if !query.is_empty() && !hay.to_lowercase().contains(&query) {
-                                    i += 1;
-                                    continue;
-                                }
-                                if let Some(f) = draw_file_row(app, ui, &theme, row_h, i, file, info) {
-                                    action = Some(Act::Action(f, file.to_path_buf()));
-                                }
-                            }
-                        }
-                        i += 1;
-                    }
-
-                    if let Some(Act::Nav(dir)) = action {
-                        app.navigate_to(dir);
-                    } else if let Some(Act::Action(f, path)) = action {
-                        f(app, path);
-                    }
-                    if let Some(path) = load {
-                        app.load_playlist_from(path);
-                    }
-                    if i == 0 {
-                        ui.label(egui::RichText::new("No audio files").small().color(p.text_secondary));
-                    }
-                });
-            if app.library_scanning() {
-                ui.label(egui::RichText::new("Scanning…").small().color(p.text_secondary));
+            let entries = app.library_entries().to_vec();
+            let parent = app.library_dir().parent().map(Path::to_path_buf);
+            list_header_right(app, ui, p, &entries);
+            ui.add_space(4.0);
+            let act = file_list_ui(
+                app,
+                ui,
+                &theme,
+                &entries,
+                parent.as_deref(),
+                app.library_scanning(),
+            );
+            match act {
+                Some(Act::Nav(dir)) => app.navigate_to(dir),
+                Some(Act::Play(path)) => app.play_file(path),
+                Some(Act::Add(path)) => app.add_files(vec![path]),
+                Some(Act::LoadPlaylist(path)) => app.load_playlist_from(path),
+                None => {}
             }
             }
         });

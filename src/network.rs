@@ -5,19 +5,30 @@
 //! audio pipeline (rodio) never touches the network.
 //!
 //! A single background worker thread owns a tokio current-thread runtime and
-//! processes `SmbCmd`s sequentially (shares list / dir list / spool). Replies
-//! come back over a std mpsc channel the app drains every frame — the same
-//! pattern as the library tag scan. Passwords live only inside a command and
-//! are dropped after use; nothing is persisted.
+//! processes `SmbCmd`s sequentially (shares list / dir list / spool / save /
+//! tag headers). Replies come back over a std mpsc channel the app drains every
+//! frame — the same pattern as the library tag scan. Passwords live only
+//! inside a command and are dropped after use; nothing is persisted.
 
+use crate::library::TrackInfo;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 
 /// SMB default port (protocol constant, like HTTP's 80).
 pub const SMB_PORT: u16 = 445;
+
+/// Bytes read from the front of a remote file to pull its tags. Measured
+/// against real files: an MP3's ID3v2 tag parses from as little as 2 KB, and
+/// FLAC's metadata blocks sit in the first few hundred bytes. One READ caps at
+/// the negotiated `MaxReadSize` anyway (64 KB typical), so a larger ask would
+/// simply be clipped. # ponytail: one round trip per file, no growing the
+/// window on a failed parse — a retry ladder would multiply round trips to
+/// rescue the formats that need a whole file (WAV/M4A), which are better
+/// served by playing them once than by pre-fetching them to decorate rows.
+pub const REMOTE_TAG_PREFIX: u64 = 64 * 1024;
 
 /// One browsable SMB entry — mirrors `smb2::client::tree::DirectoryEntry`.
 #[derive(Clone, Debug, PartialEq)]
@@ -54,6 +65,10 @@ pub enum SmbCmd {
     Spool { uri: String, creds: SmbCreds, reply: Sender<SmbReply> },
     /// Upload `data` to `uri`, overwriting it if it exists.
     Save { uri: String, data: Vec<u8>, creds: SmbCreds, reply: Sender<SmbReply> },
+    /// Read tag headers for many `smb://` tracks at once. Batched because the
+    /// tagger fires per directory listing or per playlist load; one command
+    /// means one connection per host instead of one per track.
+    Tags { uris: Vec<String>, creds: SmbCreds, reply: Sender<SmbReply> },
 }
 
 /// Replies routed back to the app (drained like the tag scan). The `uri`/
@@ -63,6 +78,9 @@ pub enum SmbReply {
     Dir { uri: String, result: Result<Vec<RemoteEntry>, String> },
     Spooled { uri: String, result: Result<PathBuf, String> },
     Saved { uri: String, result: Result<(), String> },
+    /// One entry per requested URI, in request order. `None` = that file's
+    /// header didn't yield tags (see `library::read_info_bytes`).
+    Tags { results: Vec<(String, Option<TrackInfo>)> },
 }
 
 /// An event the app must act on, yielded by `Network::drain`. Browse replies
@@ -76,6 +94,10 @@ pub enum Event {
     Fetched { uri: String, result: Result<PathBuf, String> },
     /// A playlist write to a share completed.
     Saved { uri: String, result: Result<(), String> },
+    /// Tag headers for a batch of remote tracks. `None` per entry means that
+    /// file's header didn't yield tags — the row stays a filename, exactly
+    /// like an untagged local file.
+    Tagged(Vec<(String, Option<TrackInfo>)>),
 }
 
 /// Remote-browse position inside the Library pane — which server/share/dir is
@@ -115,6 +137,11 @@ pub struct Network {
     /// app acts on every reply), but it must keep frames coming so the reply
     /// is drained and the share listing refreshes.
     saving: bool,
+    /// Track URIs with a tag request outstanding. The app asks for tags every
+    /// frame for whatever is missing from its cache, so without this the same
+    /// directory's uncached files would be re-queued continuously while the
+    /// first batch is still running.
+    tagging: HashSet<String>,
     cmd_tx: Sender<SmbCmd>,
     /// Cloned into every command so replies flow back to `reply_rx`.
     reply_tx: Sender<SmbReply>,
@@ -135,6 +162,7 @@ impl Network {
             pending: None,
             fetch_req: None,
             saving: false,
+            tagging: HashSet::new(),
             cmd_tx,
             reply_tx,
             reply_rx,
@@ -182,12 +210,13 @@ impl Network {
     }
 
     /// True while the worker owes us something (a spool, a playlist fetch or
-    /// save, or a listing). Drives `request_repaint`, so anything in flight
-    /// must show up here or its reply sits undrained.
+    /// save, a tag batch, or a listing). Drives `request_repaint`, so anything
+    /// in flight must show up here or its reply sits undrained.
     pub fn busy(&self) -> bool {
         self.pending.is_some()
             || self.fetch_req.is_some()
             || self.saving
+            || !self.tagging.is_empty()
             || self.browse.as_ref().is_some_and(|b| b.busy)
     }
 
@@ -296,6 +325,31 @@ impl Network {
         });
     }
 
+    /// Ask for tag headers of remote tracks. Already-outstanding URIs are
+    /// skipped, so the caller can simply re-ask for everything uncached each
+    /// frame without flooding the worker with duplicates.
+    ///
+    /// Grouped by host because credentials are per-command: a playlist mixing
+    /// two NAS boxes must not send the first box's password to the second.
+    /// The usual case (one directory listing, or one share's playlist) is a
+    /// single group and so a single command.
+    pub fn fetch_tags(&mut self, uris: Vec<String>) {
+        let mut by_host: HashMap<String, Vec<String>> = HashMap::new();
+        for uri in uris {
+            let Some((host, _, _)) = split_uri(&uri) else { continue };
+            if self.tagging.insert(uri.clone()) {
+                by_host.entry(host).or_default().push(uri);
+            }
+        }
+        for (host, group) in by_host {
+            self.send(SmbCmd::Tags {
+                uris: group,
+                creds: self.creds_for(&host),
+                reply: self.reply_tx.clone(),
+            });
+        }
+    }
+
     /// Drain worker replies into the browse state. Returns the one event the
     /// app must act on (a spool completing for the still-pending track);
     /// browse listings are applied internally and stale replies are dropped
@@ -350,6 +404,15 @@ impl Network {
                 SmbReply::Saved { uri, result } => {
                     self.saving = false;
                     return Some(Event::Saved { uri, result });
+                }
+                SmbReply::Tags { results } => {
+                    // Clear the in-flight marks first: these are wanted either
+                    // way, so there is no stale check — but leaving them set
+                    // would block a re-request forever.
+                    for (uri, _) in &results {
+                        self.tagging.remove(uri);
+                    }
+                    return Some(Event::Tagged(results));
                 }
             }
         }
@@ -461,19 +524,6 @@ pub fn child_browse(
     }
 }
 
-/// Human size for the remote file rows ("3.2 MB", "45 KB"). 1024-based, MB/GB.
-pub fn fmt_size(bytes: u64) -> String {
-    const MB: u64 = 1024 * 1024;
-    const GB: u64 = 1024 * MB;
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else {
-        format!("{} KB", bytes / 1024)
-    }
-}
-
 // ── Spool cache ──────────────────────────────────────────────────────────────
 
 /// FNV-1a 64-bit — hand-rolled because `DefaultHasher`'s algorithm is
@@ -549,6 +599,10 @@ fn spawn_worker(rx: Receiver<SmbCmd>) -> thread::JoinHandle<()> {
                     SmbCmd::Save { uri, data, creds, reply } => {
                         let res = run_save(&uri, &data, &creds).await;
                         let _ = reply.send(SmbReply::Saved { uri, result: res });
+                    }
+                    SmbCmd::Tags { uris, creds, reply } => {
+                        let res = run_tags(&uris, &creds).await;
+                        let _ = reply.send(SmbReply::Tags { results: res });
                     }
                 }
             }
@@ -631,4 +685,58 @@ async fn run_save(uri: &str, data: &[u8], creds: &SmbCreds) -> CmdResult<()> {
         .await
         .map(|_| ())
         .map_err(|e| e.to_string())
+}
+
+/// Read tag headers for a batch of tracks. One connection and one share-tree
+/// connect serve the whole batch; each file costs a single positioned READ of
+/// at most `REMOTE_TAG_PREFIX` bytes.
+///
+/// Never fails as a batch: a track that can't be read or parsed comes back as
+/// `None` and its row stays a filename, which is the same outcome as an
+/// untagged local file. One bad file must not cost the other 299 their tags.
+async fn run_tags(uris: &[String], creds: &SmbCreds) -> Vec<(String, Option<TrackInfo>)> {
+    let mut out = Vec::with_capacity(uris.len());
+    // Held across files and re-made only when the host or share changes, so a
+    // 300-file directory costs one connect rather than 300.
+    let mut conn: Option<ShareConn> = None;
+    for uri in uris {
+        out.push((uri.clone(), read_one_tag(uri, creds, &mut conn).await));
+    }
+    out
+}
+
+/// A live connection pinned to one share, reused across a tag batch.
+struct ShareConn {
+    host: String,
+    share: String,
+    client: smb2::SmbClient,
+    tree: smb2::Tree,
+}
+
+/// Open `uri`'s file, read its header, and parse tags out of the bytes.
+/// `conn` is reused when it already points at the right host and share.
+async fn read_one_tag(
+    uri: &str,
+    creds: &SmbCreds,
+    conn: &mut Option<ShareConn>,
+) -> Option<TrackInfo> {
+    let (host, share, rel) = split_uri(uri)?;
+    let share = share?;
+    if rel.is_empty() {
+        return None;
+    }
+    let reusable = conn
+        .as_ref()
+        .is_some_and(|c| c.host == host && c.share == share);
+    if !reusable {
+        let mut client = connect(&host, creds).await.ok()?;
+        let tree = client.connect_share(&share).await.ok()?;
+        *conn = Some(ShareConn { host, share, client, tree });
+    }
+    let c = conn.as_ref()?;
+    let reader = c.client.open_file_reader(&c.tree, &rel).await.ok()?;
+    let want = reader.size().min(REMOTE_TAG_PREFIX);
+    let head = reader.read_at(0, want).await.ok()?;
+    let _ = reader.close().await;
+    crate::library::read_info_bytes(&head)
 }

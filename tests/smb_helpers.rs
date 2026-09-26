@@ -5,7 +5,7 @@
 
 use std::path::Path;
 use tplay::network::{
-    cache_path_in, child_browse, child_uri, dir_uri, fmt_size, fnv1a64, is_remote, parse_server_input,
+    cache_path_in, child_browse, child_uri, dir_uri, fnv1a64, is_remote, parse_server_input,
     server_uri, share_uri, spool_key, split_uri,
 };
 
@@ -202,12 +202,4 @@ fn cache_path_keeps_extension_and_uses_injected_dir() {
         cache_path_in("smb://nas/music/a.mp3", dir),
         cache_path_in("smb://nas/music/b.mp3", dir)
     );
-}
-
-#[test]
-fn fmt_size_uses_human_units() {
-    assert_eq!(fmt_size(0), "0 KB");
-    assert_eq!(fmt_size(45000), "43 KB");
-    assert_eq!(fmt_size(3 * 1024 * 1024), "3.0 MB");
-    assert_eq!(fmt_size(2 * 1024 * 1024 * 1024), "2.0 GB");
 }

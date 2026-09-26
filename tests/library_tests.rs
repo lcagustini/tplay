@@ -1,6 +1,7 @@
 //! Library logic tests — directory listing, tag reading, sorting, scan thread.
 
 use tplay::library::*;
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -11,7 +12,7 @@ use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::tag::{ItemKey, Tag, TagType};
 #[path = "common.rs"]
 mod common;
-use crate::common::{test_dir, write_wav};
+use crate::common::{test_dir, write_tagged_mp3, write_wav};
 
 #[test]
 fn read_info_reads_tags_written_by_lofty() {
@@ -176,6 +177,139 @@ fn read_info_returns_none_for_non_audio() {
     fs::write(&path, "hello").unwrap();
     assert!(read_info(&path).is_none());
     fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn read_info_bytes_parses_tags_from_a_short_prefix() {
+    let dir = test_dir("read_info_bytes_parses_tags_from_a_short_prefix");
+    let path = dir.join("tagged.mp3");
+    let bytes = write_tagged_mp3(&path, "Ne-Yo", "Test Artist", "Test Album");
+
+    // The whole premise of the remote tag fetch: an MP3's ID3v2 tag sits at the
+    // front, so a small prefix yields the same tags as the entire file. The
+    // production prefix is `network::REMOTE_TAG_PREFIX` (64 KB); 8 KB proves
+    // the point with room to spare.
+    for n in [bytes.len(), 64 * 1024, 8 * 1024, 2 * 1024] {
+        let n = n.min(bytes.len());
+        let info = read_info_bytes(&bytes[..n])
+            .unwrap_or_else(|| panic!("prefix of {n} bytes failed to parse"));
+        assert_eq!(info.title, "Ne-Yo", "prefix {n}");
+        assert_eq!(info.artist, "Test Artist", "prefix {n}");
+        assert_eq!(info.album, "Test Album", "prefix {n}");
+    }
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn read_info_bytes_never_reports_a_prefix_derived_duration() {
+    let dir = test_dir("read_info_bytes_never_reports_a_prefix_derived_duration");
+    let path = dir.join("tagged.mp3");
+    let bytes = write_tagged_mp3(&path, "Ne-Yo", "Test Artist", "Test Album");
+
+    // lofty derives duration from whatever bytes it was handed, so a prefix
+    // yields a value proportional to the PREFIX, not the file (measured: 64 KB
+    // of a 7.8 s file reports 4.1 s, 8 KB reports 0.5 s). A wrong duration is
+    // worse than none, so `read_info_bytes` drops it. This test is the guard
+    // against that ever being "fixed" by trusting lofty again.
+    let full = read_info(&path).expect("full read parses");
+    assert!(full.duration.is_some(), "premise: the full file has a duration");
+    for n in [bytes.len(), 64 * 1024, 8 * 1024] {
+        let n = n.min(bytes.len());
+        let info = read_info_bytes(&bytes[..n]).expect("prefix parses");
+        assert_eq!(info.duration, None, "prefix of {n} bytes leaked a bogus duration");
+    }
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn read_info_bytes_matches_read_info_on_the_same_tags() {
+    // The `info_of` extraction is shared, so a full read and a byte read of the
+    // same file must agree on every tag field (duration aside, by design).
+    let dir = test_dir("read_info_bytes_matches_read_info_on_the_same_tags");
+    let path = dir.join("tagged.mp3");
+    let bytes = write_tagged_mp3(&path, "Title", "Artist", "Album");
+
+    let from_path = read_info(&path).unwrap();
+    let from_bytes = read_info_bytes(&bytes).unwrap();
+    assert_eq!(from_path.title, from_bytes.title);
+    assert_eq!(from_path.artist, from_bytes.artist);
+    assert_eq!(from_path.album, from_bytes.album);
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn read_info_bytes_returns_none_for_unparseable_bytes() {
+    // A prefix that isn't audio (or is truncated past what the format needs —
+    // a WAV's whole `data` chunk, say) must degrade to "no tags", which the
+    // caller renders as the filename. Never a panic.
+    assert!(read_info_bytes(b"not audio at all").is_none());
+    assert!(read_info_bytes(&[]).is_none());
+    let dir = test_dir("read_info_bytes_returns_none_for_unparseable_bytes");
+    let path = dir.join("t.wav");
+    write_wav(&path);
+    let bytes = fs::read(&path).unwrap();
+    assert!(read_info_bytes(&bytes[..1024]).is_none(), "premise: a WAV prefix does not parse");
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn sort_entries_orders_both_sources_the_same_way() {
+    // One sorter for the local folder list and the share list. The share case is
+    // the interesting one: `path` is an `smb://` URI, and its `file_name` /
+    // `file_stem` must still yield the remote name so untitled rows and folders
+    // sort where a local folder's would.
+    let mut cache: HashMap<PathBuf, TrackInfo> = HashMap::new();
+    let tagged = |t: &str, a: &str| TrackInfo {
+        title: t.into(),
+        artist: a.into(),
+        ..Default::default()
+    };
+    let z = Entry { path: PathBuf::from("z.mp3"), is_dir: false };
+    let a = Entry { path: PathBuf::from("a.mp3"), is_dir: false };
+    let folder = Entry { path: PathBuf::from("mid"), is_dir: true };
+    cache.insert(z.path.clone(), tagged("Alpha", "Zed"));
+    cache.insert(a.path.clone(), tagged("Zulu", "Abe"));
+
+    let mut local = vec![z.clone(), a.clone(), folder.clone()];
+    sort_entries(&mut local, &cache, 0, true);
+    let titles: Vec<String> = local
+        .iter()
+        .map(|e| title_or_stem(e.path(), cache.get(e.path())))
+        .collect();
+    // Title sorts the folder by its OWN name, so it interleaves rather than
+    // sinking — "mid" belongs between "Alpha" and "Zulu".
+    assert_eq!(titles, vec!["Alpha", "mid", "Zulu"]);
+
+    // Descending is a reverse of the ascending order, so ties don't reshuffle.
+    sort_entries(&mut local, &cache, 0, false);
+    let rev: Vec<String> = local
+        .iter()
+        .map(|e| title_or_stem(e.path(), cache.get(e.path())))
+        .collect();
+    assert_eq!(rev, vec!["Zulu", "mid", "Alpha"]);
+
+    // Artist column: the folder sinks below both files, same as locally.
+    sort_entries(&mut local, &cache, 1, true);
+    assert_eq!(local[0].path, a.path);
+    assert_eq!(local[1].path, z.path);
+    assert!(local[2].is_dir, "folder sinks last on a tag column");
+
+    // The same three rows as smb:// URIs sort identically — the URI is just a
+    // path whose last segment is the filename.
+    let mut remote: Vec<Entry> = vec![
+        Entry { path: PathBuf::from("smb://nas/music/z.mp3"), is_dir: false },
+        Entry { path: PathBuf::from("smb://nas/music/a.mp3"), is_dir: false },
+        Entry { path: PathBuf::from("smb://nas/music/mid"), is_dir: true },
+    ];
+    let mut rcache: HashMap<PathBuf, TrackInfo> = HashMap::new();
+    rcache.insert(remote[0].path.clone(), tagged("Alpha", "Zed"));
+    rcache.insert(remote[1].path.clone(), tagged("Zulu", "Abe"));
+    sort_entries(&mut remote, &rcache, 0, true);
+    let rnames: Vec<String> = remote
+        .iter()
+        .map(|e| e.path().file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(rnames, vec!["z.mp3", "mid", "a.mp3"], "titles Alpha, folder, Zulu");
 }
 
 #[test]

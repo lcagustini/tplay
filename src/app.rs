@@ -1104,16 +1104,8 @@ impl TPlayApp {
     /// folders are untagged entries, so the tag columns sink them below the
     /// files.
     fn apply_library_sort(&mut self) {
-        let key = self.library_sort;
-        let asc = self.library_asc;
-        let cache = &self.tag_cache;
-        self.library_entries.sort_by_cached_key(|e| {
-            let info = cache.get(e.path());
-            library::sort_key(e, info, key)
-        });
-        if !asc {
-            self.library_entries.reverse();
-        }
+        let (key, asc) = (self.library_sort, self.library_asc);
+        library::sort_entries(&mut self.library_entries, &self.tag_cache, key, asc);
     }
 
     /// Header click: pick a new column (ascending) or flip the active one and
@@ -1131,24 +1123,38 @@ impl TPlayApp {
         self.apply_library_sort();
     }
 
-    /// Ensure the given audio files have tag info in the cache: any path
-    /// missing from `tag_cache` goes to a background `scan_files` thread.
-    /// One scan runs at a time — a new request replaces the in-flight one
-    /// (the cache is per-path, so a dropped scan simply restarts the next
-    /// time its paths are requested; nothing is corrupted).
+    /// Ensure the given audio files have tag info in the cache. Local paths go
+    /// to a background `scan_files` thread — one scan runs at a time, and a new
+    /// request replaces the in-flight one (the cache is per-path, so a dropped
+    /// scan simply restarts the next time its paths are requested).
+    ///
+    /// Remote (`smb://`) paths go to the SMB worker instead, which reads each
+    /// file's header; there is no local file to scan. Both land in the same
+    /// `tag_cache`, remote keyed by URI, so every pane fills in identically.
+    ///
+    /// Safe to call every frame: cached paths are skipped and the network side
+    /// keeps its own in-flight set, so a batch still running isn't re-queued.
     pub fn ensure_tags(&mut self, paths: Vec<PathBuf>) {
-        let missing: Vec<PathBuf> = paths
-            .into_iter()
-            // Remote tracks have no local file to tag until spooled; tags for
-            // them are read from the spooled copy and keyed by URI at play time.
-            .filter(|p| !network::is_remote(p))
-            .filter(|p| !self.tag_cache.contains_key(p))
-            .collect();
-        if missing.is_empty() {
+        let mut local: Vec<PathBuf> = Vec::new();
+        let mut remote: Vec<String> = Vec::new();
+        for p in paths {
+            if self.tag_cache.contains_key(&p) {
+                continue;
+            }
+            if network::is_remote(&p) {
+                remote.push(p.to_string_lossy().into_owned());
+            } else {
+                local.push(p);
+            }
+        }
+        if !remote.is_empty() {
+            self.network.fetch_tags(remote);
+        }
+        if local.is_empty() {
             return;
         }
         let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || library::scan_files(missing, tx));
+        std::thread::spawn(move || library::scan_files(local, tx));
         self.tag_scan_rx = Some(rx);
         self.ctx.request_repaint();
     }
@@ -1350,6 +1356,12 @@ impl TPlayApp {
     pub fn library_entries(&self) -> &[library::Entry] { &self.library_entries }
     /// Tags/duration for any previously scanned or played track — the shared
     /// cache behind the Library, Playlist, and Now Playing panes.
+    /// The whole tag cache, so a caller can sort a list of entries against it
+    /// (`library::sort_entries`) rather than sorting entry-by-entry.
+    pub fn tag_cache(&self) -> &HashMap<PathBuf, library::TrackInfo> {
+        &self.tag_cache
+    }
+
     pub fn track_info(&self, path: &std::path::Path) -> Option<&library::TrackInfo> {
         self.tag_cache.get(path)
     }
@@ -1508,6 +1520,22 @@ impl eframe::App for TPlayApp {
                     }
                     Err(e) => eprintln!("tplay: could not save playlist to {uri}: {e}"),
                 },
+                network::Event::Tagged(results) => {
+                    // Same cache the local scan fills, keyed by URI, so rows
+                    // switch from filename to tagged title on their own.
+                    //
+                    // A file whose header yielded nothing is cached as an EMPTY
+                    // TrackInfo rather than skipped. Two reasons: it marks the
+                    // URI as checked, so the header isn't re-requested every
+                    // frame; and `title_or_stem` already falls back to the stem
+                    // on an empty title, so it displays exactly like no cache
+                    // entry. Caching it is also what stops a share full of
+                    // WAV/M4A (whose tags a prefix can't reach) from showing
+                    // "Scanning…" forever.
+                    for (uri, info) in results {
+                        self.tag_cache.insert(PathBuf::from(uri), info.unwrap_or_default());
+                    }
+                }
             }
         }
         let waiting = self.network.busy();
