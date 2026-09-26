@@ -3,6 +3,7 @@
 //! every change; the on-disk contract is what's pinned here.
 
 use tplay::app::{Config, EqData, LibraryData, VizView};
+use tplay::network::ServerCfg;
 use std::path::PathBuf;
 
 #[test]
@@ -26,6 +27,10 @@ fn config_round_trip_preserves_every_field() {
         gapless: true,
         crossfade: true,
         crossfade_secs: 5.0,
+        servers: vec![
+            ServerCfg { host: "192.168.1.50".into(), username: "lucas".into() },
+            ServerCfg { host: "box".into(), username: String::new() },
+        ],
     };
 
     let json = serde_json::to_string(&c).unwrap();
@@ -48,6 +53,13 @@ fn config_round_trip_preserves_every_field() {
     assert!(back.gapless);
     assert!(back.crossfade);
     assert_eq!(back.crossfade_secs, 5.0);
+    assert_eq!(
+        back.servers,
+        vec![
+            ServerCfg { host: "192.168.1.50".into(), username: "lucas".into() },
+            ServerCfg { host: "box".into(), username: String::new() },
+        ]
+    );
 }
 
 #[test]
@@ -74,6 +86,7 @@ fn config_missing_fields_fall_back_to_defaults() {
     assert!(!c.gapless);
     assert!(!c.crossfade);
     assert_eq!(c.crossfade_secs, 3.0); // default_crossfade_secs
+    assert!(c.servers.is_empty()); // no servers saved → guest browsing only
 }
 
 #[test]
@@ -110,4 +123,5 @@ fn config_json_shape_has_expected_keys() {
     assert!(v.get("gapless").is_some());
     assert!(v.get("crossfade").is_some());
     assert!(v.get("crossfade_secs").is_some());
+    assert!(v.get("servers").is_some()); // SMB server list (host + username only)
 }

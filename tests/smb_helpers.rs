@@ -1,0 +1,177 @@
+//! Hermetic pure-logic tests for the SMB URI/spool helpers in `tplay::network`.
+//! No network, no worker thread — the smb2 client itself is untestable
+//! headless, so the pure helpers carry the load (same convention as
+//! `mounted_volumes.rs` fixtures).
+
+use std::path::Path;
+use tplay::network::{
+    cache_path_in, child_browse, child_uri, dir_uri, fmt_size, fnv1a64, is_remote, parse_server_input,
+    server_uri, share_uri, spool_key, split_uri,
+};
+
+#[test]
+fn is_remote_only_matches_smb_uri_prefix() {
+    assert!(is_remote(Path::new("smb://nas/music/a.mp3")));
+    assert!(is_remote(Path::new("smb://NAS/share")));
+    assert!(!is_remote(Path::new("/home/user/music/a.mp3")));
+    assert!(!is_remote(Path::new("C:\\music\\a.mp3")));
+    assert!(!is_remote(Path::new("smb:a_stray_local_file")));
+}
+
+#[test]
+fn split_uri_covers_server_share_and_deep_paths() {
+    // Bare server — share stage (guest browse).
+    assert_eq!(split_uri("smb://192.168.1.50"), Some(("192.168.1.50".into(), None, String::new())));
+    // Share root.
+    assert_eq!(split_uri("smb://nas/music"), Some(("nas".into(), Some("music".into()), String::new())));
+    // Directory + file.
+    assert_eq!(
+        split_uri("smb://nas/music/Album/track.flac"),
+        Some(("nas".into(), Some("music".into()), "Album/track.flac".into()))
+    );
+    // Not an smb uri at all.
+    assert_eq!(split_uri("https://nas/music"), None);
+    assert_eq!(split_uri("smb://"), None);
+}
+#[test]
+fn add_server_dedups_by_host_and_updates_the_username() {
+    use tplay::network::Network;
+
+    // The add-server form stores the host with a blank username, then the
+    // main-pane login prompt calls add_server again with the real one — so
+    // repeat logins must update in place, never duplicate the row.
+    let mut net = Network::new(vec![]);
+    net.add_server("192.168.15.59".into(), String::new());
+    assert_eq!(net.servers().len(), 1);
+    assert_eq!(net.servers()[0].username, "");
+
+    net.add_server("192.168.15.59".into(), "alice".into());
+    assert_eq!(net.servers().len(), 1, "re-login must not duplicate");
+    assert_eq!(net.servers()[0].username, "alice");
+
+    // A genuinely different address is a new row.
+    net.add_server("10.0.0.5".into(), "bob".into());
+    assert_eq!(net.servers().len(), 2);
+    assert!(net.servers().iter().any(|s| s.host == "192.168.15.59"));
+    assert!(net.servers().iter().any(|s| s.host == "10.0.0.5"));
+
+    // Whitespace from the text field must not create a second, near-identical row.
+    net.add_server("  192.168.15.59  ".into(), "carol".into());
+    assert_eq!(net.servers().len(), 2, "host must be trimmed before dedup");
+    let row = net.servers().iter().find(|s| s.host == "192.168.15.59").unwrap();
+    assert_eq!(row.username, "carol");
+
+    // Removal is by exact host.
+    net.remove_server("10.0.0.5");
+    assert_eq!(net.servers().len(), 1);
+    assert_eq!(net.servers()[0].host, "192.168.15.59");
+}
+
+#[test]
+fn parse_server_input_accepts_bare_host_and_full_uris() {
+    // Bare host — saved as-is, nothing to open directly.
+    assert_eq!(
+        parse_server_input("192.168.15.59"),
+        Some(("192.168.15.59".into(), None, String::new()))
+    );
+    // Surrounding whitespace from the text field is trimmed.
+    assert_eq!(
+        parse_server_input("  nas  "),
+        Some(("nas".into(), None, String::new()))
+    );
+    // The URI a user pastes from another file manager: scheme optional, trailing
+    // slash tolerated — must NOT end up stored as a host.
+    assert_eq!(
+        parse_server_input("smb://192.168.15.59/newhd/"),
+        Some(("192.168.15.59".into(), Some("newhd".into()), String::new()))
+    );
+    assert_eq!(
+        parse_server_input("192.168.15.59/newhd"),
+        Some(("192.168.15.59".into(), Some("newhd".into()), String::new()))
+    );
+    // Share plus a subdirectory.
+    assert_eq!(
+        parse_server_input("smb://nas/music/Rock"),
+        Some(("nas".into(), Some("music".into()), "Rock".into()))
+    );
+    // Empty input adds nothing.
+    assert_eq!(parse_server_input(""), None);
+    assert_eq!(parse_server_input("   "), None);
+    assert_eq!(parse_server_input("smb://"), None);
+}
+
+#[test]
+fn uri_builders_round_trip_against_splitter() {
+    let host = "nas";
+    let share = "music";
+    let rel = "Rock/Album";
+    let uri = dir_uri(host, share, rel);
+    assert_eq!(uri, "smb://nas/music/Rock/Album");
+    assert_eq!(split_uri(&uri), Some((host.into(), Some(share.into()), rel.into())));
+
+    // Share root (empty rel) has no trailing slash.
+    assert_eq!(dir_uri(host, share, ""), "smb://nas/music");
+    assert_eq!(share_uri(host, share), "smb://nas/music");
+    assert_eq!(server_uri(host), "smb://nas");
+
+    // Descending appends exactly one slash regardless of parent form.
+    assert_eq!(child_uri("smb://nas/music", "Album"), "smb://nas/music/Album");
+    assert_eq!(child_uri("smb://nas/music/Album/", "a.flac"), "smb://nas/music/Album/a.flac");
+}
+
+#[test]
+fn child_browse_distinguishes_share_entry_from_subdirectory() {
+    let (uri, share, rel) = child_browse("nas", None, "", "music");
+    assert_eq!(uri, "smb://nas/music");
+    assert_eq!(share.as_deref(), Some("music"));
+    assert!(rel.is_empty());
+
+    let (uri, share, rel) = child_browse("nas", share.as_deref(), &rel, "Rock");
+    assert_eq!(uri, "smb://nas/music/Rock");
+    assert_eq!(share.as_deref(), Some("music"));
+    assert_eq!(rel, "Rock");
+}
+
+#[test]
+fn spool_key_is_stable_and_distinct() {
+    // Known FNV-1a 64 vector (hand-computed) — the key is a cache filename,
+    // so it must never drift between Rust releases (that's the point of
+    // hand-rolling it instead of DefaultHasher).
+    assert_eq!(fnv1a64(""), 0xcbf29ce484222325u64);
+    assert_eq!(fnv1a64("smb://nas/music/a.mp3"), 0xb50152ee36dfecbbu64);
+
+    // Distinct URIs → distinct keys (uniqueness is what makes the cache safe).
+    let a = spool_key("smb://nas/music/a.mp3");
+    let b = spool_key("smb://nas/music/b.mp3");
+    let deep = spool_key("smb://nas/music/Album/a.mp3");
+    assert_ne!(a, b);
+    assert_ne!(a, deep);
+    // 64-bit hex, fixed width.
+    assert_eq!(a.len(), 16);
+    assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+}
+
+#[test]
+fn cache_path_keeps_extension_and_uses_injected_dir() {
+    let dir = Path::new("/tmp/tplay-smb-test");
+    let uri = "smb://nas/music/Album/track.flac";
+    let p = cache_path_in(uri, dir);
+    assert_eq!(p, dir.join(format!("{}.flac", spool_key(uri))));
+    assert_eq!(p.extension().unwrap(), "flac");
+    // Extensionless URI → bare key.
+    let p2 = cache_path_in("smb://nas/music/noext", dir);
+    assert_eq!(p2, dir.join(spool_key("smb://nas/music/noext")));
+    // Different files, same dir → no collision.
+    assert_ne!(
+        cache_path_in("smb://nas/music/a.mp3", dir),
+        cache_path_in("smb://nas/music/b.mp3", dir)
+    );
+}
+
+#[test]
+fn fmt_size_uses_human_units() {
+    assert_eq!(fmt_size(0), "0 KB");
+    assert_eq!(fmt_size(45000), "43 KB");
+    assert_eq!(fmt_size(3 * 1024 * 1024), "3.0 MB");
+    assert_eq!(fmt_size(2 * 1024 * 1024 * 1024), "2.0 GB");
+}

@@ -4,6 +4,7 @@ use crate::audio;
 use crate::audio::transition;
 use crate::gui::theme::{self, Theme, Themes};
 use crate::library;
+use crate::network;
 use eframe::egui;
 use rodio::{cpal::BufferSize, Decoder, OutputStream, OutputStreamBuilder, Sink, Source};
 use serde::{Deserialize, Serialize};
@@ -94,6 +95,9 @@ pub struct Config {
     /// Crossfade duration in seconds.
     #[serde(default = "default_crossfade_secs")]
     pub crossfade_secs: f32,
+    /// Saved SMB servers (host + username; passwords are session-memory only).
+    #[serde(default)]
+    pub servers: Vec<network::ServerCfg>,
 }
 
 fn default_volume() -> f32 { 1.0 }
@@ -256,6 +260,11 @@ pub struct TPlayApp {
     /// default), plus direction. Set by header clicks.
     library_sort: usize,
     library_asc: bool,
+
+    // ── SMB network ────────────────────────────────────────────────────────
+    /// All network state (saved servers, session passwords, browse position,
+    /// pending spool) + the worker channels — see `network::Network`.
+    network: network::Network,
 }
 
 impl TPlayApp {
@@ -284,6 +293,7 @@ impl TPlayApp {
             .unwrap_or_else(|| themes.default().clone());
         let icons = theme::load_icons(&ctx, &themes, &theme);
 
+        // SMB network: channels + worker are owned by `network::Network`.
         let mut app = Self {
             output,
             sink,
@@ -326,6 +336,7 @@ impl TPlayApp {
             show_hidden: config.library.show_hidden,
             library_sort: 0,
             library_asc: true,
+            network: network::Network::new(config.servers.clone()),
         };
 
         // Apply volume to sink
@@ -396,6 +407,7 @@ impl TPlayApp {
             gapless: self.gapless,
             crossfade: self.crossfade,
             crossfade_secs: self.crossfade_secs,
+            servers: self.network.servers().to_vec(),
         };
         save_config("config.json", &config);
     }
@@ -416,24 +428,38 @@ impl TPlayApp {
     }
 
     fn load_file(&mut self, path: PathBuf) {
-        // Cancel any live crossfade when a new track is loaded explicitly.
-        self.cancel_xf();
+        let display = path.clone();
+        self.load_file_as(path, display);
+    }
 
-        self.seek_target     = None;
+    /// Replace the sink with a fresh empty one — drops the old decoder/file.
+    /// Shared by `load_file_as` and the remote spool wait (which also pauses
+    /// playback until the download lands).
+    fn fresh_sink(&mut self) {
+        self.cancel_xf();
+        self.seek_target = None;
         self.position_offset = Duration::ZERO;
         self.viz.clear();
-
         self.sink = Sink::connect_new(self.output.mixer());
         self.sink.set_volume(self.volume);
+    }
+
+    /// Load a local file into the sink. `local` is the file to decode; `display`
+    /// is what Now Playing/the playlist should show — a remote `smb://` URI when
+    /// `local` is its spooled cache copy, the same path otherwise. Tags are
+    /// cache-keyed by `display` so panes (which look up by playlist path) match.
+    fn load_file_as(&mut self, local: PathBuf, display: PathBuf) {
+        // Cancel any live crossfade when a new track is loaded explicitly.
+        self.fresh_sink();
 
         // Tag the loaded track up front so Now Playing shows title · artist
         // immediately instead of waiting on a scan (one file, negligible cost).
-        if let Some(info) = library::read_info(&path) {
-            self.tag_cache.insert(path.clone(), info);
+        if let Some(info) = library::read_info(&local) {
+            self.tag_cache.insert(display.clone(), info);
         }
 
         // Open file once, create decoder, get total_duration.
-        let file = match File::open(&path) {
+        let file = match File::open(&local) {
             Ok(f) => f,
             Err(e) => { eprintln!("tplay: open error: {e}"); self.current_path = None; self.total_duration = None; return; }
         };
@@ -441,7 +467,7 @@ impl TPlayApp {
             Ok(d) => d,
             Err(e) => { eprintln!("tplay: decode error: {e}"); self.current_path = None; self.total_duration = None; return; }
         };
-        let total_duration = decoder.total_duration().or_else(|| audio::probe_duration(&path));
+        let total_duration = decoder.total_duration().or_else(|| audio::probe_duration(&local));
         self.total_duration = total_duration;
 
         // Always load the full track (no truncation, no pre-mix).
@@ -450,7 +476,7 @@ impl TPlayApp {
         let tap_source = audio::viz::TapSource::new(eq_source, self.viz.clone());
         let balance_source = audio::balance::BalanceSource::new(tap_source, Arc::clone(&self.balance));
         self.sink.append(balance_source);
-        self.current_path = Some(path);
+        self.current_path = Some(display);
     }
 
     /// Cancel any live crossfade/gapless: stop the xf sink and restore main volume.
@@ -625,6 +651,11 @@ impl TPlayApp {
                     if !next_path.is_file() {
                         return;
                     }
+                    // Remote smb:// tracks are spooled by start() on arrival
+                    // (and skip gapless/crossfade) — never pre-buffered here.
+                    if network::is_remote(&next_path) {
+                        return;
+                    }
                     // A track shorter than the hold/fade window drains muted
                     // before the swap (gapless) or mid-fade (crossfade) and
                     // would be promoted empty — silently skipped. Prefer a
@@ -756,6 +787,8 @@ impl TPlayApp {
         self.position_offset = Duration::ZERO;
         self.viz.clear();
         self.reset_shuffle();
+        // A spooled track loads on arrival — stop cancels that intent.
+        self.network.discard_pending();
     }
 
     pub fn set_volume(&mut self, volume: f32) {
@@ -930,7 +963,11 @@ impl TPlayApp {
         let Some(paths) = library::read_playlist(&path) else { return };
         self.playlist = paths
             .into_iter()
-            .filter_map(|p| p.canonicalize().ok())
+            // Remote tracks can't canonicalize — keep them as-is. Local paths
+            // that no longer exist are dropped.
+            .filter_map(|p| {
+                if network::is_remote(&p) { Some(p) } else { p.canonicalize().ok() }
+            })
             .collect();
         self.stop();
         self.ensure_tags(self.playlist.clone());
@@ -1037,6 +1074,9 @@ impl TPlayApp {
     pub fn ensure_tags(&mut self, paths: Vec<PathBuf>) {
         let missing: Vec<PathBuf> = paths
             .into_iter()
+            // Remote tracks have no local file to tag until spooled; tags for
+            // them are read from the spooled copy and keyed by URI at play time.
+            .filter(|p| !network::is_remote(p))
             .filter(|p| !self.tag_cache.contains_key(p))
             .collect();
         if missing.is_empty() {
@@ -1081,14 +1121,42 @@ impl TPlayApp {
     /// auto-advance won't cascade off it.
     pub fn play_file(&mut self, path: PathBuf) {
         self.current_index = None;
-        self.load_file(path);
+        if network::is_remote(&path) {
+            self.play_uri(path);
+        } else {
+            self.load_file(path);
+        }
     }
 
     /// Common playback start: set current_index and load the track.
     fn start(&mut self, idx: usize) {
         self.current_index = Some(idx);
         let path = self.playlist[idx].clone();
-        self.load_file(path);
+        if network::is_remote(&path) {
+            self.play_uri(path);
+        } else {
+            self.load_file(path);
+        }
+    }
+
+    /// Play a remote (`smb://`) track: play its spooled copy if cached, else
+    /// request the spool and play when it lands (see `Network::drain`). The
+    /// caller already set `current_index`, so the spooled track plays into
+    /// the playlist's sequential/auto-advance flow.
+    fn play_uri(&mut self, uri: PathBuf) {
+        let local = network::cache_path(&uri.to_string_lossy());
+        if local.is_file() {
+            self.load_file_as(local, uri);
+        } else {
+            // Stop current playback now (same as load_file would) and clear
+            // current_path so Now Playing shows "Loading from server…" and
+            // natural advance can't cascade past this pending track. The
+            // caller already set current_index.
+            self.fresh_sink();
+            self.current_path = None;
+            self.total_duration = None;
+            self.network.spool(uri);
+        }
     }
 
     pub fn toggle_favorite(&mut self, dir: PathBuf) {
@@ -1098,6 +1166,40 @@ impl TPlayApp {
             self.favorite_dirs.push(dir);
         }
         self.save_config();
+    }
+
+    // ── SMB network ────────────────────────────────────────────────────────
+    // State lives in `network::Network`; these are the persistence-aware seams
+    // (config.json ownership stays in app.rs) + accessors for the GUI and
+    // `update()`. Browsing/spool/creds/drain are methods on the network object.
+
+    /// All network state (servers, session passwords, browse position,
+    /// pending spool, worker channels).
+    pub fn network(&self) -> &network::Network {
+        &self.network
+    }
+
+    pub fn network_mut(&mut self) -> &mut network::Network {
+        &mut self.network
+    }
+
+    /// Add a server (dedup by host; re-adding updates the username). Persists.
+    pub fn add_network_server(&mut self, host: String, username: String) {
+        self.network.add_server(host, username);
+        self.save_config();
+    }
+
+    /// Remove a saved server; persists immediately (passwords stay in the
+    /// session map — short-lived, cleared on exit).
+    pub fn remove_network_server(&mut self, host: &str) {
+        self.network.remove_server(host);
+        self.save_config();
+    }
+
+    /// Session-memory password for a host (never persisted) — set at add-time
+    /// via the Library's add-server form, consumed per connect.
+    pub fn set_network_password(&mut self, host: String, password: String) {
+        self.network.set_password(host, password);
     }
 
     // Read-only getters
@@ -1191,7 +1293,7 @@ impl TPlayApp {
     pub fn library_scanning(&self) -> bool {
         self.library_entries
             .iter()
-            .any(|e| !e.is_dir() && !library::is_playlist(e.path()) && !self.tag_cache.contains_key(e.path()))
+            .any(|e| !e.is_dir() && !library::is_playlist(e.path()) && !network::is_remote(e.path()) && !self.tag_cache.contains_key(e.path()))
     }
     pub fn favorite_dirs(&self) -> &[PathBuf] { &self.favorite_dirs }
     pub fn is_favorite(&self, dir: &std::path::Path) -> bool {
@@ -1309,7 +1411,20 @@ impl eframe::App for TPlayApp {
         crate::gui::coordinator::update_ui(self, ctx);
         self.advance();
         self.drain_tag_scan();
-        if !self.sink.empty() && !self.sink.is_paused() {
+        // SMB replies: browse listings are applied inside `Network::drain`;
+        // a completed spool promotes playback here.
+        if let Some(network::Event::Spooled { uri, result }) = self.network.drain() {
+            match result {
+                Ok(local) => self.load_file_as(local, PathBuf::from(uri)),
+                Err(e) => {
+                    eprintln!("tplay: spool {uri} failed: {e}");
+                    self.current_path = None;
+                    self.total_duration = None;
+                }
+            }
+        }
+        let waiting = self.network.busy();
+        if waiting || (!self.sink.empty() && !self.sink.is_paused()) {
             ctx.request_repaint();
         }
     }

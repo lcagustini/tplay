@@ -115,6 +115,185 @@ fn default_theme_id_constant() {
     assert_eq!(DEFAULT_THEME_ID, "dark");
 }
 
+// ── Sidebar width containment ─────────────────────────────────────────
+
+/// The Library sidebar must be immune to egui's `TextEdit` overflow allocation.
+///
+/// `TextEdit` deliberately grows its parent's `min_rect` by the text overflow
+/// ("allocate additional space … so a ScrollArea can properly scroll to the
+/// cursor"). The sidebar is a vertical-only ScrollArea, whose width is the
+/// content width, so that growth used to (1) widen the column and (2) keep
+/// moving its scrollbar while typing. `clip_text` alone does NOT stop it — it
+/// pins the field rect, but the overflow still grows the parent.
+///
+/// The fix is two distinct egui behaviors: `allocate_space` reserves a rect
+/// *and* advances the layout cursor (a bare `new_child` leaves the next row
+/// drawn on top), while a raw `new_child` does *not* propagate its min_rect
+/// upward (which is what contains the overflow).
+#[test]
+fn sidebar_column_and_scroll_content_ignore_textedit_overflow() {
+    const SIDEBAR: f32 = 120.0;
+    const FORM_W: f32 = 100.0;
+    const FIELD_H: f32 = 18.0;
+    const LONG: &str = "smb://192.168.15.59/newhd/some/deeply/nested/folder/name";
+
+    #[derive(Clone, Copy)]
+    enum Shape {
+        /// `ui.vertical` + `set_min_width`: the original width bug.
+        Vertical,
+        /// `new_child` without advancing the cursor: the sibling overlaps.
+        ChildNoAdvance,
+        /// Sidebar fixed, but the form NOT wrapped: content still grows.
+        UnwrappedForm,
+        /// The fix: sidebar and form both in fixed-rect children.
+        Fixed,
+    }
+
+    /// Returns (sidebar width, file-list min.x, scroll content width).
+    fn layout(shape: Shape, text: &str) -> (f32, f32, f32) {
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(680.0, 460.0),
+        ));
+        let out = std::cell::Cell::new((0.0f32, 0.0f32, 0.0f32));
+        let content_w = std::cell::Cell::new(0.0f32);
+        let ctx = egui::Context::default();
+        let _ = ctx.run(raw, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.horizontal_top(|ui| {
+                    let mut text = text.to_string();
+                    #[allow(unused_assignments)]
+                    let mut sidebar_w = 0.0f32;
+
+                    // The scroll content, including the fixed-rect form.
+                    let mut sidebar_body = |ui: &mut egui::Ui, wrap_form: bool| {
+                        let scroll_h = (ui.available_height() - 8.0).max(40.0);
+                        let sa = egui::ScrollArea::vertical()
+                            .id_salt("places_favorites")
+                            .auto_shrink([true, false])
+                            .max_height(scroll_h)
+                            .show(ui, |ui| {
+                                ui.label("Network");
+                                let gap = ui.spacing().item_spacing.y;
+                                let form_h = 3.0 * (FIELD_H + gap) + ui.spacing().interact_size.y;
+                                if wrap_form {
+                                    let (_, frect) =
+                                        ui.allocate_space(egui::vec2(FORM_W, form_h));
+                                    let mut f = ui.new_child(
+                                        egui::UiBuilder::new()
+                                            .max_rect(frect)
+                                            .layout(egui::Layout::top_down(egui::Align::Min)),
+                                    );
+                                    f.vertical(|ui| {
+                                        for _ in 0..3 {
+                                            ui.add_sized(
+                                                egui::vec2(FORM_W, FIELD_H),
+                                                egui::TextEdit::singleline(&mut text)
+                                                    .clip_text(true)
+                                                    .desired_width(FORM_W),
+                                            );
+                                        }
+                                    });
+                                } else {
+                                    for _ in 0..3 {
+                                        ui.add_sized(
+                                            egui::vec2(FORM_W, FIELD_H),
+                                            egui::TextEdit::singleline(&mut text)
+                                                .clip_text(true)
+                                                .desired_width(FORM_W),
+                                        );
+                                    }
+                                }
+                            });
+                        content_w.set(sa.content_size.x);
+                    };
+
+                    match shape {
+                        Shape::Vertical => {
+                            let inner = ui.vertical(|ui| {
+                                ui.set_min_width(SIDEBAR);
+                                sidebar_body(ui, false);
+                            });
+                            sidebar_w = inner.response.rect.width();
+                        }
+                        Shape::ChildNoAdvance => {
+                            let rect = egui::Rect::from_min_size(
+                                ui.min_rect().min,
+                                egui::vec2(SIDEBAR, ui.available_height()),
+                            );
+                            let mut child = ui.new_child(
+                                egui::UiBuilder::new()
+                                    .max_rect(rect)
+                                    .layout(egui::Layout::top_down(egui::Align::Min)),
+                            );
+                            sidebar_body(&mut child, true);
+                            sidebar_w = rect.width();
+                        }
+                        Shape::UnwrappedForm | Shape::Fixed => {
+                            let (_, rect) =
+                                ui.allocate_space(egui::vec2(SIDEBAR, ui.available_height()));
+                            let mut child = ui.new_child(
+                                egui::UiBuilder::new()
+                                    .max_rect(rect)
+                                    .layout(egui::Layout::top_down(egui::Align::Min)),
+                            );
+                            sidebar_body(&mut child, matches!(shape, Shape::Fixed));
+                            sidebar_w = rect.width();
+                        }
+                    }
+                    let files = ui.vertical(|ui| {
+                        ui.label("files");
+                    });
+                    out.set((sidebar_w, files.response.rect.min.x, content_w.get()));
+                });
+            });
+        });
+        out.get()
+    }
+
+    // Premise A: `ui.vertical` sizes the column by its min_rect, which the
+    // overflow grows — the original bug.
+    let (vertical_w, _, _) = layout(Shape::Vertical, LONG);
+    assert!(
+        vertical_w > SIDEBAR + 20.0,
+        "premise: ui.vertical sidebar should widen with long text, got {vertical_w}"
+    );
+
+    // Premise B: a bare `new_child` never advances the horizontal cursor, so the
+    // file-list sibling lands at the same x and draws over the sidebar.
+    let (_, overlap_x, _) = layout(Shape::ChildNoAdvance, LONG);
+    assert!(
+        overlap_x < SIDEBAR,
+        "premise: new_child without allocate_space should overlap, sibling x={overlap_x}"
+    );
+
+    // Premise C: fixing only the column leaves the scroll content growing —
+    // which is what kept dragging the scrollbar.
+    let (_, _, unwrapped_content) = layout(Shape::UnwrappedForm, LONG);
+    assert!(
+        unwrapped_content > FORM_W + 20.0,
+        "premise: an unwrapped form should still widen the scroll content, got {unwrapped_content}"
+    );
+
+    // The fix: column pinned, sibling beside it, and scroll content invariant.
+    for text in ["", "192.168.15.59", "smb://192.168.15.59/newhd/", LONG] {
+        let (w, files_x, content) = layout(Shape::Fixed, text);
+        assert!(
+            (w - SIDEBAR).abs() < 0.5,
+            "sidebar must stay {SIDEBAR}px for {text:?}, got {w}"
+        );
+        assert!(
+            files_x >= SIDEBAR - 0.5,
+            "file list must sit beside the sidebar, not on top: x={files_x}"
+        );
+        assert!(
+            content <= FORM_W + 0.5,
+            "scroll content must not widen with {text:?}, got {content}"
+        );
+    }
+}
+
 // ── Theme dir priority + icon fallback ────────────────────────────────
 
 /// Fixture theme.json written into a temp dir tree.

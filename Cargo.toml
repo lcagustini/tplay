@@ -22,3 +22,5 @@ egui_dock = { version = "0.15", features = ["serde"] }
 # PNG+JPEG decode for theme icons (synchronously into egui textures) and album covers
 image     = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 lofty = "0.25.4"
+smb2 = "0.25.1"
+tokio = { version = "1.53.1", features = ["rt", "net", "time"] }

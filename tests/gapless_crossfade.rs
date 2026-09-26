@@ -11,7 +11,6 @@ use tplay::audio::viz::{TapSource, VizBuf};
 use tplay::audio::balance::{BalanceSource, balance_gains};
 use rodio::buffer::SamplesBuffer;
 use rodio::Source;
-use std::fs::File;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 

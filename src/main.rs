@@ -4,6 +4,7 @@ mod app;
 mod audio;
 mod gui;
 mod library;
+mod network;
 
 use eframe::egui;
 

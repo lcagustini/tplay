@@ -8,6 +8,7 @@
 use crate::app::TPlayApp;
 use crate::gui::theme;
 use crate::library;
+use crate::network;
 use eframe::egui;
 use std::path::{Path, PathBuf};
 
@@ -15,6 +16,20 @@ use std::path::{Path, PathBuf};
 const LIB_INIT: &str = "tplay.library.init";
 /// egui memory: the active search filter text.
 const LIB_QUERY: &str = "tplay.library.query";
+/// egui memory: the SMB add-server form state (host, username, password).
+/// `None` = closed; `Some` = open with the fields being edited.
+const NET_FORM: &str = "tplay.network.form";
+/// egui memory: the main-pane login prompt, keyed per host (`(NET_LOGIN, host)`).
+const NET_LOGIN: &str = "tplay.network.login";
+
+/// Fixed width of the Places/Favorites sidebar column. Allocated as an exact
+/// rect (not `set_min_width`) so no child can resize it — see the comment at
+/// the `new_child` call in the sidebar body.
+const SIDEBAR_W: f32 = 120.0;
+/// Width of the add-server form's text fields, inside the fixed-width sidebar.
+const FORM_W: f32 = 100.0;
+/// Height of one add-server form text field.
+const FORM_FIELD_H: f32 = 18.0;
 
 /// Leaf name of a dir (`/` at the filesystem root).
 fn dir_name(dir: &Path) -> String {
@@ -119,7 +134,7 @@ fn draw_playlist_row(ui: &mut egui::Ui, theme: &theme::Theme, row_h: f32, i: usi
             .truncate()
             .sense(egui::Sense::click()),
         )
-        .on_hover_text("Load playlist");
+        .on_hover_text_at_pointer("Load playlist");
 
     // Tag sits right after the name (left-of-center), not floated to the
     // row's far right past the empty tag cells.
@@ -165,7 +180,7 @@ fn draw_file_row(
             .truncate()
             .sense(egui::Sense::click()),
         )
-        .on_hover_text("Play");
+        .on_hover_text_at_pointer("Play");
 
     let cell = |ui: &mut egui::Ui, w: f32, text: &str| {
         ui.add_sized(
@@ -187,7 +202,7 @@ fn draw_file_row(
     );
     let add_clicked = row
         .add(egui::Button::new("+").small().frame(false))
-        .on_hover_text("Add to playlist")
+        .on_hover_text_at_pointer("Add to playlist")
         .clicked();
 
     if title_resp.clicked() {
@@ -199,11 +214,319 @@ fn draw_file_row(
     }
 }
 
+/// One remote file row in the Network browser: name + size + `+`. Returns
+/// (play_clicked, add_clicked); the caller builds the `smb://` URI.
+fn draw_remote_file_row(
+    ui: &mut egui::Ui,
+    theme: &theme::Theme,
+    row_h: f32,
+    i: usize,
+    name: &str,
+    size: u64,
+) -> (bool, bool) {
+    let p = theme.palette;
+    let (rect, mut row) = theme::row(ui, i, false, row_h, theme);
+    row.spacing_mut().item_spacing.x = 4.0;
+    let name_resp = row
+        .add_sized(
+            egui::vec2((rect.width() - 66.0).max(40.0), row_h),
+            egui::Label::new(
+                egui::RichText::new(name).color(p.text_primary.gamma_multiply(0.85)),
+            )
+            .truncate()
+            .sense(egui::Sense::click()),
+        )
+        .on_hover_text_at_pointer("Play");
+    row.add_sized(
+        egui::vec2(48.0, row_h),
+        egui::Label::new(egui::RichText::new(network::fmt_size(size)).small().color(p.text_secondary)),
+    );
+    let add_clicked = row
+        .add(egui::Button::new("+").small().frame(false))
+        .on_hover_text_at_pointer("Add to playlist")
+        .clicked();
+    (name_resp.clicked(), add_clicked)
+}
+
+/// The remote browser: swaps the main column when a server is selected.
+/// Breadcrumb (Local / host / share / dir) + playlist-style rows with
+/// `..`/folder descent, click-to-play and `+` for audio files.
+fn remote_list_ui(app: &mut TPlayApp, ui: &mut egui::Ui) {
+    let Some(browse) = app.network().browse().cloned() else { return };
+    let theme = app.theme().clone();
+    let p = theme.palette;
+    let folder_tex = app.theme_icon(theme::Icon::Folder).cloned();
+
+    // Breadcrumb segments: (label, uri, share, rel). "Local" is the exit.
+    let mut segs: Vec<(String, String, Option<String>, String)> =
+        vec![(String::from("Local"), String::new(), None, String::new())];
+    segs.push((
+        browse.host.clone(),
+        network::server_uri(&browse.host),
+        None,
+        String::new(),
+    ));
+    if let Some(share) = &browse.share {
+        segs.push((
+            share.clone(),
+            network::share_uri(&browse.host, share),
+            Some(share.clone()),
+            String::new(),
+        ));
+        if !browse.rel.is_empty() {
+            let mut walk = String::new();
+            for part in browse.rel.split('/') {
+                if !walk.is_empty() {
+                    walk.push('/');
+                }
+                walk.push_str(part);
+                segs.push((
+                    part.to_string(),
+                    network::dir_uri(&browse.host, share, &walk),
+                    Some(share.clone()),
+                    walk.clone(),
+                ));
+            }
+        }
+    }
+
+    ui.horizontal(|ui| {
+        for (i, (label, uri, share, rel)) in segs.iter().enumerate() {
+            let last = i + 1 == segs.len();
+            if last {
+                ui.label(egui::RichText::new(label).strong().color(p.text_primary));
+                continue;
+            }
+            let w = (label.chars().count() as f32 * 8.0 + 6.0).min(70.0);
+            let clicked = ui
+                .add_sized(
+                    egui::vec2(w, 18.0),
+                    egui::Label::new(
+                        egui::RichText::new(label).small().color(p.text_secondary),
+                    )
+                    .truncate()
+                    .sense(egui::Sense::click()),
+                )
+                .clicked();
+            ui.label(egui::RichText::new("/").small().color(p.text_secondary));
+            if clicked {
+                if i == 0 {
+                    app.network_mut().leave_network();
+                } else if share.is_none() {
+                    app.network_mut().browse_server(browse.host.clone());
+                } else {
+                    app.network_mut().browse_open(uri.clone(), share.clone(), rel.clone());
+                }
+            }
+        }
+    });
+
+    ui.add_space(4.0);
+    let scroll_h = (ui.available_height() - 24.0).max(40.0);
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .max_height(scroll_h)
+        .show(ui, |ui| {
+            let row_h = 24.0;
+            if browse.busy {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(egui::RichText::new("Connecting…").small().color(p.text_secondary));
+                });
+                return;
+            }
+            if let Some(err) = &browse.error {
+                // SessionSetup is where a server rejects the *identity*, so a
+                // bare NTSTATUS is not actionable — ask for the credentials
+                // here instead, with the saved address already filled in.
+                if err.contains("LOGON_FAILURE") || err.contains("ACCESS_DENIED") {
+                    login_form_ui(app, ui, &browse);
+                } else {
+                    ui.label(egui::RichText::new(err).small().color(p.text_secondary));
+                    ui.label(
+                        egui::RichText::new("Check the address, username/password, and that the share allows access.")
+                            .small()
+                            .color(p.text_secondary),
+                    );
+                }
+                return;
+            }
+
+            let mut i = 0usize;
+            // Up: dir → parent, share root → shares list, shares → Local.
+            if draw_dir_row(ui, &theme, row_h, i, "..", folder_tex.as_ref()) {
+                if browse.share.is_none() {
+                    app.network_mut().leave_network();
+                } else if browse.rel.is_empty() {
+                    app.network_mut().browse_server(browse.host.clone());
+                } else {
+                    let up_rel = browse.rel[..browse.rel.rfind('/').unwrap_or(0)].to_string();
+                    let share = browse.share.clone().unwrap_or_default();
+                    app.network_mut().browse_open(
+                        network::dir_uri(&browse.host, &share, &up_rel),
+                        Some(share),
+                        up_rel,
+                    );
+                }
+            }
+            i += 1;
+
+            // Dirs first, then audio files, each name-sorted.
+            let mut dirs: Vec<&network::RemoteEntry> = browse.entries.iter().filter(|e| e.is_dir).collect();
+            let mut files: Vec<&network::RemoteEntry> = browse.entries.iter().filter(|e| !e.is_dir).collect();
+            dirs.sort_by_key(|e| e.name.to_lowercase());
+            files.sort_by_key(|e| e.name.to_lowercase());
+            for e in dirs {
+                if draw_dir_row(ui, &theme, row_h, i, &e.name, folder_tex.as_ref()) {
+                    let (uri, share, rel) = network::child_browse(
+                        &browse.host,
+                        browse.share.as_deref(),
+                        &browse.rel,
+                        &e.name,
+                    );
+                    app.network_mut().browse_open(uri, share, rel);
+                }
+                i += 1;
+            }
+            for e in files {
+                if !library::is_audio(Path::new(&e.name)) {
+                    i += 1;
+                    continue;
+                }
+                let share = browse.share.clone().unwrap_or_default();
+                let dir = network::dir_uri(&browse.host, &share, &browse.rel);
+                let uri = network::child_uri(&dir, &e.name);
+                let (play, add) = draw_remote_file_row(ui, &theme, row_h, i, &e.name, e.size);
+                if play {
+                    app.play_file(PathBuf::from(&uri));
+                }
+                if add {
+                    app.add_files(vec![PathBuf::from(&uri)]);
+                }
+                i += 1;
+            }
+            if i <= 1 {
+                ui.label(egui::RichText::new("No audio files").small().color(p.text_secondary));
+            }
+        });
+}
+
+/// Credential prompt for a server that rejected our identity.
+///
+/// Deliberately in the **main** pane, not the sidebar: the address is already
+/// known and saved, so only the login should ever need retyping. The username is
+/// persisted with the server; the password stays in the session map only.
+fn login_form_ui(app: &mut TPlayApp, ui: &mut egui::Ui, browse: &network::NetworkBrowse) {
+    let host = browse.host.clone();
+    let theme = app.theme().clone();
+    let p = theme.palette;
+    // Keyed per host, so each saved server keeps the username it was given and
+    // a revisit prefills it instead of starting blank.
+    let id = egui::Id::new((NET_LOGIN, host.as_str()));
+    let saved_user = app
+        .network()
+        .servers()
+        .iter()
+        .find(|s| s.host == host)
+        .map(|s| s.username.clone())
+        .unwrap_or_default();
+    let mut creds = ui.ctx().memory_mut(|m| {
+        m.data
+            .get_temp::<(String, String)>(id)
+            .unwrap_or_else(|| (saved_user.clone(), String::new()))
+    });
+
+    ui.label(
+        egui::RichText::new(format!("Login required for {host}"))
+            .small()
+            .strong()
+            .color(p.accent),
+    );
+    ui.label(
+        egui::RichText::new(
+            "The server rejected the anonymous login. A blank username is not a guest account.",
+        )
+        .small()
+        .color(p.text_secondary),
+    );
+    ui.add_space(4.0);
+
+    // Enter in either field submits (TextEdit surrenders focus on Enter).
+    let mut enter = false;
+    let field_w = 220.0;
+    let mut field = ui.add_sized(
+        egui::vec2(field_w, 18.0),
+        egui::TextEdit::singleline(&mut creds.0)
+            .hint_text("username")
+            .desired_width(field_w)
+            .clip_text(true),
+    );
+    if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        enter = true;
+    }
+    field = ui.add_sized(
+        egui::vec2(field_w, 18.0),
+        egui::TextEdit::singleline(&mut creds.1)
+            .password(true)
+            .hint_text("password")
+            .desired_width(field_w)
+            .clip_text(true),
+    );
+    if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        enter = true;
+    }
+
+    let mut connect = false;
+    ui.horizontal(|ui| {
+        if ui.add(egui::Button::new("Connect").small()).clicked() {
+            connect = true;
+        }
+        if ui.add(egui::Button::new("Cancel").small()).clicked() {
+            app.network_mut().leave_network();
+        }
+    });
+    if !connect && enter {
+        connect = true;
+    }
+    if connect {
+        let (user, pass) = (creds.0.clone(), creds.1.clone());
+        // Username goes to the saved server (persisted); the password only ever
+        // reaches the session map — never config.json.
+        app.add_network_server(host.clone(), user);
+        app.set_network_password(host.clone(), pass);
+        // Retry the stage we were actually on, so a login deep inside a share
+        // does not bounce the user back out to the share list.
+        match &browse.share {
+            Some(share) => {
+                let rel = browse.rel.clone();
+                app.network_mut().browse_open(
+                    network::dir_uri(&host, share, &rel),
+                    Some(share.clone()),
+                    rel,
+                );
+            }
+            None => app.network_mut().browse_server(host.clone()),
+        }
+    }
+    ui.ctx().memory_mut(|m| m.data.insert_temp(id, creds));
+}
+
 pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
     let theme = app.theme().clone();
     let p = theme.palette;
     let layout = theme.layout.with_defaults();
 
+    // Network mode swaps the main column for the remote browser; the local
+    // header + search only apply to the local folder browser (the Places
+    // column below stays in both modes).
+    let network_mode = app.network().browse().is_some();
+    let folder_tex = app.theme_icon(theme::Icon::Folder).cloned();
+    // Search filter state lives in egui memory, so it survives a network
+    // browse detour; the widget itself only renders in local mode.
+    let mut q = ui
+        .ctx()
+        .memory_mut(|m| m.data.get_temp::<String>(egui::Id::new(LIB_QUERY)).unwrap_or_default());
+    if !network_mode {
     // First frame this session: list the saved/current dir and start the scan.
     if !ui.ctx().memory_mut(|m| m.data.get_temp::<bool>(egui::Id::new(LIB_INIT)).unwrap_or(false)) {
         ui.ctx().memory_mut(|m| m.data.insert_temp(egui::Id::new(LIB_INIT), true));
@@ -212,7 +535,6 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
 
     // Header: breadcrumb to the current dir (clickable ancestors) + favorite
     // toggle; composition counts + Add All on the right.
-    let folder_tex = app.theme_icon(theme::Icon::Folder).cloned();
     let (n_tracks, n_dirs, n_playlists) = {
         let mut c = (0usize, 0usize, 0usize);
         for e in app.library_entries() {
@@ -321,28 +643,51 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
     });
 
     // Search filter over the current folder's rows.
-    let mut q = ui
-        .ctx()
-        .memory_mut(|m| m.data.get_temp::<String>(egui::Id::new(LIB_QUERY)).unwrap_or_default());
-    let query = {
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Search").small().color(p.text_secondary));
-            ui.add(
-                egui::TextEdit::singleline(&mut q)
-                    .hint_text("title, artist, album…")
-                    .desired_width(220.0),
-            );
-        });
-        q.trim().to_lowercase()
-    };
-    ui.ctx().memory_mut(|m| m.data.insert_temp(egui::Id::new(LIB_QUERY), q));
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Search").small().color(p.text_secondary));
+        ui.add(
+            egui::TextEdit::singleline(&mut q)
+                .hint_text("title, artist, album…")
+                .desired_width(220.0),
+        );
+    });
+    ui.ctx().memory_mut(|m| m.data.insert_temp(egui::Id::new(LIB_QUERY), q.clone()));
+    }
+    let query = q.trim().to_lowercase();
 
     ui.add_space(4.0);
 
+    // Add-server form state (just the host) in egui memory — carried across
+    // frames. Credentials are prompted for in the main pane instead, so a saved
+    // address can be reused without retyping it.
+    let mut form = ui.ctx().memory_mut(|m| {
+        m.data.get_temp::<Option<String>>(egui::Id::new(NET_FORM)).unwrap_or(None)
+    });
+
     // Places + Favorites column, file browser column.
     ui.horizontal_top(|ui| {
-        ui.vertical(|ui| {
-            ui.set_min_width(120.0);
+        // The Places/Favorites column is a FIXED 120px sidebar. Two egui facts
+        // force this exact shape:
+        //
+        // 1. Not `ui.vertical` + `set_min_width`: a `ui.vertical` child is sized
+        //    by its own `min_rect`, and `TextEdit` deliberately grows that by
+        //    the text overflow ("allocate additional space … so a ScrollArea can
+        //    scroll to the cursor"). This ScrollArea is vertical-only, so its
+        //    width *is* the content width and the overflow propagated up —
+        //    typing a long address widened the whole sidebar. `set_max_width`
+        //    and `clip_text` cannot stop it: caps bound painting, but the
+        //    overflow grows `min_rect`, and `min_rect` wins the layout.
+        // 2. `ui.new_child` alone does NOT advance this horizontal cursor (only
+        //    `allocate_new_ui` does), so the file-list sibling was laid out at
+        //    the same x and drew on top of the sidebar. `allocate_space`
+        //    reserves the rect *and* moves the cursor — both halves needed.
+        let (_, sidebar_rect) = ui.allocate_space(egui::vec2(SIDEBAR_W, ui.available_height()));
+        let mut sidebar = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(sidebar_rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        sidebar.vertical(|ui| {
             let scroll_h = (ui.available_height() - 8.0).max(40.0);
             // id_salt: without it this would share the default "scroll_area"
             // persistent id with the file list's ScrollArea (sibling column
@@ -376,7 +721,7 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                                     .truncate()
                                     .sense(egui::Sense::click()),
                                 )
-                                .on_hover_text(path.display().to_string())
+                                .on_hover_text_at_pointer(path.display().to_string())
                                 .clicked()
                             {
                                 jump = Some(path.clone());
@@ -403,11 +748,128 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                                     .truncate()
                                     .sense(egui::Sense::click()),
                                 )
-                                .on_hover_text(vol.path.display().to_string())
+                                .on_hover_text_at_pointer(vol.path.display().to_string())
                                 .clicked()
                             {
                                 jump = Some(vol.path.clone());
                             }
+                        }
+                        ui.add_space(8.0);
+                    }
+
+                    // Network: built-in SMB browsing (no mount required).
+                        {
+                            let servers = app.network().servers().to_vec();
+                            let active_host = app.network().browse().map(|b| b.host.clone());
+                            // Same LTR row style as the section labels above — a
+                            // right_to_left header would fill the scroll area's
+                            // (unbounded) content width and push the + past the
+                            // 120px sidebar.
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("Network").small().strong().color(p.text_secondary));
+                                if ui.add(egui::Button::new("+").small()).on_hover_text("Add server").clicked() {
+                                    // is_none + assign: `Option::or` would move `form` out of this scope.
+                                    if form.is_none() {
+                                        form = Some(String::new());
+                                    }
+                                }
+                            });
+                        if let Some(host) = form.as_mut() {
+                            // Enter submits (singleline TextEdit surrenders focus
+                            // on Enter — the standard pattern).
+                            let mut enter = false;
+                            let mut submit: Option<bool> = None; // Some(true) = Add, Some(false) = Cancel
+                            // The form lives in a FIXED-RECT child so egui's TextEdit
+                            // overflow allocation ("allocate additional space … so a
+                            // ScrollArea can properly scroll to the cursor") cannot
+                            // widen the scroll content — that growth is what kept
+                            // dragging the sidebar's scrollbar around while typing.
+                            //
+                            // Both halves are load-bearing and they are *different*
+                            // halves: `allocate_space` reserves the rect AND advances
+                            // the layout cursor (a bare `new_child` would leave the
+                            // next row drawn on top of the form), while the raw
+                            // `new_child` does NOT propagate its own min_rect to the
+                            // scroll content, which is what contains the overflow.
+                            // `clip_text` alone is not enough — it pins the field rect
+                            // but the overflow allocation still grows the parent.
+                            let gap = ui.spacing().item_spacing.y;
+                            let form_h = FORM_FIELD_H + gap + ui.spacing().interact_size.y;
+                            let (_, form_rect) = ui.allocate_space(egui::vec2(FORM_W, form_h));
+                            let mut form_ui = ui.new_child(
+                                egui::UiBuilder::new()
+                                    .max_rect(form_rect)
+                                    .layout(egui::Layout::top_down(egui::Align::Min)),
+                            );
+                            form_ui.vertical(|ui| {
+                                let field = ui.add_sized(egui::vec2(FORM_W, FORM_FIELD_H), egui::TextEdit::singleline(host).hint_text("host or smb://host/share").clip_text(true))
+                                    .on_hover_text("like 192.168.1.50 — ask for the login in the main pane");
+                                if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                    enter = true;
+                                }
+                                ui.horizontal(|ui| {
+                                    if ui.add(egui::Button::new("Add").small()).clicked() {
+                                        submit = Some(true);
+                                    }
+                                    if ui.add(egui::Button::new("Cancel").small()).clicked() {
+                                        submit = Some(false);
+                                    }
+                                });
+                            });
+                            if submit.is_none() && enter {
+                                submit = Some(true);
+                            }
+                            match submit {
+                                Some(true) => {
+                                    // The field accepts a bare host OR a full
+                                    // `smb://host/share[/dir]` URI. Parsing it
+                                    // keeps the full URI out of the saved-server
+                                    // list and drops us straight into the share
+                                    // when one is named — the GNOME-Files path,
+                                    // which never enumerates shares first.
+                                    // Only the host is stored; credentials are asked
+                                    // for in the main pane, so a saved server can be
+                                    // reused without retyping its address.
+                                    if let Some((h, share, rel)) = network::parse_server_input(host) {
+                                        app.add_network_server(h.clone(), String::new());
+                                        form = None;
+                                        if let Some(share) = share.filter(|s| !s.is_empty()) {
+                                            app.network_mut().browse_open(
+                                                network::dir_uri(&h, &share, &rel),
+                                                Some(share),
+                                                rel,
+                                            );
+                                        }
+                                    }
+                                }
+                                Some(false) => form = None,
+                                None => {}
+                            }
+                            ui.add_space(4.0);
+                        }
+                        for s in servers {
+                            ui.horizontal(|ui| {
+                                let active = active_host.as_ref() == Some(&s.host);
+                                if ui
+                                    .add_sized(
+                                        egui::vec2(88.0, 18.0),
+                                        egui::Label::new(
+                                            egui::RichText::new(&s.host)
+                                                .color(if active { p.accent } else { p.text_secondary })
+                                                .font(egui::FontId::new(layout.text_meta, theme.metadata_font.clone())),
+                                        )
+                                        .truncate()
+                                        .sense(egui::Sense::click()),
+                                    )
+                                    .on_hover_text_at_pointer("Browse shares")
+                                    .clicked()
+                                {
+                                    app.network_mut().browse_server(s.host.clone());
+                                }
+                                if theme::icon_button(ui, app.theme_icon(theme::Icon::Remove), theme::Icon::Remove, 13.0, true, false).clicked() {
+                                    app.remove_network_server(&s.host);
+                                }
+                            });
                         }
                         ui.add_space(8.0);
                     }
@@ -439,12 +901,17 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                         });
                     }
                     if let Some(dir) = jump {
+                        // Entering a local folder exits network browse mode.
+                        app.network_mut().leave_network();
                         app.navigate_to(dir);
                     }
                 });
         });
         ui.separator();
         ui.vertical(|ui| {
+            if network_mode {
+                remote_list_ui(app, ui);
+            } else {
             // Sortable column header only when the folder has audio files —
             // folders/playlists-only rows have no tag columns to align to.
             let has_audio = app
@@ -574,6 +1041,8 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
             if app.library_scanning() {
                 ui.label(egui::RichText::new("Scanning…").small().color(p.text_secondary));
             }
+            }
         });
     });
+    ui.ctx().memory_mut(|m| m.data.insert_temp(egui::Id::new(NET_FORM), form));
 }
