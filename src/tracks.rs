@@ -18,29 +18,106 @@
 //! whatever base it is given. `library::read_playlist` is the one place that
 //! still branches on `is_remote` itself, because there the question really is
 //! about path semantics.
+//!
+//! ## The rule this module exists to enforce
+//!
+//! **The app holds one path per track, and never learns that a local path
+//! exists.** Everything below takes a track id and returns the *thing asked
+//! for* — a `File`, a `TrackInfo`, a duration, art bytes — never a resolved
+//! path to pass along.
+//!
+//! The earlier shape resolved in the app and passed the pair around
+//! (`load_file_as(local, display)`), which satisfied a weaker, greppable rule
+//! ("no `is_remote` in `app.rs`") while actually being the bug's shape: two
+//! paths for one track, correct only if the caller does not swap them. It did
+//! get swapped — `TPlayApp::play()` handed an `smb://` URI to
+//! `File::open`, and the crossfade arm did the same through a builder that
+//! `.expect()`ed. Passing a pair is not agnostic; it is the source distinction
+//! wearing a disguise. So the resolution lives here and the pair is gone.
+//!
+//! The greppable form of the rule: `app.rs` and `src/gui/` never call
+//! `File::open` / `read_info` / `probe_duration` / `read_cover` on a track id,
+//! and never bind a resolved path. They use `open` / `info` / `probe` /
+//! `cover` / `is_ready` below.
 
+use crate::audio;
 use crate::library::{self, TrackInfo};
 use crate::network;
 use std::collections::HashMap;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::time::Duration;
+
+// ── Reading a track ──────────────────────────────────────────────────────────
+
+/// Open `track`'s file for decoding, or `None` if it has no bytes on hand.
+///
+/// Resolves internally, which is the point: a caller that passes a raw id to
+/// `File::open` gets an `smb://` URI, and a remote track has no file at its URI.
+pub fn open(track: &Path) -> Option<File> {
+    open_in(track, &network::spool_dir())
+}
+
+/// `open` against an injected spool dir.
+pub fn open_in(track: &Path, dir: &Path) -> Option<File> {
+    local_file_in(track, dir).and_then(|p| File::open(p).ok())
+}
+
+/// `track`'s tags and duration, read from its file. `None` if it has no bytes
+/// on hand; a file with no tags is `Some` with blank fields, which is a final
+/// answer and not a missing one (see `TagReader::absorb`).
+pub fn info(track: &Path) -> Option<TrackInfo> {
+    info_in(track, &network::spool_dir())
+}
+
+/// `info` against an injected spool dir.
+pub fn info_in(track: &Path, dir: &Path) -> Option<TrackInfo> {
+    local_file_in(track, dir).as_deref().and_then(library::read_info)
+}
+
+/// `track`'s duration, probed from its file. `None` if it has no bytes on hand
+/// or the format does not yield a duration.
+pub fn probe(track: &Path) -> Option<Duration> {
+    probe_in(track, &network::spool_dir())
+}
+
+/// `probe` against an injected spool dir.
+pub fn probe_in(track: &Path, dir: &Path) -> Option<Duration> {
+    local_file_in(track, dir).as_deref().and_then(audio::probe_duration)
+}
+
+/// `track`'s embedded album art, read from its file. `None` if it has no bytes
+/// on hand or carries no picture.
+pub fn cover(track: &Path) -> Option<Vec<u8>> {
+    cover_in(track, &network::spool_dir())
+}
+
+/// `cover` against an injected spool dir.
+pub fn cover_in(track: &Path, dir: &Path) -> Option<Vec<u8>> {
+    local_file_in(track, dir).as_deref().and_then(library::read_cover)
+}
+
+/// Can `track`'s bytes be opened synchronously — the pre-buffer question.
+///
+/// A predicate rather than a path, so a caller asking it has no way to keep the
+/// resolved path and pass it somewhere it should not go. See `local_file_now`
+/// for why this is not simply `open(...).is_some()`.
+pub fn is_ready(track: &Path) -> bool {
+    local_file_now(track).is_some()
+}
 
 // ── Resolving a track to bytes on disk ───────────────────────────────────────
 
-/// The local file to read for `track`, for code that needs real **bytes**
-/// rather than a playlist entry — album art, a decoder, a probe.
+/// The local file behind `track`: a remote track's spool-cache copy, or `None`
+/// when it has not been spooled yet. A local path comes back unchanged
+/// **whether or not it exists**, so a track that is mid-load still resolves and
+/// the reader reports its own failure rather than being silently skipped.
 ///
-/// A remote track has no file at its URI: there is nothing on disk named
-/// `smb://…`. So a remote track resolves to its spool-cache copy, and `None`
-/// when it has not been spooled yet — there is genuinely nothing local to read.
-/// A local path comes back unchanged **whether or not it exists**, so a track
-/// that is mid-load still resolves and the caller's own error handling decides
-/// what a missing file means.
-pub fn local_file(track: &Path) -> Option<PathBuf> {
-    local_file_in(track, &network::spool_dir())
-}
-
-/// `local_file` against an injected spool dir, so tests stay hermetic.
+/// This is the primitive every reader in this module is built on, and it is
+/// `pub` only so tests can inject a spool dir (`local_file_in`). Callers outside
+/// this module should use `open`/`info`/`probe`/`cover`/`is_ready` and never see
+/// a resolved path at all.
 pub fn local_file_in(track: &Path, dir: &Path) -> Option<PathBuf> {
     if !network::is_remote(track) {
         return Some(track.to_path_buf());
@@ -49,17 +126,21 @@ pub fn local_file_in(track: &Path, dir: &Path) -> Option<PathBuf> {
     local.is_file().then_some(local)
 }
 
-/// The local file for `track` **if it is readable right now** — the
-/// pre-buffer question, i.e. can this track be opened synchronously.
+/// The local file for `track` **if it is readable right now** — the pre-buffer
+/// question, i.e. can this track be opened synchronously.
 ///
-/// Deliberately separate from `local_file`, which answers a different question.
-/// For a *local* track that has no file yet (mid-load, or deleted off disk) the
-/// two disagree: art should still be attempted, because the track's identity is
-/// known and the caller reports a read failure in its own terms, whereas
-/// pre-buffering has nothing to open and must wait. Collapsing them into one
-/// function would blank the album art of every track that fails to open, and
-/// turn "there is no file to pre-buffer" into "this is a remote track".
-pub fn local_file_now(track: &Path) -> Option<PathBuf> {
+/// Deliberately separate from `local_file_in`, which answers a different
+/// question. For a *local* track that has no file yet (mid-load, or deleted off
+/// disk) the two disagree: art and tags should still be attempted, because the
+/// track's identity is known and the reader reports the failure in its own
+/// terms, whereas pre-buffering has nothing to open and must wait. Collapsing
+/// them would blank the art and tags of every track that fails to open, and turn
+/// "there is no file to pre-buffer" into "this is a remote track".
+///
+/// Private because `is_ready` is its public form: a caller asking the
+/// pre-buffer question wants a yes/no, not a path it could pass somewhere it
+/// should not.
+fn local_file_now(track: &Path) -> Option<PathBuf> {
     local_file_now_in(track, &network::spool_dir())
 }
 

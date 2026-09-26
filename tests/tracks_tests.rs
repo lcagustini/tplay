@@ -1,14 +1,21 @@
 //! `tplay::tracks` — the source-agnostic track surface.
 //!
 //! These are the decisions the app used to make inline with `is_remote`
-//! branches, so they are pure and headless-testable here. The two things worth
+//! branches, so they are pure and headless-testable here. The three things worth
 //! knowing before reading:
 //!
 //! * The spool dir is **injected**, never the real `dirs::cache_dir()`, so every
-//!   test is hermetic and two tests can run in parallel without colliding.
-//! * `local_file` and `local_file_now` are separate functions on purpose. They
+//!   test is hermetic and two tests can run in parallel without colliding. The
+//!   public `open`/`info`/`probe`/`cover` are one-line wrappers over their
+//!   injected `_in` forms, so these are the functions actually exercised.
+//! * `local_file_in` and `local_file_now_in` are separate on purpose. They
 //!   differ for exactly one case — a local track with no file on disk — and
-//!   collapsing them is the mistake these tests exist to prevent.
+//!   collapsing them is the mistake these tests exist to prevent: it would blank
+//!   the art and tags of every track that fails to open, and make the pre-buffer
+//!   check read "no file" as "remote".
+//! * The readers take a track **id**, and a remote id must work exactly like a
+//!   local one. That is the regression guard for the crossfade crash: the arm
+//!   used to hand an `smb://` URI to `File::open`, which panicked.
 
 use tplay::library::TrackInfo;
 use tplay::network::{self, Network};
@@ -259,6 +266,75 @@ fn tag_reader_requests_then_drains_and_clears() {
 
     // A cached track is never re-requested, so this must not start a scan.
     assert!(!reader.request(&cache, &mut net, &paths), "cached tracks must be skipped");
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The readers resolve internally, so a **remote track id works everywhere a
+/// local one does** — that is the whole point of the one-surface rule, and it is
+/// the direct regression guard for the crash this module was written after: the
+/// crossfade arm used to hand an `smb://` URI to `File::open`, which panicked.
+///
+/// Every reader is checked against a remote id, because "resolves for local" is
+/// the half that already worked.
+#[test]
+fn readers_work_on_a_remote_track_id() {
+    let dir = common::test_dir("readers_work_on_a_remote_track_id");
+    let uri = "smb://nas/media/song.wav";
+    let cached = network::cache_path_in(uri, &dir);
+    std::fs::write(&cached, b"placeholder").unwrap();
+    let track = Path::new(uri);
+
+    // The cache copy exists but is not audio. `open` only opens, so it succeeds —
+    // the decode is the caller's `Decoder::try_from` job. The readers that must
+    // parse bytes report the failure themselves, rather than the caller finding
+    // out by handing an `smb://` URI to something that opens a path.
+    assert!(tracks::open_in(track, &dir).is_some(), "open resolves to the cache copy, decode is separate");
+    assert!(tracks::info_in(track, &dir).is_none(), "undecodable bytes yield no tags");
+    assert!(tracks::probe_in(track, &dir).is_none(), "undecodable bytes yield no duration");
+
+    // Now put a real WAV where the cache says it should be.
+    let real = dir.join("real.wav");
+    common::write_wav(&real);
+    std::fs::copy(&real, &cached).unwrap();
+
+    assert!(tracks::open_in(track, &dir).is_some(), "a cached remote track must open");
+    assert_eq!(
+        tracks::probe_in(track, &dir),
+        Some(Duration::from_secs(1)),
+        "a cached remote track must report a real duration"
+    );
+    let info = tracks::info_in(track, &dir).expect("a cached remote track must yield tags");
+    common::assert_duration_approx(info.duration, Duration::from_secs(1), "remote duration");
+
+    // An id that resolves to nothing at all.
+    let missing = "smb://nas/media/gone.wav";
+    assert!(tracks::open_in(Path::new(missing), &dir).is_none());
+    assert!(tracks::info_in(Path::new(missing), &dir).is_none());
+    assert!(tracks::probe_in(Path::new(missing), &dir).is_none());
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The pre-buffer question, through the primitive behind `is_ready`. `is_ready`
+/// itself returns a yes/no precisely so a caller cannot hold the resolved path
+/// and open it somewhere it should not — that pair is what caused the crash.
+#[test]
+fn readiness_is_about_availability_not_source() {
+    let dir = common::test_dir("readiness_is_availability");
+    let present = dir.join("present.wav");
+    common::write_wav(&present);
+
+    assert!(tracks::local_file_now_in(&present, &dir).is_some(), "a present local file is ready");
+    assert!(tracks::local_file_now_in(&dir.join("gone.wav"), &dir).is_none(), "a missing one is not");
+
+    let uri = "smb://nas/media/song.wav";
+    assert!(tracks::local_file_now_in(Path::new(uri), &dir).is_none(), "uncached is not ready");
+    std::fs::write(network::cache_path_in(uri, &dir), b"audio").unwrap();
+    assert!(
+        tracks::local_file_now_in(Path::new(uri), &dir).is_some(),
+        "a cached remote track IS ready — this is what lets it crossfade"
+    );
 
     std::fs::remove_dir_all(&dir).unwrap();
 }

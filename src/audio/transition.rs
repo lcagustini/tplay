@@ -33,31 +33,30 @@ pub fn fade_gains(p: f32) -> (f32, f32) {
     (angle.cos(), angle.sin())
 }
 
-/// Open a file and return a fully-wrapped decoder (EQ → Tap → Balance),
+/// Open a track's file and return a fully-wrapped decoder (EQ → Tap → Balance),
 /// *buffered* so decode happens off the audio thread.
 /// Used for the crossfade incoming track and gapless next track.
 ///
-/// Returns `None` if the file cannot be opened or decoded. This is called from
-/// `advance()` every frame, and a crossfade is a nicety: failing to pre-buffer
-/// must cost a gap, not the whole app. It previously `.expect()`ed, which meant
-/// an unreadable file aborted the process from inside a per-frame path.
+/// `track` is a track **id**, not a file path — for a remote track that is an
+/// `smb://` URI, and there is no file on disk by that name. Resolution goes
+/// through `tracks::open`, so this cannot be handed a URI and panic on it.
+///
+/// Returns `None` if the track has no bytes on hand, or they cannot be decoded.
+/// This is called from `advance()` every frame, and a crossfade is a nicety:
+/// failing to pre-buffer must cost a gap, not the whole app. It previously
+/// `.expect()`ed, which meant an unreadable file aborted the process from inside
+/// a per-frame path.
 pub fn build_gapless_next(
-    path: &std::path::Path,
+    track: &std::path::Path,
     eq_shared: Arc<RwLock<EqShared>>,
     balance: Arc<RwLock<f32>>,
     viz: VizBuf,
 ) -> Option<Box<dyn Source<Item = f32> + Send + 'static>> {
-    let file = match File::open(path) {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("tplay: gapless/crossfade: open {}: {e}", path.display());
-            return None;
-        }
-    };
+    let file = crate::tracks::open(track)?;
     let decoder = match Decoder::try_from(file) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("tplay: gapless/crossfade: decode {}: {e}", path.display());
+            eprintln!("tplay: gapless/crossfade: decode {}: {e}", track.display());
             return None;
         }
     };

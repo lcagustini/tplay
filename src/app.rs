@@ -10,7 +10,7 @@ use eframe::egui;
 use rodio::{cpal::BufferSize, Decoder, OutputStream, OutputStreamBuilder, Sink, Source};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs::{self, File};
+use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -450,7 +450,7 @@ impl TPlayApp {
     }
 
     /// Replace the sink with a fresh empty one — drops the old decoder/file.
-    /// Shared by `load_file_as` and the remote spool wait (which also pauses
+    /// Shared by `start_track` and the remote spool wait (which also pauses
     /// playback until the download lands).
     fn fresh_sink(&mut self) {
         self.cancel_xf();
@@ -461,30 +461,37 @@ impl TPlayApp {
         self.sink.set_volume(self.volume);
     }
 
-    /// Load a local file into the sink. `local` is the file to decode; `display`
-    /// is what Now Playing/the playlist should show — a remote `smb://` URI when
-    /// `local` is its spooled cache copy, the same path otherwise. Tags are
-    /// cache-keyed by `display` so panes (which look up by playlist path) match.
-    fn load_file_as(&mut self, local: PathBuf, display: PathBuf) {
+    /// Load a track's bytes into the sink. `track` is a track **id** — a local
+    /// path, or an `smb://` URI — and the only track identity the app carries.
+    /// Where the bytes actually are is `tracks`' problem, not this function's.
+    ///
+    /// Every read of a track's file goes through `tracks::{open, info, probe}`,
+    /// which resolve internally. This is deliberate and it is the whole rule:
+    /// an earlier version took `(local, display)` and let the caller resolve,
+    /// which put two paths for one track in circulation and made a swapped pair
+    /// a silent, app-killing bug — `File::open("smb://…")` fails quietly rather
+    /// than loudly. One parameter cannot be swapped.
+    fn start_track(&mut self, track: PathBuf) {
         // Cancel any live crossfade when a new track is loaded explicitly.
         self.fresh_sink();
 
         // Tag the loaded track up front so Now Playing shows title · artist
         // immediately instead of waiting on a scan (one file, negligible cost).
-        if let Some(info) = library::read_info(&local) {
-            self.tag_cache.insert(display.clone(), info);
+        // Keyed by the id, which is what every pane looks up by.
+        if let Some(info) = tracks::info(&track) {
+            self.tag_cache.insert(track.clone(), info);
         }
 
         // Open file once, create decoder, get total_duration.
-        let file = match File::open(&local) {
-            Ok(f) => f,
-            Err(e) => { eprintln!("tplay: open error: {e}"); self.current_path = None; self.total_duration = None; return; }
+        let file = match tracks::open(&track) {
+            Some(f) => f,
+            None => { eprintln!("tplay: no file for {}", track.display()); self.current_path = None; self.total_duration = None; return; }
         };
         let decoder = match Decoder::try_from(file) {
             Ok(d) => d,
             Err(e) => { eprintln!("tplay: decode error: {e}"); self.current_path = None; self.total_duration = None; return; }
         };
-        let total_duration = decoder.total_duration().or_else(|| audio::probe_duration(&local));
+        let total_duration = decoder.total_duration().or_else(|| tracks::probe(&track));
         self.total_duration = total_duration;
 
         // Always load the full track (no truncation, no pre-mix).
@@ -493,7 +500,7 @@ impl TPlayApp {
         let tap_source = audio::viz::TapSource::new(eq_source, self.viz.clone());
         let balance_source = audio::balance::BalanceSource::new(tap_source, Arc::clone(&self.balance));
         self.sink.append(balance_source);
-        self.current_path = Some(display);
+        self.current_path = Some(track);
     }
 
     /// Cancel any live crossfade/gapless: stop the xf sink and restore main volume.
@@ -581,18 +588,6 @@ impl TPlayApp {
         self.cancel_xf();
 
         let path = match self.current_path.clone() { Some(p) => p, None => return };
-        // The slow path reopens the file, so it needs the LOCAL path — for a
-        // remote track `current_path` is an `smb://` URI and there is no such
-        // file on disk, which made this return early and silently do nothing.
-        // `local_file_now` covers the ordinary case: a local track is its own
-        // path, a remote one is its spool-cache copy.
-        let local = match tracks::local_file_now(&path) {
-            Some(l) => l,
-            None => {
-                eprintln!("tplay: seek: no local file for {}", path.display());
-                return;
-            }
-        };
         let total_secs = match self.total_duration { Some(d) => d.as_secs_f32(), None => return };
         let target = Duration::from_secs_f32((progress * total_secs).max(0.0));
 
@@ -605,7 +600,11 @@ impl TPlayApp {
 
         let was_paused = self.sink.is_paused();
 
-        let file   = match File::open(&local)            { Ok(f) => f, Err(e) => { eprintln!("seek open: {e}");   return; } };
+        // The slow path reopens the track. It used to pass `path` straight to
+        // `File::open`, which for a remote track is an `smb://` URI — so seeking
+        // a track whose format cannot seek in place silently did nothing.
+        // `tracks::open` resolves, and the app never sees a local path.
+        let file   = match tracks::open(&path)             { Some(f) => f, None => { eprintln!("seek: no file for {}", path.display()); return; } };
         let source = match Decoder::try_from(file)         { Ok(s) => s, Err(e) => { eprintln!("seek decode: {e}"); return; } };
 
         self.sink = Sink::connect_new(self.output.mixer());
@@ -684,13 +683,18 @@ impl TPlayApp {
                     // and crossfade stop being a source-based rule and become the
                     // same data-availability rule local tracks already follow.
                     // Either way: skip the arm, and let natural advance handle it.
-                    // Everything below opens a FILE, so it must use the local
-                    // path — `next_path` is an `smb://` URI for a remote track
-                    // and there is no such file on disk. The URI stays the id:
-                    // it is what `current_path` and the `tag_cache` key on.
-                    let Some(next_local) = tracks::local_file_now(&next_path) else {
+                    // The pre-buffer question is "are this track's bytes on hand
+                    // right now", not "where did it come from". A local track
+                    // with no file on disk can't be pre-buffered, and neither
+                    // can a remote one that isn't in the spool cache yet — it
+                    // arrives later through the pending-spool path. A remote
+                    // track that IS cached pre-buffers like any other, so gapless
+                    // and crossfade stop being a source-based rule and become the
+                    // same data-availability rule local tracks already follow.
+                    // Either way: skip the arm, and let natural advance handle it.
+                    if !tracks::is_ready(&next_path) {
                         return;
-                    };
+                    }
                     // A track shorter than the hold/fade window drains muted
                     // before the swap (gapless) or mid-fade (crossfade) and
                     // would be promoted empty — silently skipped. Prefer a
@@ -712,7 +716,7 @@ impl TPlayApp {
                     // here is a gap, not a crash: `advance` returns and natural
                     // advance picks the track up a moment later.
                     let Some(xf_source) = transition::build_gapless_next(
-                        &next_local,
+                        &next_path,
                         Arc::clone(&self.eq_shared),
                         Arc::clone(&self.balance),
                         self.viz.clone(),
@@ -729,14 +733,14 @@ impl TPlayApp {
                     self.xf_sink = Some(xf_sink);
                     // Pre-flip the playlist metadata so Now Playing shows the new track.
                     self.current_index = Some(next_idx);
-                    // Tags and duration are read from the local file; the cache
-                    // entry is keyed by the URI so every pane still finds it.
-                    if let Some(info) = library::read_info(&next_local) {
+                    // Tags and duration come from the track's file; the cache
+                    // entry is keyed by the id, so every pane still finds it.
+                    if let Some(info) = tracks::info(&next_path) {
                         self.total_duration = info.duration;
                         self.tag_cache.insert(next_path.clone(), info);
                     }
                     if self.total_duration.is_none() {
-                        self.total_duration = audio::probe_duration(&next_local);
+                        self.total_duration = tracks::probe(&next_path);
                     }
                     self.current_path = Some(next_path);
                     self.seek_target = None;
@@ -797,7 +801,7 @@ impl TPlayApp {
             return;
         } else if let Some(path) = self.current_path.clone() {
             // Replay the current track. Goes through `play_now`, never
-            // `load_file_as`: `current_path` is an `smb://` URI for a remote
+            // `start_track`: `current_path` is an `smb://` URI for a remote
             // track, and opening that as a path always fails.
             self.play_now(path);
         } else if !self.playlist.is_empty() {
@@ -1225,13 +1229,15 @@ impl TPlayApp {
     /// split is deliberate: `play_file` (direct open) sets `None`, `start`
     /// (playlist flow) sets the index, and neither decision belongs in here.
     ///
-    /// The trap this function exists to kill: calling `load_file_as` directly
-    /// on a remote track does `File::open("smb://…")`, which always fails. A
-    /// caller that skips this path silently breaks playback rather than failing
-    /// loudly, so route every play through here.
+    /// The trap this function exists to kill: opening a track id directly on a
+    /// remote track does `File::open("smb://…")`, which always fails. A caller
+    /// that skips this path silently breaks playback rather than failing loudly,
+    /// so route every play through here — and note that a remote track is a
+    /// *ready* track whenever its spool copy exists, which is why this is not
+    /// two entry points.
     fn play_now(&mut self, track: PathBuf) {
-        if let Some(local) = tracks::local_file_now(&track) {
-            self.load_file_as(local, track);
+        if tracks::is_ready(&track) {
+            self.start_track(track);
         } else {
             // No bytes yet: stop the current track now (as loading would) and
             // clear current_path so Now Playing shows "Loading from server…"
@@ -1517,7 +1523,7 @@ impl eframe::App for TPlayApp {
         while let Some(ev) = self.network.drain() {
             match ev {
                 network::Event::Spooled { uri, result } => match result {
-                    Ok(local) => self.load_file_as(local, PathBuf::from(uri)),
+                    Ok(_) => self.start_track(PathBuf::from(uri)),
                     Err(e) => {
                         eprintln!("tplay: spool {uri} failed: {e}");
                         self.current_path = None;

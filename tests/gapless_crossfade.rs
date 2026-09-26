@@ -127,7 +127,7 @@ fn build_gapless_next_fails_instead_of_panicking() {
 
     // The `smb://` URI itself: the exact input that crashed the xf arm. It is
     // not a local path, so it cannot be opened. The caller's job is to hand over
-    // a resolved local file (`tracks::local_file_now`); if one ever gets here,
+    // a resolved local file (`tracks::open`); if one ever gets here,
     // the result is a skipped crossfade, not a dead app.
     let (eq_shared, balance, viz) = dummy_shared();
     assert!(
