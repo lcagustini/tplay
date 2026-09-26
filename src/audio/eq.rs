@@ -37,6 +37,94 @@ pub fn preset_for(gains: [f32; 10]) -> Option<&'static str> {
         .map(|(n, _)| *n)
 }
 
+/// Gain limits in dB, applied by `EqSettings::set_band`.
+pub const EQ_GAIN_MIN_DB: f32 = -12.0;
+pub const EQ_GAIN_MAX_DB: f32 = 12.0;
+
+/// The app's equalizer settings, owning the handle the audio source reads.
+///
+/// `EqSource` is constructed on the *GUI* thread during a track change and
+/// then read on the *audio* thread every frame, while the GUI writes gains as
+/// sliders move — so the state has to be an `Arc<RwLock<EqShared>>`. Holding
+/// that handle here rather than in `TPlayApp` keeps the presets, the clamping
+/// and the name derivation next to the filters they describe, and gives the
+/// seven `TPlayApp` accessors something to delegate to instead of each one
+/// reaching for the lock.
+///
+/// Setters report whether the value actually changed, so the caller can skip
+/// marking the config dirty when a drag re-sets the same number.
+pub struct EqSettings {
+    shared: Arc<RwLock<EqShared>>,
+}
+
+impl EqSettings {
+    pub fn new(enabled: bool, gains: [f32; 10]) -> Self {
+        Self {
+            shared: Arc::new(RwLock::new(EqShared { gains, enabled })),
+        }
+    }
+
+    /// A clone of the handle for `EqSource` to hold. Cloned, not lent: the
+    /// source outlives any borrow of `self`.
+    pub fn shared(&self) -> Arc<RwLock<EqShared>> {
+        Arc::clone(&self.shared)
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.shared.read().unwrap().enabled
+    }
+
+    pub fn gains(&self) -> [f32; 10] {
+        self.shared.read().unwrap().gains
+    }
+
+    /// Set one band's gain, clamped to the +/-12 dB the UI offers. An
+    /// out-of-range band index is ignored and reports no change.
+    pub fn set_band(&self, band: usize, gain_db: f32) -> bool {
+        if band >= EQ_FREQUENCIES.len() {
+            return false;
+        }
+        let clamped = gain_db.clamp(EQ_GAIN_MIN_DB, EQ_GAIN_MAX_DB);
+        let mut shared = self.shared.write().unwrap();
+        if (shared.gains[band] - clamped).abs() < f32::EPSILON {
+            return false;
+        }
+        shared.gains[band] = clamped;
+        true
+    }
+
+    /// Apply a named preset's gains, or `None` to leave them alone (the
+    /// ComboBox's "Custom" row, which is only a label for whatever the user
+    /// has already dialled in).
+    pub fn set_preset(&self, name: Option<&str>) -> bool {
+        let Some(name) = name else { return false };
+        let Some((_, gains)) = EQ_PRESETS.iter().find(|(n, _)| *n == name) else {
+            return false;
+        };
+        let mut shared = self.shared.write().unwrap();
+        if shared.gains == *gains {
+            return false;
+        }
+        shared.gains = *gains;
+        true
+    }
+
+    pub fn toggle(&self) {
+        let mut shared = self.shared.write().unwrap();
+        shared.enabled = !shared.enabled;
+    }
+
+    /// The preset the current gains match, or `None` for Custom. The ComboBox
+    /// holds a `None` option, so it needs the Option, not the label.
+    pub fn preset(&self) -> Option<&'static str> {
+        preset_for(self.gains())
+    }
+
+    pub fn preset_name(&self) -> &'static str {
+        self.preset().unwrap_or("Custom")
+    }
+}
+
 /// Live-controllable EQ state, shared between `TPlayApp` (writer) and `EqSource` (reader).
 /// Gains are in dB (-12..12); 0 dB is an exact identity filter.
 #[derive(Debug, Clone, Default)]

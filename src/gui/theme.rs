@@ -294,6 +294,62 @@ pub fn load_icons(
         .collect()
 }
 
+/// The selected theme, the list, and the loaded icon textures — one group.
+///
+/// These were three `TPlayApp` fields, and the awkward part was not the fields:
+/// it was `set_theme`, which had to know that switching a theme means
+/// re-decoding every icon texture, and did it inline. That coupling belongs
+/// next to `load_icons`, not in the app. `set` reports whether anything
+/// actually changed, so the caller can skip marking the config dirty.
+pub struct ThemeState {
+    current: Arc<Theme>,
+    themes: Themes,
+    icons: Vec<Option<TextureHandle>>,
+}
+
+impl ThemeState {
+    /// Load `themes` off disk and decode `id`'s icons. An unknown or missing id
+    /// falls back to the default theme, so the list is never empty (a broken
+    /// install still renders).
+    pub fn load(ctx: &egui::Context, themes: Themes, id: &str) -> Self {
+        let current = themes
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| themes.default().clone());
+        let icons = load_icons(ctx, &themes, &current);
+        Self { current, themes, icons }
+    }
+
+    /// The active theme — what `apply` maps onto egui `Visuals` each frame.
+    pub fn current(&self) -> &Arc<Theme> {
+        &self.current
+    }
+
+    /// Every loadable theme, for the Theme dropdown.
+    pub fn list(&self) -> &[Arc<Theme>] {
+        self.themes.list()
+    }
+
+    /// Texture for a pane icon in the current theme (falls back to the default
+    /// theme's), or `None` → the pane renders a unicode glyph.
+    pub fn icon(&self, icon: Icon) -> Option<&TextureHandle> {
+        self.icons.get(icon.index()).and_then(|t| t.as_ref())
+    }
+
+    /// Switch by id, re-decoding icons for the new palette. False for an
+    /// unknown id or a re-select of the current one — neither is worth a
+    /// re-decode, and neither should dirty the config.
+    pub fn set(&mut self, ctx: &egui::Context, id: &str) -> bool {
+        let Some(theme) = self.themes.get(id) else { return false };
+        if theme.id == self.current.id {
+            return false;
+        }
+        self.current = Arc::clone(theme);
+        self.icons = load_icons(ctx, &self.themes, &self.current);
+        true
+    }
+}
+
 /// Pane icons. Each maps to a `<theme>/icons/<name>.png` and a fallback glyph.
 /// Fallback glyphs must exist in the bundled egui font stack (Ubuntu-Light /
 /// NotoEmoji / emoji-icon-font) or they render as tofu boxes.

@@ -1,7 +1,6 @@
 //! App state and logic — no UI code here.
 
 use crate::audio;
-use crate::audio::eq::EQ_PRESETS;
 use crate::audio::transition;
 use crate::config;
 use crate::gui::theme::{self, Theme, Themes};
@@ -11,9 +10,8 @@ use crate::tracks;
 use eframe::egui;
 use rodio::{cpal::BufferSize, Decoder, OutputStream, OutputStreamBuilder, Sink, Source};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Tiny inline RNG (XorShift64) - replaces fastrand dependency.
@@ -91,23 +89,16 @@ pub struct TPlayApp {
     /// RNG state for shuffle (XorShift64).
     rng_state: u64,
 
-    /// Equalizer state — single source of truth shared with EqSource.
-    eq_shared: Arc<RwLock<audio::eq::EqShared>>,
+    /// Equalizer settings — owns the handle `EqSource` reads, plus the presets
+    /// and the +/-12 dB clamp. `audio::eq::EqSettings`.
+    eq: audio::eq::EqSettings,
     /// Visualization ring buffer — written by the tap source, read by the GUI.
     viz: audio::viz::VizBuf,
-    /// Visualizer pane view (index into `VizView::ALL`). Persisted in config.json.
-    viz_view: VizView,
 
-    /// Balance (L/R) — shared with BalanceSource (live, like EqShared).
-    balance: Arc<RwLock<f32>>,
-    /// Show remaining time instead of elapsed.
-    remaining: bool,
-    /// Gapless playback — pre-buffer the next track.
-    gapless: bool,
-    /// Crossfade playback — overlap tracks with a fade.
-    crossfade: bool,
-    /// Crossfade duration in seconds.
-    crossfade_secs: f32,
+    /// The user-tunable playback settings (viz view, remaining, gapless,
+    /// crossfade + duration, balance). `config::Prefs` owns them because they
+    /// map 1:1 onto `Config` fields; this app only ever sees the group.
+    prefs: config::Prefs,
     /// Crossfade sink — incoming track during overlap. When Some, the current
     /// track plays in `sink` and the next track plays in `xf_sink`; volumes
     /// are faded (crossfade) or held (gapless) per frame in `advance()`.
@@ -117,38 +108,30 @@ pub struct TPlayApp {
     /// the fade math needs the outgoing total saved separately.
     xf_out_total: Option<Duration>,
 
-    /// Theme (loaded from themes/ dirs), applied to egui visuals by the GUI layer.
-    theme: Arc<Theme>,
-    /// All loadable themes (Theme dropdown + icon fallback).
-    themes: Themes,
-    /// Current theme's icons, one `Option` per `Icon::ALL` slot (None → glyph).
-    icons: Vec<Option<egui::TextureHandle>>,
+    /// A setting changed since the last write; `flush_config` clears it.
+    config_dirty: bool,
+    /// `ctx` time of the last config.json write, for the debounce window.
+    last_config_save: f64,
+
+    /// Active theme + the loadable list + its decoded icons.
+    /// `gui::theme::ThemeState`.
+    theme: theme::ThemeState,
     /// Needed to (re)load icon textures on theme switch.
     ctx: egui::Context,
 
     // ── Library pane ──────────────────────────────────────────────────────
-    /// Directory currently browsed in the Library pane.
-    library_dir: PathBuf,
-    /// Rows of `library_dir`: subfolders + audio files in one list, sorted by
-    /// `library_sort`. Folders are untagged — Title treats them by name, the
-    /// tag columns sink them last.
-    library_entries: Vec<library::Entry>,
+    /// Browsed directory, its rows, the sort, the bookmarks and the
+    /// hidden-folder toggle — `library::LibraryState`. The app keeps only what
+    /// the state cannot own: the shared tag cache, which the Playlist and Now
+    /// Playing panes read too.
+    library: library::LibraryState,
     /// Shared tag/duration cache — any path ever scanned or played, used by
     /// the Library, Playlist, and Now Playing panes. Filenames stand in until
     /// a track's entry lands.
-    tag_cache: HashMap<PathBuf, library::TrackInfo>,
+    tag_cache: library::TagCache,
     /// Reads tags for any track into `tag_cache`, local or remote. Owns the
     /// local scan's receiver, so the app holds no mpsc plumbing.
     tracks: tracks::TagReader,
-    /// Bookmarked folders shown in the Library pane, persisted to disk.
-    favorite_dirs: Vec<PathBuf>,
-    /// Whether the Library lists dot-prefixed (hidden) subfolders. Default
-    /// off; toggled from the ☰ menu, persisted in config.json.
-    show_hidden: bool,
-    /// Library list sort: index into `library::SORT_OPTIONS` (0 = Title, the
-    /// default), plus direction. Set by header clicks.
-    library_sort: usize,
-    library_asc: bool,
 
     // ── SMB network ────────────────────────────────────────────────────────
     /// All network state (saved servers, session passwords, browse position,
@@ -176,11 +159,7 @@ impl TPlayApp {
             _ => OutputStreamBuilder::open_default_stream().expect("No audio output device found"),
         };
         let sink = Sink::connect_new(output.mixer());
-        let theme = themes
-            .get(&config.theme)
-            .cloned()
-            .unwrap_or_else(|| themes.default().clone());
-        let icons = theme::load_icons(&ctx, &themes, &theme);
+        let theme = theme::ThemeState::load(&ctx, themes, &config.theme);
 
         // SMB network: channels + worker are owned by `network::Network`.
         let mut app = Self {
@@ -201,31 +180,22 @@ impl TPlayApp {
             repeat: config.repeat,
             played: Vec::new(),
             rng_state: 0xC0FFEE, // arbitrary seed
-            eq_shared: Arc::new(RwLock::new(audio::eq::EqShared {
-                gains: config.eq.gains,
-                enabled: config.eq.enabled,
-            })),
+            eq: audio::eq::EqSettings::new(config.eq.enabled, config.eq.gains),
             viz: audio::viz::VizBuf::new(),
-            viz_view: config.viz_view,
-            balance: Arc::new(RwLock::new(config.balance)),
-            remaining: config.remaining,
-            gapless: config.gapless,
-            crossfade: config.crossfade,
-            crossfade_secs: config.crossfade_secs,
+            prefs: config::Prefs::from_config(&config),
             xf_sink: None,
             xf_out_total: None,
+            config_dirty: false,
+            last_config_save: 0.0,
             theme,
-            themes,
-            icons,
             ctx,
-            library_dir: dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")),
-            library_entries: Vec::new(),
-            tag_cache: HashMap::new(),
+            library: library::LibraryState::new(
+                dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")),
+                config.library.favorites.into_iter().map(PathBuf::from).filter(|d| d.is_dir()).collect(),
+                config.library.show_hidden,
+            ),
+            tag_cache: library::TagCache::new(),
             tracks: tracks::TagReader::new(),
-            favorite_dirs: config.library.favorites.into_iter().map(PathBuf::from).filter(|d| d.is_dir()).collect(),
-            show_hidden: config.library.show_hidden,
-            library_sort: 0,
-            library_asc: true,
             network: network::Network::new(config.servers.clone()),
         };
 
@@ -235,7 +205,7 @@ impl TPlayApp {
         // Restore library directory
         let p = PathBuf::from(&config.library.last_dir);
         if p.is_dir() {
-            app.library_dir = p;
+            app.navigate_to(p);
         }
 
         // Restore last playlist if it still exists. A remote target can't be
@@ -252,38 +222,62 @@ impl TPlayApp {
                 app.load_playlist_from(path);
             }
         }
-        app.navigate_to(app.library_dir.clone());
+        app.navigate_to(app.library.dir().to_path_buf());
 
         app
     }
 
+    /// Record that a setting changed; `update()` writes it out (throttled).
+    ///
+    /// This used to *be* `save_config()`. Every settings setter called it, and
+    /// the EQ/volume/balance sliders call their setter on every frame of a drag
+    /// — so a drag wrote the whole config.json ~60×/sec on the UI thread. Now
+    /// it only marks the file dirty and `flush_config` does the writing.
+    fn mark_config_dirty(&mut self) {
+        self.config_dirty = true;
+    }
+
+    /// Write config.json if anything changed, at most once per
+    /// `CONFIG_SAVE_DEBOUNCE_SECS`, and unconditionally when closing.
+    fn flush_config(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
+        let closing = ctx.input(|i| i.viewport().close_requested());
+        if !config::should_flush(self.config_dirty, now, self.last_config_save, closing) {
+            return;
+        }
+        self.save_config();
+        self.config_dirty = false;
+        self.last_config_save = now;
+    }
+
     /// Save all settings to unified config.json
     fn save_config(&self) {
-        let eq_shared = self.eq_shared.read().unwrap();
-        let balance = self.balance.read().unwrap();
+        // Every field listed explicitly, with no `..Default::default()`: a new
+        // `Config` field must be a compile error here, not a silent reset to
+        // the default. The six pref fields come from `Prefs`, which owns them.
         let config = Config {
-            theme: self.theme.id.clone(),
+            theme: self.theme.current().id.clone(),
             eq: EqData {
-                enabled: eq_shared.enabled,
-                gains: eq_shared.gains,
+                enabled: self.eq.enabled(),
+                gains: self.eq.gains(),
             },
             shuffle: self.shuffle,
             repeat: self.repeat,
-            viz_view: self.viz_view,
+            viz_view: self.prefs.viz_view(),
+            remaining: self.prefs.remaining(),
+            gapless: self.prefs.gapless(),
+            crossfade: self.prefs.crossfade(),
+            crossfade_secs: self.prefs.crossfade_secs(),
+            balance: self.prefs.balance(),
             volume: self.volume,
             buffer_size: self.buffer_size,
             spool_cache_mb: self.spool_cache_mb,
             last_playlist: self.playlist_file.as_ref().and_then(|p| p.to_str()).map(str::to_owned),
             library: LibraryData {
-                favorites: self.favorite_dirs.iter().filter_map(|d| d.to_str().map(str::to_owned)).collect(),
-                last_dir: self.library_dir.to_string_lossy().into_owned(),
-                show_hidden: self.show_hidden,
+                favorites: self.library.favorites().iter().filter_map(|d| d.to_str().map(str::to_owned)).collect(),
+                last_dir: self.library.dir().to_string_lossy().into_owned(),
+                show_hidden: self.library.show_hidden(),
             },
-            balance: *balance,
-            remaining: self.remaining,
-            gapless: self.gapless,
-            crossfade: self.crossfade,
-            crossfade_secs: self.crossfade_secs,
             servers: self.network.servers().to_vec(),
         };
         config::save(&config);
@@ -351,9 +345,10 @@ impl TPlayApp {
 
         // Always load the full track (no truncation, no pre-mix).
         // Crossfade/gapless are handled by the separate xf_sink in advance().
-        let eq_source = audio::eq::EqSource::new(decoder, Arc::clone(&self.eq_shared));
+        let eq_source = audio::eq::EqSource::new(decoder, self.eq.shared());
         let tap_source = audio::viz::TapSource::new(eq_source, self.viz.clone());
-        let balance_source = audio::balance::BalanceSource::new(tap_source, Arc::clone(&self.balance));
+        let balance_source =
+            audio::balance::BalanceSource::new(tap_source, self.prefs.balance_shared());
         self.sink.append(balance_source);
         self.current_path = Some(track);
     }
@@ -522,9 +517,10 @@ impl TPlayApp {
         self.position_offset = target;
         // Use seek_or_skip (fast path for seekable formats, fallback to skip_duration)
         let seeked_source = transition::seek_or_skip(source, target);
-        let eq_source = audio::eq::EqSource::new(seeked_source, Arc::clone(&self.eq_shared));
+        let eq_source = audio::eq::EqSource::new(seeked_source, self.eq.shared());
         let tap_source = audio::viz::TapSource::new(eq_source, self.viz.clone());
-        let balance_source = audio::balance::BalanceSource::new(tap_source, Arc::clone(&self.balance));
+        let balance_source =
+            audio::balance::BalanceSource::new(tap_source, self.prefs.balance_shared());
         self.sink.append(balance_source);
         if was_paused { self.sink.pause(); }
     }
@@ -545,8 +541,11 @@ impl TPlayApp {
             // The fade decision is `xf_gains`'s (pure, tested); this is only the
             // effect. Gapless gets (1.0, 0.0) from it too — the incoming track
             // sits silent until the swap, so there is no branch here at all.
-            let (out_gain, in_gain) =
-                transition::xf_gains(remaining, self.crossfade, self.crossfade_secs);
+            let (out_gain, in_gain) = transition::xf_gains(
+                remaining,
+                self.prefs.crossfade(),
+                self.prefs.crossfade_secs(),
+            );
             self.sink.set_volume(self.volume * out_gain);
             xf.set_volume(self.volume * in_gain);
             return;
@@ -563,7 +562,7 @@ impl TPlayApp {
             && self.current_path.is_some()
             && !self.sink.is_paused()
             && self.sink.len() == 1
-            && (self.crossfade || self.gapless)
+            && (self.prefs.crossfade() || self.prefs.gapless())
         {
             // PEEK, don't pick: this block runs on every frame until the arm
             // resolves, and a picking call here appended to `played` 60 times a
@@ -577,9 +576,9 @@ impl TPlayApp {
                 .unzip();
 
             let input = transition::ArmInput {
-                crossfade: self.crossfade,
-                gapless: self.gapless,
-                crossfade_secs: self.crossfade_secs,
+                crossfade: self.prefs.crossfade(),
+                gapless: self.prefs.gapless(),
+                crossfade_secs: self.prefs.crossfade_secs(),
                 total: self.total_duration,
                 pos: self.sink.get_pos().saturating_add(self.position_offset),
                 next: next.as_ref().map(|(i, p)| (*i, p.as_path())),
@@ -595,8 +594,8 @@ impl TPlayApp {
                 // up a moment later.
                 let Some(xf_source) = transition::build_gapless_next(
                     &armed.track,
-                    Arc::clone(&self.eq_shared),
-                    Arc::clone(&self.balance),
+                    self.eq.shared(),
+                    self.prefs.balance_shared(),
                     self.viz.clone(),
                 ) else {
                     return;
@@ -735,81 +734,56 @@ impl TPlayApp {
         self.sink.set_volume(volume);
         // A live xf's volume is re-applied each frame in advance() scaled by
         // `self.volume`, so changing volume mid-fade lands on the next frame.
-        self.save_config();
+        self.mark_config_dirty();
     }
 
     /// Set gain for one EQ band (0-9), in dB (-12 to +12). Applies live to the
     /// running source — no sink rebuild, no audio restart. Marks the selection
     /// as Custom (no preset name applies anymore).
+    /// Set one band's gain in dB. `EqSettings` clamps to +/-12 dB and ignores an
+    /// out-of-range band; a slider that re-reports the same value costs one `if`
+    /// and no config write.
     pub fn set_eq_gain(&mut self, band: usize, gain_db: f32) {
-        if band >= 10 { return; }
-        {
-            let mut shared = self.eq_shared.write().unwrap();
-            shared.gains[band] = gain_db.clamp(-12.0, 12.0);
-        }
-        self.save_config();
+        if self.eq.set_band(band, gain_db) { self.mark_config_dirty(); }
     }
 
     /// Select an EQ preset by name (see `EQ_PRESETS`), or None for custom.
     pub fn set_eq_preset(&mut self, name: Option<String>) {
-        if let Some(name) = name.as_ref() {
-            if let Some((_, gains)) = EQ_PRESETS.iter().find(|(n, _)| n == name) {
-                self.eq_shared.write().unwrap().gains = *gains;
-            }
-        }
-        self.save_config();
+        if self.eq.set_preset(name.as_deref()) { self.mark_config_dirty(); }
     }
 
-    pub fn eq_enabled(&self) -> bool {
-        self.eq_shared.read().unwrap().enabled
-    }
+    pub fn eq_enabled(&self) -> bool { self.eq.enabled() }
 
-    pub fn eq_gains(&self) -> [f32; 10] {
-        self.eq_shared.read().unwrap().gains
-    }
+    pub fn eq_gains(&self) -> [f32; 10] { self.eq.gains() }
 
     /// The preset the current gains match, or `None` = Custom (the ComboBox
     /// holds a `None` option, so the caller needs the Option, not the label).
-    pub fn eq_preset(&self) -> Option<&str> {
-        audio::eq::preset_for(self.eq_gains())
-    }
+    pub fn eq_preset(&self) -> Option<&'static str> { self.eq.preset() }
 
-    pub fn eq_preset_name(&self) -> &str {
-        audio::eq::preset_for(self.eq_gains()).unwrap_or("Custom")
-    }
+    pub fn eq_preset_name(&self) -> &'static str { self.eq.preset_name() }
 
-    /// Switch theme by id (from the Theme dropdown); persisted, applied the
-    /// same frame by the GUI layer, icons re-decoded for the new palette.
+    /// Switch theme by id (from the Theme dropdown). The icon re-decode lives in
+    /// `ThemeState::set` — the app no longer knows that switching a theme
+    /// invalidates the textures.
     pub fn set_theme(&mut self, id: &str) {
-        if let Some(theme) = self.themes.get(id) {
-            self.theme = Arc::clone(theme);
-            self.icons = theme::load_icons(&self.ctx, &self.themes, &self.theme);
-            self.save_config();
-        }
+        if self.theme.set(&self.ctx, id) { self.mark_config_dirty(); }
     }
 
-    pub fn theme(&self) -> &Arc<Theme> {
-        &self.theme
-    }
+    pub fn theme(&self) -> &Arc<Theme> { self.theme.current() }
 
     /// All loadable themes, for the Theme dropdown.
-    pub fn themes(&self) -> &[Arc<Theme>] {
-        self.themes.list()
-    }
+    pub fn themes(&self) -> &[Arc<Theme>] { self.theme.list() }
 
     /// Texture for a pane icon in the current theme (falls back to the
     /// default theme's), or `None` → the pane renders a unicode glyph.
     pub fn theme_icon(&self, icon: theme::Icon) -> Option<&egui::TextureHandle> {
-        self.icons.get(icon.index()).and_then(|t| t.as_ref())
+        self.theme.icon(icon)
     }
 
     /// Toggle EQ on/off. Applies live — the source starts/stops filtering in place.
     pub fn toggle_eq(&mut self) {
-        {
-            let mut shared = self.eq_shared.write().unwrap();
-            shared.enabled = !shared.enabled;
-        }
-        self.save_config();
+        self.eq.toggle();
+        self.mark_config_dirty();
     }
 
     pub fn next_track(&mut self) {
@@ -872,12 +846,12 @@ impl TPlayApp {
     pub fn toggle_shuffle(&mut self) {
         self.shuffle = !self.shuffle;
         self.reset_shuffle();
-        self.save_config();
+        self.mark_config_dirty();
     }
 
     pub fn toggle_repeat(&mut self) {
         self.repeat = !self.repeat;
-        self.save_config();
+        self.mark_config_dirty();
     }
 
     // ── Playlists — plain `.tplay` files on disk, found in the Library like
@@ -908,7 +882,7 @@ impl TPlayApp {
         }
         self.playlist_file = Some(path);
         self.playlist_dirty = false;
-        self.save_config();
+        self.mark_config_dirty();
     }
 
     /// Re-list the current remote directory. Called after a playlist lands on a
@@ -964,7 +938,7 @@ impl TPlayApp {
         self.ensure_tags(self.playlist.clone());
         self.playlist_file = Some(file);
         self.playlist_dirty = false;
-        self.save_config();
+        self.mark_config_dirty();
     }
 
     /// Clear the playlist for a fresh build (confirm dialog lives in the GUI).
@@ -974,7 +948,7 @@ impl TPlayApp {
         self.playlist.clear();
         self.playlist_file = None;
         self.playlist_dirty = false;
-        self.save_config();
+        self.mark_config_dirty();
     }
 
     /// The `.tplay` file this playlist is saved to / was loaded from, if any.
@@ -1003,50 +977,25 @@ impl TPlayApp {
 
     /// List the given directory and start tagging its audio files in the
     /// background. Persists the last browsed dir on the way.
+    /// List a directory and start tagging its audio files in the background.
+    /// Persists the last browsed dir on the way.
+    ///
+    /// The split is the point: `LibraryState::open` owns *what the folder
+    /// contains and how it sorts*, and returns the paths that need scanning.
+    /// Starting that scan stays here, because the tag cache and the
+    /// `TagReader` are the app's, shared with the other two panes.
     pub fn navigate_to(&mut self, dir: PathBuf) {
-        if !dir.is_dir() {
-            return;
-        }
-        self.library_dir = dir;
-        let (dirs, files) = library::list_dir(&self.library_dir, self.show_hidden);
-        self.library_entries = dirs
-            .into_iter()
-            .map(|p| library::Entry { path: p, is_dir: true })
-            .chain(files.into_iter().map(|p| library::Entry { path: p, is_dir: false }))
-            .collect();
-        self.apply_library_sort();
-        self.ensure_tags(
-            self.library_entries
-                .iter()
-                .filter(|e| !e.is_dir() && !library::is_playlist(e.path()))
-                .map(|e| e.path().to_path_buf())
-                .collect(),
-        );
-        self.save_config();
-    }
-
-    /// Sort the browsed folder's rows by the active header sort. Missing
-    /// tags sort last (empty artist/album/year/genre, missing duration);
-    /// folders are untagged entries, so the tag columns sink them below the
-    /// files.
-    fn apply_library_sort(&mut self) {
-        let (key, asc) = (self.library_sort, self.library_asc);
-        library::sort_entries(&mut self.library_entries, &self.tag_cache, key, asc);
+        let Some(scan) = self.library.open(dir, &self.tag_cache) else { return };
+        self.ensure_tags(scan);
+        self.mark_config_dirty();
     }
 
     /// Header click: pick a new column (ascending) or flip the active one and
     /// re-sort the current folder in place.
     pub fn set_library_sort(&mut self, key: usize) {
-        if key >= library::SORT_OPTIONS.len() {
-            return;
+        if self.library.set_sort(key, &self.tag_cache) {
+            self.mark_config_dirty();
         }
-        if self.library_sort == key {
-            self.library_asc = !self.library_asc;
-        } else {
-            self.library_sort = key;
-            self.library_asc = true;
-        }
-        self.apply_library_sort();
     }
 
     /// Ensure the given audio files have tag info in the cache.
@@ -1129,12 +1078,8 @@ impl TPlayApp {
     }
 
     pub fn toggle_favorite(&mut self, dir: PathBuf) {
-        if let Some(i) = self.favorite_dirs.iter().position(|d| d == &dir) {
-            self.favorite_dirs.remove(i);
-        } else {
-            self.favorite_dirs.push(dir);
-        }
-        self.save_config();
+        self.library.toggle_favorite(dir);
+        self.mark_config_dirty();
     }
 
     // ── SMB network ────────────────────────────────────────────────────────
@@ -1155,14 +1100,14 @@ impl TPlayApp {
     /// Add a server (dedup by host; re-adding updates the username). Persists.
     pub fn add_network_server(&mut self, host: String, username: String) {
         self.network.add_server(host, username);
-        self.save_config();
+        self.mark_config_dirty();
     }
 
     /// Remove a saved server; persists immediately (passwords stay in the
     /// session map — short-lived, cleared on exit).
     pub fn remove_network_server(&mut self, host: &str) {
         self.network.remove_server(host);
-        self.save_config();
+        self.mark_config_dirty();
     }
 
     /// Session-memory password for a host (never persisted) — set at add-time
@@ -1183,80 +1128,67 @@ impl TPlayApp {
     /// Visualization buffer (shared with the tap source).
     pub fn viz(&self) -> &audio::viz::VizBuf { &self.viz }
 
-    /// Visualizer pane view — see `VizView::ALL`.
-    pub fn viz_view(&self) -> VizView { self.viz_view }
+    // ── Playback settings ────────────────────────────────────────────────
+    //
+    // The values live in `config::Prefs`; these are delegates, kept because the
+    // GUI reaches state through `TPlayApp` and nothing else. The setters are
+    // three lines each rather than six because `Prefs` owns the clamping and
+    // reports whether anything changed — so an unchanged value costs one `if`
+    // and never marks the config dirty.
 
-    /// Set the visualizer view; persists to config.json immediately.
+    /// Visualizer pane view — see `VizView::ALL`.
+    pub fn viz_view(&self) -> VizView { self.prefs.viz_view() }
+
     pub fn set_viz_view(&mut self, view: VizView) {
-        if self.viz_view == view {
-            return;
-        }
-        self.viz_view = view;
-        self.save_config();
+        if self.prefs.set_viz_view(view) { self.mark_config_dirty(); }
     }
 
     /// Current balance (-1.0..=1.0).
-    pub fn balance(&self) -> f32 {
-        *self.balance.read().unwrap()
-    }
+    pub fn balance(&self) -> f32 { self.prefs.balance() }
 
-    /// Set balance; live, no sink rebuild. Clamped to [-1, 1].
+    /// Set balance; live, no sink rebuild — `Prefs` holds the handle the audio
+    /// source reads per frame, so there is no sink to rebuild here either.
     pub fn set_balance(&mut self, v: f32) {
-        let clamped = v.clamp(-1.0, 1.0);
-        *self.balance.write().unwrap() = clamped;
-        self.save_config();
+        if self.prefs.set_balance(v) { self.mark_config_dirty(); }
     }
 
     /// Whether to show remaining time instead of elapsed.
-    pub fn remaining(&self) -> bool { self.remaining }
+    pub fn remaining(&self) -> bool { self.prefs.remaining() }
 
-    /// Toggle remaining/elapsed mode; persists immediately.
     pub fn set_remaining(&mut self, remaining: bool) {
-        if self.remaining == remaining {
-            return;
-        }
-        self.remaining = remaining;
-        self.save_config();
+        if self.prefs.set_remaining(remaining) { self.mark_config_dirty(); }
     }
 
     /// Whether gapless playback is enabled.
-    pub fn gapless(&self) -> bool { self.gapless }
+    pub fn gapless(&self) -> bool { self.prefs.gapless() }
 
-    /// Toggle gapless playback; persists immediately.
     pub fn toggle_gapless(&mut self) {
-        self.gapless = !self.gapless;
-        self.save_config();
+        self.prefs.toggle_gapless();
+        self.mark_config_dirty();
     }
 
     /// Whether crossfade playback is enabled.
-    pub fn crossfade(&self) -> bool { self.crossfade }
+    pub fn crossfade(&self) -> bool { self.prefs.crossfade() }
 
-    /// Toggle crossfade playback; persists immediately.
     pub fn toggle_crossfade(&mut self) {
-        self.crossfade = !self.crossfade;
-        self.save_config();
+        self.prefs.toggle_crossfade();
+        self.mark_config_dirty();
     }
 
     /// Crossfade duration in seconds.
-    pub fn crossfade_secs(&self) -> f32 { self.crossfade_secs }
+    pub fn crossfade_secs(&self) -> f32 { self.prefs.crossfade_secs() }
 
-    /// Set crossfade duration; persists immediately.
     pub fn set_crossfade_secs(&mut self, secs: f32) {
-        let clamped = secs.clamp(0.0, 10.0);
-        if (self.crossfade_secs - clamped).abs() < f32::EPSILON {
-            return;
-        }
-        self.crossfade_secs = clamped;
-        self.save_config();
+        if self.prefs.set_crossfade_secs(secs) { self.mark_config_dirty(); }
     }
 
-    pub fn library_dir(&self) -> &std::path::Path { &self.library_dir }
-    pub fn library_entries(&self) -> &[library::Entry] { &self.library_entries }
+    pub fn library_dir(&self) -> &std::path::Path { self.library.dir() }
+    pub fn library_entries(&self) -> &[library::Entry] { self.library.entries() }
     /// Tags/duration for any previously scanned or played track — the shared
     /// cache behind the Library, Playlist, and Now Playing panes.
     /// The whole tag cache, so a caller can sort a list of entries against it
     /// (`library::sort_entries`) rather than sorting entry-by-entry.
-    pub fn tag_cache(&self) -> &HashMap<PathBuf, library::TrackInfo> {
+    pub fn tag_cache(&self) -> &library::TagCache {
         &self.tag_cache
     }
 
@@ -1272,14 +1204,13 @@ impl TPlayApp {
     /// and an `smb://` URI never does. So there is no remote entry here to skip,
     /// and the share browser computes its own count over its own entries.
     pub fn library_scanning(&self) -> bool {
-        self.library_entries
+        self.library
+            .entries()
             .iter()
             .any(|e| !e.is_dir() && !library::is_playlist(e.path()) && !self.tag_cache.contains_key(e.path()))
     }
-    pub fn favorite_dirs(&self) -> &[PathBuf] { &self.favorite_dirs }
-    pub fn is_favorite(&self, dir: &std::path::Path) -> bool {
-        self.favorite_dirs.iter().any(|d| d == dir)
-    }
+    pub fn favorite_dirs(&self) -> &[PathBuf] { self.library.favorites() }
+    pub fn is_favorite(&self, dir: &std::path::Path) -> bool { self.library.is_favorite(dir) }
 
     /// Fixed user-folder shortcuts (Home + XDG user dirs) shown above the
     /// Favorites list in the Library pane. The logic is `library`'s — it never
@@ -1289,19 +1220,18 @@ impl TPlayApp {
         library::quick_folders()
     }
 
-    pub fn show_hidden(&self) -> bool { self.show_hidden }
+    pub fn show_hidden(&self) -> bool { self.library.show_hidden() }
 
-    pub fn library_sort(&self) -> usize { self.library_sort }
-    pub fn library_sort_asc(&self) -> bool { self.library_asc }
+    pub fn library_sort(&self) -> usize { self.library.sort() }
+    pub fn library_sort_asc(&self) -> bool { self.library.sort_asc() }
 
     /// Toggle hidden-folder display in the Library and re-list the current
     /// dir so the change lands immediately (also persists it).
     pub fn set_show_hidden(&mut self, show: bool) {
-        if self.show_hidden == show {
-            return;
+        if self.library.set_show_hidden(show) {
+            // Re-list so the change lands immediately.
+            self.navigate_to(self.library.dir().to_path_buf());
         }
-        self.show_hidden = show;
-        self.navigate_to(self.library_dir.clone());
     }
 
     /// What the play button has to do: resume/replay the loaded track, or start
@@ -1368,6 +1298,10 @@ impl eframe::App for TPlayApp {
         crate::gui::coordinator::update_ui(self, ctx);
         self.advance();
         self.drain_tag_scan();
+        // Settings persist on a throttle, not on the setter that changed them —
+        // see `config::should_flush`. Last in the frame, so a click that both
+        // arms a dialog and moves a slider is already recorded.
+        self.flush_config(ctx);
         // SMB replies: browse listings are applied inside `Network::drain`;
         // a completed spool promotes playback, a fetched `.tplay` loads, and a
         // save confirms. Drain every event, not just the first — a save reply
@@ -1395,7 +1329,7 @@ impl eframe::App for TPlayApp {
                     Ok(()) => {
                         self.playlist_file = Some(PathBuf::from(uri));
                         self.playlist_dirty = false;
-                        self.save_config();
+                        self.mark_config_dirty();
                         self.refresh_network_dir();
                     }
                     Err(e) => eprintln!("tplay: could not save playlist to {uri}: {e}"),

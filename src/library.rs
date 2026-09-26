@@ -223,6 +223,15 @@ pub fn read_playlist(path: &Path, base: &Path) -> Option<Vec<PathBuf>> {
     )
 }
 
+/// The shared tag/duration cache: track id → what we know about it.
+///
+/// Named because it is no longer the Library's private business — the Playlist
+/// and Now Playing panes read the same map, and `sort_entries` / `LibraryState`
+/// take it as a parameter, so the full `HashMap<PathBuf, TrackInfo>` was spelled
+/// out in four signatures. The **id** is the key, which for a remote track is an
+/// `smb://` URI held in a `PathBuf` (see `tracks.rs`).
+pub type TagCache = HashMap<PathBuf, TrackInfo>;
+
 /// Tags + duration read from one audio file. Missing fields stay blank —
 /// tag strings are fallible metadata, never a reason to fail the scan.
 #[derive(Clone, Debug, Default)]
@@ -350,7 +359,7 @@ pub const SORT_OPTIONS: [&str; 6] = ["Title", "Artist", "Album", "Year", "Genre"
 /// every toggle.
 pub fn sort_entries(
     entries: &mut [Entry],
-    cache: &HashMap<PathBuf, TrackInfo>,
+    cache: &TagCache,
     col: usize,
     asc: bool,
 ) {
@@ -434,4 +443,116 @@ pub fn quick_folders() -> Vec<(String, PathBuf)> {
         }
     }
     v
+}
+
+/// The Library pane's browsing state: the current folder, its rows, the sort,
+/// the bookmarks and the hidden-folder toggle.
+///
+/// Six `TPlayApp` fields, and the awkward part was not the fields but that the
+/// list could not be exercised without an app: `navigate_to` also kicks off a
+/// tag scan, so the *state* was welded to the *effect*. Splitting them means
+/// `open` is a pure function of a directory — it lists, sorts, and hands back
+/// the paths that need scanning — and the caller (`TPlayApp::navigate_to`) does
+/// the scanning. That is what makes this testable headless.
+///
+/// The shared `tag_cache` stays in the app: the Playlist and Now Playing panes
+/// read it too, so it is not the Library's to own.
+pub struct LibraryState {
+    dir: PathBuf,
+    entries: Vec<Entry>,
+    /// Index into `SORT_OPTIONS` (0 = Title, the default) plus direction.
+    sort: usize,
+    asc: bool,
+    favorites: Vec<PathBuf>,
+    show_hidden: bool,
+}
+
+impl LibraryState {
+    pub fn new(dir: PathBuf, favorites: Vec<PathBuf>, show_hidden: bool) -> Self {
+        Self { dir, entries: Vec::new(), sort: 0, asc: true, favorites, show_hidden }
+    }
+
+    pub fn dir(&self) -> &Path { &self.dir }
+    pub fn entries(&self) -> &[Entry] { &self.entries }
+    pub fn sort(&self) -> usize { self.sort }
+    pub fn sort_asc(&self) -> bool { self.asc }
+    pub fn favorites(&self) -> &[PathBuf] { &self.favorites }
+    pub fn show_hidden(&self) -> bool { self.show_hidden }
+    pub fn is_favorite(&self, dir: &Path) -> bool { self.favorites.iter().any(|d| d == dir) }
+
+    /// List `dir` into rows and sort them. False if it isn't a directory, in
+    /// which case nothing changed.
+    ///
+    /// Returns the audio files to tag — subfolders and `.tplay` rows excluded,
+    /// because a playlist file isn't audio and a folder has no tags of its own.
+    /// The caller starts the scan; this only says what to scan.
+    pub fn open(&mut self, dir: PathBuf, tags: &TagCache) -> Option<Vec<PathBuf>> {
+        if !dir.is_dir() {
+            return None;
+        }
+        self.dir = dir;
+        let (dirs, files) = list_dir(&self.dir, self.show_hidden);
+        self.entries = dirs
+            .into_iter()
+            .map(|p| Entry { path: p, is_dir: true })
+            .chain(files.into_iter().map(|p| Entry { path: p, is_dir: false }))
+            .collect();
+        self.apply_sort(tags);
+        Some(self.to_scan())
+    }
+
+    /// The audio rows, i.e. what a folder listing should have tagged.
+    pub fn to_scan(&self) -> Vec<PathBuf> {
+        self.entries
+            .iter()
+            .filter(|e| !e.is_dir() && !is_playlist(e.path()))
+            .map(|e| e.path().to_path_buf())
+            .collect()
+    }
+
+    /// Re-sort the current rows against a tag cache. Missing tags sort last, and
+    /// folders are untagged entries, so the tag columns sink them below files.
+    pub fn apply_sort(&mut self, tags: &TagCache) {
+        sort_entries(&mut self.entries, tags, self.sort, self.asc);
+    }
+
+    /// Header click: pick a new column (ascending) or flip the active one and
+    /// re-sort in place. False for an out-of-range column.
+    pub fn set_sort(&mut self, key: usize, tags: &TagCache) -> bool {
+        if key >= SORT_OPTIONS.len() {
+            return false;
+        }
+        if self.sort == key {
+            self.asc = !self.asc;
+        } else {
+            self.sort = key;
+            self.asc = true;
+        }
+        self.apply_sort(tags);
+        true
+    }
+
+    /// Bookmark/unbookmark a folder, reporting whether it is now a favorite.
+    pub fn toggle_favorite(&mut self, dir: PathBuf) -> bool {
+        match self.favorites.iter().position(|d| d == &dir) {
+            Some(i) => {
+                self.favorites.remove(i);
+                false
+            }
+            None => {
+                self.favorites.push(dir);
+                true
+            }
+        }
+    }
+
+    /// Show or hide dot-prefixed folders, reporting whether it changed. The
+    /// caller re-lists on a change; the rows themselves are not touched here.
+    pub fn set_show_hidden(&mut self, show: bool) -> bool {
+        if self.show_hidden == show {
+            return false;
+        }
+        self.show_hidden = show;
+        true
+    }
 }
