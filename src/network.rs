@@ -656,6 +656,28 @@ pub fn cache_path(uri: &str) -> PathBuf {
     cache_path_in(uri, &spool_dir())
 }
 
+/// The local file to read for a track, for code that needs real **bytes**
+/// rather than a playlist entry.
+///
+/// A remote track has no file at its URI — there is nothing on disk named
+/// `smb://…` — so anything doing a filesystem read (album art, a probe) must
+/// resolve through here to the spool-cache copy. `None` when a remote track has
+/// not been spooled yet, i.e. there is nothing local to read. A local path is
+/// returned unchanged, whether or not it exists, so the caller's own error
+/// handling decides what a missing file means.
+pub fn local_copy_in(path: &Path, dir: &Path) -> Option<PathBuf> {
+    if !is_remote(path) {
+        return Some(path.to_path_buf());
+    }
+    let local = cache_path_in(&path.to_string_lossy(), dir);
+    local.is_file().then_some(local)
+}
+
+/// `local_copy_in` against the real spool dir.
+pub fn local_copy(path: &Path) -> Option<PathBuf> {
+    local_copy_in(path, &spool_dir())
+}
+
 // ── Worker thread ────────────────────────────────────────────────────────────
 
 /// Spawn the single SMB worker thread. It exits when the app drops its

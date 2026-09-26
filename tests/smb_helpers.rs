@@ -365,3 +365,47 @@ fn dot_entries_are_dropped_but_dot_folders_are_not() {
         assert!(!is_self_or_parent(real), "{real:?} is content and must survive");
     }
 }
+
+/// The Album Cover pane reads real bytes, so a remote track must resolve to its
+/// spool-cache copy first — there is no file on disk named `smb://…`. The
+/// injected dir keeps this hermetic, same as `cache_path_in`.
+#[test]
+fn local_copy_resolves_remote_tracks_to_the_spool_cache() {
+    use tplay::network::{cache_path_in, local_copy_in};
+    #[path = "common.rs"]
+    mod common;
+    let dir = common::test_dir("local_copy_resolves_remote_tracks_to_the_spool_cache");
+
+    let uri = "smb://nas/media/song.mp3";
+    let cached = cache_path_in(uri, &dir);
+    assert_eq!(cached.parent().unwrap(), dir, "premise: cache file lands in the dir");
+
+    // Remote, not spooled yet -> nothing local to read.
+    assert_eq!(local_copy_in(Path::new(uri), &dir), None);
+
+    // Remote, spooled -> the cache copy, extension preserved so lofty can read
+    // the embedded picture.
+    std::fs::write(&cached, b"not really audio").unwrap();
+    assert_eq!(local_copy_in(Path::new(uri), &dir), Some(cached.clone()));
+    assert_eq!(cached.extension().unwrap(), "mp3");
+
+    // A local path comes back unchanged, and does NOT require the file to
+    // exist: the caller's own error handling decides what that means, and
+    // requiring existence here would silently blank art for a track that is
+    // mid-load.
+    let local = Path::new("/music/local.flac");
+    assert_eq!(local_copy_in(local, &dir), Some(local.to_path_buf()));
+    let missing = Path::new("/music/gone.flac");
+    assert_eq!(local_copy_in(missing, &dir), Some(missing.to_path_buf()));
+
+    // A remote URI with a query-ish or extensionless form still resolves by key.
+    let no_ext = "smb://nas/media/track";
+    assert_eq!(local_copy_in(Path::new(no_ext), &dir), None);
+    std::fs::write(cache_path_in(no_ext, &dir), b"x").unwrap();
+    assert_eq!(
+        local_copy_in(Path::new(no_ext), &dir),
+        Some(cache_path_in(no_ext, &dir))
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}

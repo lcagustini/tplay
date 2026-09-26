@@ -7,6 +7,7 @@
 use crate::app::TPlayApp;
 use crate::gui::theme::Icon;
 use crate::library;
+use crate::network;
 use eframe::egui;
 
 /// egui Id for the decoded cover cache: `(path, Option<TextureHandle>)` —
@@ -36,7 +37,19 @@ pub fn album_cover_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
     // Re-resolve only when the playing track changed (first frame included).
     let cached: Option<CoverCache> = ctx.data(|d| d.get_temp(cover_id()));
     if !cached.as_ref().is_some_and(|(k, _)| k == &cur_key) {
-        let tex = cur.as_ref().and_then(|c| library::read_cover(c)).and_then(|bytes| {
+        // A remote track's art is in its spool-cache copy, not at its URI, so
+        // resolve through `local_copy` before reading. The cache stays keyed by
+        // the URI either way. By the time a remote track is the *current* one
+        // it has necessarily been spooled (playback goes through the same
+        // cache), so `None` here is not a state worth re-resolving for later.
+        //
+        // Only the embedded picture is available this way. `read_cover`'s
+        // sibling-file fallback (`folder.jpg`/`cover.jpg` beside the track) looks
+        // beside the *cache* copy, where nothing lives, so folder art on a share
+        // is not picked up — fetching it would mean a second SMB transfer with
+        // its own event plumbing, for a rarer case than embedded art.
+        let art = cur.as_ref().and_then(|c| network::local_copy(c));
+        let tex = art.as_ref().and_then(|c| library::read_cover(c)).and_then(|bytes| {
             image::load_from_memory(&bytes).ok().map(|img| {
                 let rgba = img.to_rgba8();
                 let color = egui::ColorImage::from_rgba_unmultiplied(
