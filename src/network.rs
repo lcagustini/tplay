@@ -49,8 +49,11 @@ pub enum SmbCmd {
     ListShares { host: String, creds: SmbCreds, reply: Sender<SmbReply> },
     /// List a share or directory. `uri` = `smb://host/share[/rel/dir]`.
     ListDir { uri: String, creds: SmbCreds, reply: Sender<SmbReply> },
-    /// Download `uri` into the spool cache, replying the local path.
+    /// Download `uri` into the spool cache, replying the local path. Used for
+    /// playback AND for reading a remote `.tplay` off the server.
     Spool { uri: String, creds: SmbCreds, reply: Sender<SmbReply> },
+    /// Upload `data` to `uri`, overwriting it if it exists.
+    Save { uri: String, data: Vec<u8>, creds: SmbCreds, reply: Sender<SmbReply> },
 }
 
 /// Replies routed back to the app (drained like the tag scan). The `uri`/
@@ -59,15 +62,20 @@ pub enum SmbReply {
     Shares { host: String, result: Result<Vec<RemoteEntry>, String> },
     Dir { uri: String, result: Result<Vec<RemoteEntry>, String> },
     Spooled { uri: String, result: Result<PathBuf, String> },
+    Saved { uri: String, result: Result<(), String> },
 }
 
 /// An event the app must act on, yielded by `Network::drain`. Browse replies
-/// (ListShares/ListDir) are applied to the browse state internally; only the
-/// spool completion lands here because it promotes playback.
+/// (ListShares/ListDir) are applied to the browse state internally; the rest
+/// land here because the app must act on them.
 pub enum Event {
     /// A requested spool finished for the still-pending track. The app plays
     /// the local spooled copy in place of the `smb://` URI it was told to play.
     Spooled { uri: String, result: Result<PathBuf, String> },
+    /// A remote `.tplay` finished downloading; `local` is its spooled copy.
+    Fetched { uri: String, result: Result<PathBuf, String> },
+    /// A playlist write to a share completed.
+    Saved { uri: String, result: Result<(), String> },
 }
 
 /// Remote-browse position inside the Library pane — which server/share/dir is
@@ -99,6 +107,14 @@ pub struct Network {
     /// A remote track waiting on its spool (its `smb://` URI). The app set
     /// `current_index` before requesting, so the spooled file plays into it.
     pending: Option<PathBuf>,
+    /// A remote `.tplay` waiting on its download. Separate from `pending` so
+    /// reading a playlist can never displace a track that is still spooling
+    /// (and vice versa) — one slot each, one request each.
+    fetch_req: Option<String>,
+    /// A playlist write to a share is in flight. No stale-check needed (the
+    /// app acts on every reply), but it must keep frames coming so the reply
+    /// is drained and the share listing refreshes.
+    saving: bool,
     cmd_tx: Sender<SmbCmd>,
     /// Cloned into every command so replies flow back to `reply_rx`.
     reply_tx: Sender<SmbReply>,
@@ -117,6 +133,8 @@ impl Network {
             passwords: HashMap::new(),
             browse: None,
             pending: None,
+            fetch_req: None,
+            saving: false,
             cmd_tx,
             reply_tx,
             reply_rx,
@@ -163,9 +181,14 @@ impl Network {
         self.pending.as_ref().map(|p| p.as_path())
     }
 
-    /// True while the worker owes us something (a spool or a listing).
+    /// True while the worker owes us something (a spool, a playlist fetch or
+    /// save, or a listing). Drives `request_repaint`, so anything in flight
+    /// must show up here or its reply sits undrained.
     pub fn busy(&self) -> bool {
-        self.pending.is_some() || self.browse.as_ref().is_some_and(|b| b.busy)
+        self.pending.is_some()
+            || self.fetch_req.is_some()
+            || self.saving
+            || self.browse.as_ref().is_some_and(|b| b.busy)
     }
 
     /// Saved username for a host (or blank → guest) + session password.
@@ -246,6 +269,33 @@ impl Network {
         self.pending = None;
     }
 
+    /// Download a remote `.tplay` so the app can read it. Deliberately does
+    /// NOT touch `pending`: that slot belongs to playback, and reading a
+    /// playlist must not cancel (or be cancelled by) a track download.
+    /// Re-requesting the same or another playlist supersedes the first.
+    pub fn fetch(&mut self, uri: String) {
+        self.fetch_req = Some(uri.clone());
+        let host = split_uri(&uri).map(|(h, _, _)| h).unwrap_or_default();
+        self.send(SmbCmd::Spool {
+            uri,
+            creds: self.creds_for(&host),
+            reply: self.reply_tx.clone(),
+        });
+    }
+
+    /// Write a playlist to a share. Async: the bytes go to the worker and
+    /// `drain` reports the outcome, so the UI thread never blocks on the LAN.
+    pub fn save(&mut self, uri: String, data: String) {
+        let host = split_uri(&uri).map(|(h, _, _)| h).unwrap_or_default();
+        self.saving = true;
+        self.send(SmbCmd::Save {
+            uri,
+            data: data.into_bytes(),
+            creds: self.creds_for(&host),
+            reply: self.reply_tx.clone(),
+        });
+    }
+
     /// Drain worker replies into the browse state. Returns the one event the
     /// app must act on (a spool completing for the still-pending track);
     /// browse listings are applied internally and stale replies are dropped
@@ -279,8 +329,8 @@ impl Network {
                     }
                 }
                 SmbReply::Spooled { uri, result } => {
-                    // Match against the CURRENT pending play — a stale reply
-                    // for a track the user superseded must not clobber it.
+                    // Playback wins: a track download is promoted to the sink
+                    // the moment it lands, so it must not wait behind a fetch.
                     let is_pending = self
                         .pending
                         .as_ref()
@@ -289,6 +339,17 @@ impl Network {
                         self.pending = None;
                         return Some(Event::Spooled { uri, result });
                     }
+                    // Otherwise it may be a playlist download. A stale reply —
+                    // the user clicked another `.tplay` in the meantime — is
+                    // dropped against the slot.
+                    if self.fetch_req.as_deref() == Some(uri.as_str()) {
+                        self.fetch_req = None;
+                        return Some(Event::Fetched { uri, result });
+                    }
+                }
+                SmbReply::Saved { uri, result } => {
+                    self.saving = false;
+                    return Some(Event::Saved { uri, result });
                 }
             }
         }
@@ -354,6 +415,23 @@ pub fn dir_uri(host: &str, share: &str, rel: &str) -> String {
 /// `parent_uri/name` — descend one level from a share or directory URI.
 pub fn child_uri(parent: &str, name: &str) -> String {
     format!("{}/{}", parent.trim_end_matches('/'), name)
+}
+
+/// The directory portion of a file URI: `smb://h/share/dir/f.tplay` ->
+/// `smb://h/share/dir`. Inverse of `child_uri`; the base a remote playlist's
+/// relative entries resolve against.
+///
+/// Returns the input unchanged when there is no directory part to take. The
+/// guard is that the result is still a host-bearing URI, not merely non-empty:
+/// a bare `smb://host` splits at its last slash into `"smb:/"`, which is
+/// non-empty but would resolve relative entries onto garbage.
+pub fn uri_parent(uri: &str) -> &str {
+    match uri.rsplit_once('/') {
+        Some((parent, _)) if parent.strip_prefix("smb://").is_some_and(|r| !r.is_empty()) => {
+            parent
+        }
+        _ => uri,
+    }
 }
 
 /// Resolve a click on a share-list entry or a directory entry.
@@ -468,6 +546,10 @@ fn spawn_worker(rx: Receiver<SmbCmd>) -> thread::JoinHandle<()> {
                         let res = run_spool(&uri, &creds).await;
                         let _ = reply.send(SmbReply::Spooled { uri, result: res });
                     }
+                    SmbCmd::Save { uri, data, creds, reply } => {
+                        let res = run_save(&uri, &data, &creds).await;
+                        let _ = reply.send(SmbReply::Saved { uri, result: res });
+                    }
                 }
             }
         });
@@ -534,4 +616,19 @@ async fn run_spool(uri: &str, creds: &SmbCreds) -> CmdResult<PathBuf> {
         return Err(e.to_string());
     }
     Ok(dest)
+}
+
+/// `run_spool`'s twin: upload bytes to a share, overwriting if it exists.
+/// `write_file_pipelined` is one compound CREATE+WRITE+FLUSH+CLOSE with
+/// `FileOverwriteIf`, so there is no file lifecycle to manage here.
+async fn run_save(uri: &str, data: &[u8], creds: &SmbCreds) -> CmdResult<()> {
+    let (host, share, rel) = split_uri(uri).ok_or_else(|| format!("bad uri: {uri}"))?;
+    let share = share.ok_or_else(|| format!("no share in uri: {uri}"))?;
+    let mut client = connect(&host, creds).await?;
+    let mut tree = client.connect_share(&share).await.map_err(|e| e.to_string())?;
+    client
+        .write_file_pipelined(&mut tree, &rel, data)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }

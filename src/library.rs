@@ -130,29 +130,94 @@ pub fn is_playlist(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("tplay"))
 }
 
+/// Fallback filename for a playlist save when the tracked file has no usable
+/// stem (a fresh playlist, or one whose name has no extension to strip).
+pub const DEFAULT_PLAYLIST_NAME: &str = "playlist.tplay";
+
+/// The name to carry over when re-saving: the file's stem. `None` when nothing
+/// is usable — no file at all, or a dotfile like `.tplay`, whose "stem" is the
+/// whole name (carrying that over would save `.tplay.tplay`).
+fn playlist_stem(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_str()?;
+    if stem.is_empty() || (stem.starts_with('.') && path.extension().is_none()) {
+        return None;
+    }
+    Some(stem.to_owned())
+}
+
+/// Suggested filename when saving a playlist: the tracked file's stem, so
+/// saving a loaded playlist somewhere new keeps its name. Falls back to
+/// `DEFAULT_PLAYLIST_NAME` when there is no usable stem.
+pub fn default_playlist_name(playlist_file: Option<&Path>) -> String {
+    match playlist_file.and_then(playlist_stem) {
+        Some(stem) => format!("{stem}.tplay"),
+        None => DEFAULT_PLAYLIST_NAME.to_string(),
+    }
+}
+
+/// Normalize a user-typed filename into a safe `.tplay` name: the extension is
+/// implied if omitted, and path separators are stripped rather than turned into
+/// a bogus server path. `None` for blank input.
+pub fn playlist_file_name(typed: &str) -> Option<String> {
+    let cleaned = typed.trim().replace(['/', '\\'], "_");
+    if cleaned.is_empty() {
+        return None;
+    }
+    let path = Path::new(&cleaned);
+    if playlist_stem(path).is_none() {
+        return Some(DEFAULT_PLAYLIST_NAME.to_string());
+    }
+    Some(if is_playlist(path) {
+        cleaned
+    } else {
+        format!("{cleaned}.tplay")
+    })
+}
+
 /// Playlist file format (shared for read/write).
 #[derive(Serialize, Deserialize)]
 struct PlaylistData { paths: Vec<String> }
 
-/// Write the given tracks as a `.tplay` playlist file (paths only).
-pub fn write_playlist(path: &Path, tracks: &[PathBuf]) -> std::io::Result<()> {
+/// Serialize tracks as `.tplay` JSON. The pure half, shared by the local
+/// writer and the SMB save (which ships the bytes to the worker instead of
+/// writing a local file).
+pub fn playlist_json(tracks: &[PathBuf]) -> std::io::Result<String> {
     let data = PlaylistData {
         paths: tracks.iter().filter_map(|p| p.to_str().map(str::to_owned)).collect(),
     };
-    let json = serde_json::to_string_pretty(&data)?;
-    std::fs::write(path, json)
+    Ok(serde_json::to_string_pretty(&data)?)
 }
 
-/// Read a `.tplay` playlist file. Returns None if not parseable.
-/// Relative paths resolve against the playlist's own directory.
-pub fn read_playlist(path: &Path) -> Option<Vec<PathBuf>> {
+/// Write the given tracks as a `.tplay` playlist file (paths only).
+pub fn write_playlist(path: &Path, tracks: &[PathBuf]) -> std::io::Result<()> {
+    std::fs::write(path, playlist_json(tracks)?)
+}
+
+/// Read a `.tplay` playlist file, resolving relative entries against `base`.
+///
+/// `base` is explicit rather than `path.parent()` because a remote playlist is
+/// read from its **spool cache copy** — resolving against that would silently
+/// drop every relative track. Local callers pass the file's own directory;
+/// remote callers pass the share directory URI the playlist was browsed at.
+///
+/// `smb://` entries are kept verbatim and are NOT resolved against `base`.
+/// They only *look* relative: `Path::is_relative` is true for anything without
+/// a leading `/`, so keying off it would join every remote track onto the base
+/// and turn `smb://nas/m/x.mp3` into `smb://nas/m/smb://nas/m/x.mp3`.
+pub fn read_playlist(path: &Path, base: &Path) -> Option<Vec<PathBuf>> {
     let json = std::fs::read_to_string(path).ok()?;
     let data: PlaylistData = serde_json::from_str(&json).ok()?;
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
     Some(
         data.paths
             .into_iter()
-            .map(|s| { let p = PathBuf::from(s); if p.is_relative() { dir.join(p) } else { p } })
+            .map(|s| {
+                let p = PathBuf::from(s);
+                if crate::network::is_remote(&p) || p.is_absolute() {
+                    p
+                } else {
+                    base.join(p)
+                }
+            })
             .collect(),
     )
 }

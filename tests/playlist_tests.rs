@@ -1,8 +1,11 @@
 //! Playlist logic tests — shuffle, repeat, add/remove/move, navigation.
 
-use tplay::library::{write_playlist, read_playlist};
+use tplay::library::{
+    default_playlist_name, playlist_file_name, playlist_json, read_playlist, write_playlist,
+    DEFAULT_PLAYLIST_NAME,
+};
 use tplay::app::EQ_PRESETS;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[path = "common.rs"]
 mod common;
 use crate::common::test_dir;
@@ -18,7 +21,7 @@ fn playlist_write_read_roundtrip() {
     ];
 
     write_playlist(&file, &tracks).unwrap();
-    let back = read_playlist(&file).unwrap();
+    let back = read_playlist(&file, &dir).unwrap();
 
     assert_eq!(back[0], dir.join("track1.mp3"));
     assert_eq!(back[1], dir.join("relative/track2.ogg"));
@@ -32,10 +35,10 @@ fn playlist_read_malformed_returns_none() {
     let file = dir.join("bad.tplay");
 
     std::fs::write(&file, "not json").unwrap();
-    assert!(read_playlist(&file).is_none());
+    assert!(read_playlist(&file, &dir).is_none());
 
     std::fs::write(&file, "{}").unwrap(); // valid json, wrong structure
-    assert!(read_playlist(&file).is_none());
+    assert!(read_playlist(&file, &dir).is_none());
 
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -53,13 +56,116 @@ fn playlist_relative_paths_resolve_against_playlist_dir() {
     ];
 
     write_playlist(&file, &tracks).unwrap();
-    let back = read_playlist(&file).unwrap();
+    let back = read_playlist(&file, &subdir).unwrap();
 
-    // Relative paths are joined with playlist dir but not canonicalized
+    // Relative paths are joined with the base but not canonicalized
     assert_eq!(back[0], subdir.join("track1.mp3"));
     assert_eq!(back[1], subdir.join("../track2.flac"));
 
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// ── Remote (SMB) playlist support ─────────────────────────────────────
+
+/// The load-bearing case: a playlist read from a share contains `smb://` URIs,
+/// and `Path::is_relative` is TRUE for those (no leading `/`). Keying off
+/// `is_relative` would join every remote track onto the base and turn
+/// `smb://nas/m/x.mp3` into `smb://nas/m/smb://nas/m/x.mp3`.
+#[test]
+fn smb_uris_are_not_joined_onto_the_base() {
+    let dir = test_dir("smb_uris_are_not_joined_onto_the_base");
+    let file = dir.join("remote.tplay");
+    let share = "smb://192.168.15.59/newhd/music";
+
+    let tracks = vec![
+        PathBuf::from("smb://192.168.15.59/newhd/music/a.mp3"),
+        PathBuf::from("smb://192.168.15.59/newhd/other/b.flac"),
+        dir.join("local.wav"),
+    ];
+    write_playlist(&file, &tracks).unwrap();
+    let back = read_playlist(&file, Path::new(share)).unwrap();
+
+    assert_eq!(back[0], tracks[0], "smb URI must survive verbatim");
+    assert_eq!(back[1], tracks[1], "smb URI on another share must survive");
+    assert_eq!(back[2], dir.join("local.wav"), "absolute local path untouched");
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A remote playlist is read from its SPOOL CACHE copy, so the base must be
+/// passed explicitly as the share directory — resolving against the cache file's
+/// own parent would silently drop every relative track.
+#[test]
+fn relative_entries_resolve_against_a_share_uri_base() {
+    let dir = test_dir("relative_entries_resolve_against_a_share_uri_base");
+    let cache_copy = dir.join("spool-cache-copy.tplay");
+    let share_dir = "smb://nas/media/albums";
+
+    write_playlist(&cache_copy, &[PathBuf::from("01.mp3"), PathBuf::from("sub/02.mp3")]).unwrap();
+
+    // The WRONG base (the cache file's own directory) would yield local paths.
+    let wrong = read_playlist(&cache_copy, cache_copy.parent().unwrap()).unwrap();
+    assert!(wrong[0].starts_with(dir.to_str().unwrap()), "premise: cache-dir base is wrong");
+
+    // The right base — the share directory the playlist was browsed at.
+    let back = read_playlist(&cache_copy, Path::new(share_dir)).unwrap();
+    assert_eq!(back[0], PathBuf::from("smb://nas/media/albums/01.mp3"));
+    assert_eq!(back[1], PathBuf::from("smb://nas/media/albums/sub/02.mp3"));
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Saves write full `smb://` URIs, so serialize→read must be lossless for a
+/// mixed local/remote playlist (the shape a share playlist actually has).
+#[test]
+fn mixed_playlist_roundtrips_through_json() {
+    let dir = test_dir("mixed_playlist_roundtrips_through_json");
+    let file = dir.join("mixed.tplay");
+    let tracks = vec![
+        PathBuf::from("/home/lucas/Music/local.mp3"),
+        PathBuf::from("smb://nas/share/remote.mp3"),
+    ];
+
+    let json = playlist_json(&tracks).unwrap();
+    assert!(json.contains("smb://nas/share/remote.mp3"), "URIs are stored in full");
+
+    std::fs::write(&file, &json).unwrap();
+    let back = read_playlist(&file, &dir).unwrap();
+    assert_eq!(back, tracks, "mixed playlist must survive a save/load cycle");
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn default_playlist_name_keeps_the_tracked_stem() {
+    // A loaded playlist keeps its name when saved somewhere new.
+    assert_eq!(default_playlist_name(Some(Path::new("/music/road.trip.tplay"))), "road.trip.tplay");
+    // Remote targets parse too — only the last segment matters.
+    assert_eq!(
+        default_playlist_name(Some(Path::new("smb://nas/share/mix.tplay"))),
+        "mix.tplay"
+    );
+    // No tracked file, or a name with no stem to carry over.
+    assert_eq!(default_playlist_name(None), DEFAULT_PLAYLIST_NAME);
+    assert_eq!(default_playlist_name(Some(Path::new(".tplay"))), DEFAULT_PLAYLIST_NAME);
+}
+
+#[test]
+fn playlist_file_name_appends_the_extension_and_strips_separators() {
+    // The extension is implied — users type a bare name.
+    assert_eq!(playlist_file_name("mix").as_deref(), Some("mix.tplay"));
+    // Already correct, left alone.
+    assert_eq!(playlist_file_name("mix.tplay").as_deref(), Some("mix.tplay"));
+    // Case-insensitive: the extension check follows is_playlist.
+    assert_eq!(playlist_file_name("mix.TPLAY").as_deref(), Some("mix.TPLAY"));
+    // A typed path is sanitized, not sent to the server as a bogus path.
+    assert_eq!(playlist_file_name("a/b").as_deref(), Some("a_b.tplay"));
+    assert_eq!(playlist_file_name("a\\b").as_deref(), Some("a_b.tplay"));
+    // Blank input cancels rather than writing a nameless file.
+    assert_eq!(playlist_file_name(""), None);
+    assert_eq!(playlist_file_name("   "), None);
+    // A name that is only an extension would be a stemless hidden file.
+    assert_eq!(playlist_file_name(".tplay").as_deref(), Some(DEFAULT_PLAYLIST_NAME));
 }
 
 // ── Shuffle logic tests ────────────────────────────────────────────────

@@ -348,10 +348,17 @@ impl TPlayApp {
             app.library_dir = p;
         }
 
-        // Restore last playlist if exists
+        // Restore last playlist if it still exists. A remote target can't be
+        // stat'd, so `exists()` is always false for an smb:// path and would
+        // silently skip the restore entirely — route it through the same async
+        // fetch a click does instead, and the reply lands on the first frame's
+        // drain(). It will fail until the user logs in again: passwords are
+        // session-memory only by design, so there is nothing to reuse here.
         if let Some(pl_path) = config.last_playlist {
             let path = PathBuf::from(pl_path);
-            if path.exists() {
+            if network::is_remote(&path) {
+                app.fetch_remote_playlist(path.to_string_lossy().into_owned());
+            } else if path.exists() {
                 app.load_playlist_from(path);
             }
         }
@@ -948,19 +955,77 @@ impl TPlayApp {
 
     /// Write the current playlist to a `.tplay` file (paths only) and record
     /// it as the file future saves overwrite without re-opening the dialog.
+    ///
+    /// A remote (`smb://`) target goes to the SMB worker instead: the write is
+    /// async, so `playlist_file`/`playlist_dirty` are only updated once the
+    /// `Event::Saved` reply confirms it. Local writes are synchronous — a
+    /// failure leaves the playlist dirty and untracked so the user can retry,
+    /// rather than silently claiming a save that never happened.
     pub fn save_playlist_to(&mut self, path: PathBuf) {
+        if network::is_remote(&path) {
+            match library::playlist_json(&self.playlist) {
+                Ok(json) => {
+                    self.network.save(path.to_string_lossy().into_owned(), json);
+                }
+                Err(e) => eprintln!("tplay: could not serialize playlist: {e}"),
+            }
+            return;
+        }
         if let Err(e) = library::write_playlist(&path, &self.playlist) {
             eprintln!("tplay: could not write playlist {}: {}", path.display(), e);
+            return;
         }
         self.playlist_file = Some(path);
         self.playlist_dirty = false;
         self.save_config();
     }
 
+    /// Re-list the current remote directory. Called after a playlist lands on a
+    /// share so the new file shows up without navigating away and back.
+    fn refresh_network_dir(&mut self) {
+        if let Some(b) = self.network.browse().cloned() {
+            if b.busy {
+                return;
+            }
+            match &b.share {
+                Some(share) => self.network.browse_open(
+                    network::dir_uri(&b.host, share, &b.rel),
+                    Some(share.clone()),
+                    b.rel,
+                ),
+                None => self.network.browse_server(b.host),
+            }
+        }
+    }
+
     /// Replace the current playlist from a `.tplay` file. Tracks that no
     /// longer exist are dropped; unparseable files leave the playlist alone.
     pub fn load_playlist_from(&mut self, path: PathBuf) {
-        let Some(paths) = library::read_playlist(&path) else { return };
+        let base = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let Some(paths) = library::read_playlist(&path, base) else { return };
+        self.apply_playlist(paths, path);
+    }
+
+    /// Ask the worker to download a remote `.tplay`. The reply arrives as
+    /// `Event::Fetched` and is applied by `load_fetched_playlist`.
+    pub fn fetch_remote_playlist(&mut self, uri: String) {
+        self.network.fetch(uri);
+    }
+
+    /// Apply a downloaded remote playlist. `base` is the share directory the
+    /// playlist was browsed at — relative entries must resolve against THAT,
+    /// not against the spool cache copy we just read from.
+    fn load_fetched_playlist(&mut self, uri: String, local: PathBuf) {
+        let base = network::uri_parent(&uri);
+        let Some(paths) = library::read_playlist(&local, std::path::Path::new(base)) else {
+            eprintln!("tplay: could not parse playlist {uri}");
+            return;
+        };
+        self.apply_playlist(paths, PathBuf::from(uri));
+    }
+
+    /// Shared tail of both playlist-load paths: filter, stop, scan, track.
+    fn apply_playlist(&mut self, paths: Vec<PathBuf>, file: PathBuf) {
         self.playlist = paths
             .into_iter()
             // Remote tracks can't canonicalize — keep them as-is. Local paths
@@ -971,7 +1036,7 @@ impl TPlayApp {
             .collect();
         self.stop();
         self.ensure_tags(self.playlist.clone());
-        self.playlist_file = Some(path);
+        self.playlist_file = Some(file);
         self.playlist_dirty = false;
         self.save_config();
     }
@@ -1412,15 +1477,37 @@ impl eframe::App for TPlayApp {
         self.advance();
         self.drain_tag_scan();
         // SMB replies: browse listings are applied inside `Network::drain`;
-        // a completed spool promotes playback here.
-        if let Some(network::Event::Spooled { uri, result }) = self.network.drain() {
-            match result {
-                Ok(local) => self.load_file_as(local, PathBuf::from(uri)),
-                Err(e) => {
-                    eprintln!("tplay: spool {uri} failed: {e}");
-                    self.current_path = None;
-                    self.total_duration = None;
-                }
+        // a completed spool promotes playback, a fetched `.tplay` loads, and a
+        // save confirms. Drain every event, not just the first — a save reply
+        // must not be stranded behind an unrelated one.
+        while let Some(ev) = self.network.drain() {
+            match ev {
+                network::Event::Spooled { uri, result } => match result {
+                    Ok(local) => self.load_file_as(local, PathBuf::from(uri)),
+                    Err(e) => {
+                        eprintln!("tplay: spool {uri} failed: {e}");
+                        self.current_path = None;
+                        self.total_duration = None;
+                    }
+                },
+                network::Event::Fetched { uri, result } => match result {
+                    Ok(local) => self.load_fetched_playlist(uri, local),
+                    Err(e) => eprintln!(
+                        "tplay: could not fetch playlist {uri}: {e} (no session password for \
+                         that share yet — log in from the Library's Network section)"
+                    ),
+                },
+                network::Event::Saved { uri, result } => match result {
+                    // Only now is the save real: track the URI, clear dirty,
+                    // and re-list so the file appears in the share.
+                    Ok(()) => {
+                        self.playlist_file = Some(PathBuf::from(uri));
+                        self.playlist_dirty = false;
+                        self.save_config();
+                        self.refresh_network_dir();
+                    }
+                    Err(e) => eprintln!("tplay: could not save playlist to {uri}: {e}"),
+                },
             }
         }
         let waiting = self.network.busy();

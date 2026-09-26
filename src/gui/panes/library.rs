@@ -248,6 +248,37 @@ fn draw_remote_file_row(
     (name_resp.clicked(), add_clicked)
 }
 
+/// A `.tplay` file on a share: name + size + "Playlist" tag, no `+` (a
+/// playlist is not a track). Returns whether the row was clicked.
+fn draw_remote_playlist_row(
+    ui: &mut egui::Ui,
+    theme: &theme::Theme,
+    row_h: f32,
+    i: usize,
+    name: &str,
+    size: u64,
+) -> bool {
+    let p = theme.palette;
+    let (rect, mut row) = theme::row(ui, i, false, row_h, theme);
+    row.spacing_mut().item_spacing.x = 4.0;
+    let name_resp = row
+        .add_sized(
+            egui::vec2((rect.width() - 66.0).max(40.0), row_h),
+            egui::Label::new(
+                egui::RichText::new(name).color(p.text_primary.gamma_multiply(0.85)),
+            )
+            .truncate()
+            .sense(egui::Sense::click()),
+        )
+        .on_hover_text_at_pointer("Load playlist");
+    row.add(egui::Label::new(egui::RichText::new("Playlist").small().color(p.accent)));
+    row.add_sized(
+        egui::vec2(48.0, row_h),
+        egui::Label::new(egui::RichText::new(network::fmt_size(size)).small().color(p.text_secondary)),
+    );
+    name_resp.clicked()
+}
+
 /// The remote browser: swaps the main column when a server is selected.
 /// Breadcrumb (Local / host / share / dir) + playlist-style rows with
 /// `..`/folder descent, click-to-play and `+` for audio files.
@@ -389,24 +420,47 @@ fn remote_list_ui(app: &mut TPlayApp, ui: &mut egui::Ui) {
                 i += 1;
             }
             for e in files {
-                if !library::is_audio(Path::new(&e.name)) {
+                // `.tplay` files on a share get a row like anywhere else: the
+                // bytes live on the server, so a click spools them and applies
+                // the result rather than reading a local file.
+                let is_playlist = library::is_playlist(Path::new(&e.name));
+                if !library::is_audio(Path::new(&e.name)) && !is_playlist {
                     i += 1;
                     continue;
                 }
                 let share = browse.share.clone().unwrap_or_default();
                 let dir = network::dir_uri(&browse.host, &share, &browse.rel);
                 let uri = network::child_uri(&dir, &e.name);
-                let (play, add) = draw_remote_file_row(ui, &theme, row_h, i, &e.name, e.size);
-                if play {
-                    app.play_file(PathBuf::from(&uri));
-                }
-                if add {
-                    app.add_files(vec![PathBuf::from(&uri)]);
+                if is_playlist {
+                    if draw_remote_playlist_row(ui, &theme, row_h, i, &e.name, e.size) {
+                        // Same gate as a local `.tplay` click: replacing a
+                        // playlist with unsaved edits asks first, on a share
+                        // exactly as on disk.
+                        let stem = Path::new(&e.name)
+                            .file_stem()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        if TPlayApp::confirm(
+                            "Load playlist",
+                            &format!("Replace the current playlist with '{stem}'?"),
+                            app.playlist_dirty(),
+                        ) {
+                            app.fetch_remote_playlist(uri);
+                        }
+                    }
+                } else {
+                    let (play, add) = draw_remote_file_row(ui, &theme, row_h, i, &e.name, e.size);
+                    if play {
+                        app.play_file(PathBuf::from(&uri));
+                    }
+                    if add {
+                        app.add_files(vec![PathBuf::from(&uri)]);
+                    }
                 }
                 i += 1;
             }
             if i <= 1 {
-                ui.label(egui::RichText::new("No audio files").small().color(p.text_secondary));
+                ui.label(egui::RichText::new("No files").small().color(p.text_secondary));
             }
         });
 }

@@ -120,6 +120,42 @@ fn uri_builders_round_trip_against_splitter() {
 }
 
 #[test]
+fn uri_parent_is_the_inverse_of_child_uri() {
+    use tplay::network::uri_parent;
+
+    // The base a remote playlist's relative entries resolve against.
+    assert_eq!(uri_parent("smb://nas/share/dir/list.tplay"), "smb://nas/share/dir");
+    // A playlist at the share root resolves against the share itself.
+    assert_eq!(uri_parent("smb://nas/share/list.tplay"), "smb://nas/share");
+    // Deep paths keep everything but the filename.
+    assert_eq!(uri_parent("smb://nas/a/b/c/d/x.flac"), "smb://nas/a/b/c/d");
+    // No slash at all — nothing to strip, so the input is returned unchanged
+    // rather than panicking or yielding "".
+    assert_eq!(uri_parent("smb://nas"), "smb://nas");
+    // Round-trips against the builder for every shape.
+    for uri in [
+        "smb://nas/share/dir/list.tplay",
+        "smb://nas/share/list.tplay",
+        "smb://nas/a/b/c/d/x.flac",
+    ] {
+        let name = uri.rsplit('/').next().unwrap();
+        assert_eq!(child_uri(uri_parent(uri), name), uri, "round-trip failed for {uri}");
+    }
+}
+
+/// A `.tplay` on a share gets a row, so the remote filter that hides
+/// non-audio files must let playlists through.
+#[test]
+fn playlist_files_are_recognized_by_name() {
+    use tplay::library::is_playlist;
+    assert!(is_playlist(Path::new("mix.tplay")));
+    assert!(is_playlist(Path::new("mix.TPLAY")));
+    assert!(is_playlist(Path::new("smb://nas/share/mix.tplay")));
+    assert!(!is_playlist(Path::new("song.mp3")));
+    assert!(!is_playlist(Path::new("tplay")));
+}
+
+#[test]
 fn child_browse_distinguishes_share_entry_from_subdirectory() {
     let (uri, share, rel) = child_browse("nas", None, "", "music");
     assert_eq!(uri, "smb://nas/music");
