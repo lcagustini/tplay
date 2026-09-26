@@ -76,6 +76,12 @@ pub struct Config {
     /// Output buffer size in frames — larger = more underrun slack, more latency.
     #[serde(default = "default_buffer_size")]
     pub buffer_size: u32,
+    /// Ceiling in megabytes for the SMB spool cache. Tagging a share downloads
+    /// whole files, so without a bound the cache (which has no other eviction)
+    /// would grow without limit. Only files playback has never used are
+    /// evicted; a played track is never a candidate.
+    #[serde(default = "default_spool_cache_mb")]
+    pub spool_cache_mb: u32,
     #[serde(default)]
     pub last_playlist: Option<String>,
     #[serde(default)]
@@ -103,6 +109,14 @@ pub struct Config {
 fn default_volume() -> f32 { 1.0 }
 fn default_crossfade_secs() -> f32 { 3.0 }
 fn default_buffer_size() -> u32 { 8192 }
+/// 2 GiB of never-played spool. Sized for a laptop with room to spare; raise
+/// `spool_cache_mb` in config.json to keep more of a browsed share on disk.
+fn default_spool_cache_mb() -> u32 { 2048 }
+
+/// Cap on how many per-track tag failures one batch prints. A whole share
+/// failing at once (server went away mid-browse) would otherwise emit one line
+/// per file, hundreds of times, every frame it retries.
+const MAX_TAG_FAILURES_LOGGED: usize = 3;
 
 #[derive(Serialize, Deserialize, Default)]
 pub struct EqData {
@@ -168,6 +182,10 @@ pub struct TPlayApp {
 
     /// Output stream buffer size in frames, requested at stream open.
     buffer_size: u32,
+    /// Spool cache ceiling in MB (see `Config::spool_cache_mb`). Held as a
+    /// field so `save_config` writes the user's value back rather than
+    /// resetting it to the default on the next settings change.
+    spool_cache_mb: u32,
 
     /// Holds the slider at the intended position until get_pos() catches up,
     /// preventing snap-back to 0 during a skip_duration seek.
@@ -301,6 +319,7 @@ impl TPlayApp {
             total_duration: None,
             volume: config.volume,
             buffer_size: config.buffer_size,
+            spool_cache_mb: config.spool_cache_mb,
             seek_target: None,
             position_offset: Duration::ZERO,
             playlist: Vec::new(),
@@ -403,6 +422,7 @@ impl TPlayApp {
             viz_view: self.viz_view,
             volume: self.volume,
             buffer_size: self.buffer_size,
+            spool_cache_mb: self.spool_cache_mb,
             last_playlist: self.playlist_file.as_ref().and_then(|p| p.to_str()).map(str::to_owned),
             library: LibraryData {
                 favorites: self.favorite_dirs.iter().filter_map(|d| d.to_str().map(str::to_owned)).collect(),
@@ -1216,6 +1236,11 @@ impl TPlayApp {
     /// the playlist's sequential/auto-advance flow.
     fn play_uri(&mut self, uri: PathBuf) {
         let local = network::cache_path(&uri.to_string_lossy());
+        // Mark it played on BOTH paths, including the spool request below: the
+        // user asked for this track, so its cache file must be exempt from
+        // eviction even while the download is still in flight. (Tag-driven
+        // spools never come through here, which is what leaves them evictable.)
+        self.network.mark_played(&uri.to_string_lossy());
         if local.is_file() {
             self.load_file_as(local, uri);
         } else {
@@ -1523,18 +1548,43 @@ impl eframe::App for TPlayApp {
                 network::Event::Tagged(results) => {
                     // Same cache the local scan fills, keyed by URI, so rows
                     // switch from filename to tagged title on their own.
-                    //
-                    // A file whose header yielded nothing is cached as an EMPTY
-                    // TrackInfo rather than skipped. Two reasons: it marks the
-                    // URI as checked, so the header isn't re-requested every
-                    // frame; and `title_or_stem` already falls back to the stem
-                    // on an empty title, so it displays exactly like no cache
-                    // entry. Caching it is also what stops a share full of
-                    // WAV/M4A (whose tags a prefix can't reach) from showing
-                    // "Scanning…" forever.
-                    for (uri, info) in results {
-                        self.tag_cache.insert(PathBuf::from(uri), info.unwrap_or_default());
+                    let mut failed = 0usize;
+                    for (uri, res) in results {
+                        match res {
+                            // Cached even when every field is blank: that is the
+                            // definitive "we read it, it has no tags" answer,
+                            // and `title_or_stem` falls back to the stem on an
+                            // empty title, so it displays exactly like no cache
+                            // entry. It is also what stops a folder of genuinely
+                            // untagged files from re-requesting forever.
+                            Ok(info) => {
+                                self.tag_cache.insert(PathBuf::from(uri), info);
+                            }
+                            // NOT cached. A failed transfer says nothing about
+                            // the file's tags — it may be a blip, or expired
+                            // credentials — so caching it as untagged would
+                            // blank the row for the rest of the session.
+                            // Leaving it out is what makes it retryable;
+                            // `Network`'s attempt count is what stops that
+                            // retrying forever.
+                            Err(e) => {
+                                failed += 1;
+                                if failed <= MAX_TAG_FAILURES_LOGGED {
+                                    eprintln!("tplay: could not read tags for {uri}: {e}");
+                                }
+                            }
+                        }
                     }
+                    if failed > MAX_TAG_FAILURES_LOGGED {
+                        eprintln!(
+                            "tplay: {failed} more remote track(s) failed to read; \
+                             see the first error above"
+                        );
+                    }
+                    // Housekeeping after a batch, not per frame: this walks the
+                    // spool dir, and tag spools are what fill it.
+                    let budget = u64::from(self.spool_cache_mb).saturating_mul(1024 * 1024);
+                    self.network.evict_unplayed(budget);
                 }
             }
         }

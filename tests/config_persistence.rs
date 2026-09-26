@@ -16,6 +16,7 @@ fn config_round_trip_preserves_every_field() {
         viz_view: VizView::Wave,
         volume: 0.5,
         buffer_size: 16384,
+        spool_cache_mb: 8192,
         last_playlist: Some("/music/chill.tplay".into()),
         library: LibraryData {
             favorites: vec!["/music/favs".into()],
@@ -44,6 +45,7 @@ fn config_round_trip_preserves_every_field() {
     assert_eq!(back.viz_view, VizView::Wave);
     assert_eq!(back.volume, 0.5);
     assert_eq!(back.buffer_size, 16384);
+    assert_eq!(back.spool_cache_mb, 8192);
     assert_eq!(back.last_playlist.as_deref(), Some("/music/chill.tplay"));
     assert_eq!(back.library.favorites, vec![PathBuf::from("/music/favs")]);
     assert_eq!(back.library.last_dir, "/music");
@@ -77,6 +79,7 @@ fn config_missing_fields_fall_back_to_defaults() {
     assert_eq!(c.viz_view, VizView::Bars); // default view
     assert_eq!(c.volume, 1.0); // default_volume
     assert_eq!(c.buffer_size, 8192); // default_buffer_size
+    assert_eq!(c.spool_cache_mb, 2048); // default_spool_cache_mb
     assert_eq!(c.last_playlist, None);
     assert!(c.library.favorites.is_empty());
     assert_eq!(c.library.last_dir, "");
@@ -106,6 +109,7 @@ fn config_json_shape_has_expected_keys() {
 
     assert!(v.get("theme").is_some());
     assert!(v.get("shuffle").is_some());
+    assert!(v.get("spool_cache_mb").is_some());
     assert!(v.get("repeat").is_some());
     assert!(v.get("viz_view").is_some());
     assert!(v.get("volume").is_some());

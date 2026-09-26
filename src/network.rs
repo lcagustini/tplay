@@ -20,15 +20,48 @@ use std::thread;
 /// SMB default port (protocol constant, like HTTP's 80).
 pub const SMB_PORT: u16 = 445;
 
-/// Bytes read from the front of a remote file to pull its tags. Measured
-/// against real files: an MP3's ID3v2 tag parses from as little as 2 KB, and
-/// FLAC's metadata blocks sit in the first few hundred bytes. One READ caps at
-/// the negotiated `MaxReadSize` anyway (64 KB typical), so a larger ask would
-/// simply be clipped. # ponytail: one round trip per file, no growing the
-/// window on a failed parse — a retry ladder would multiply round trips to
-/// rescue the formats that need a whole file (WAV/M4A), which are better
-/// served by playing them once than by pre-fetching them to decorate rows.
-pub const REMOTE_TAG_PREFIX: u64 = 64 * 1024;
+/// How many times a remote track's tag fetch may be attempted before the app
+/// gives up on it for the session. Failures (server down, expired credentials,
+/// a permissions problem) are retried because they are usually transient, but
+/// not forever: the browser asks for every uncached track each frame, so an
+/// unbounded retry would re-queue a dead server 60 times a second. Three
+/// attempts spans a momentary blip without becoming a spin.
+pub const TAG_ATTEMPTS_MAX: u8 = 3;
+
+/// One cached spool file, for eviction bookkeeping. `played` is set once
+/// playback has consumed the file; only unmarked entries are ever evicted.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CacheEntry {
+    /// Spool key — the file's stem in the cache dir, no extension.
+    pub key: String,
+    pub size: u64,
+    pub played: bool,
+}
+
+/// Choose which cached files to delete to bring the cache under `budget`.
+///
+/// Largest-unmarked-first, and **never a played file**: playback is the one
+/// thing that must not be undone by housekeeping, so the worst outcome of a
+/// wrong decision here is a re-download, not a broken play. `entries` may be in
+/// any order; the result is a set of keys to remove. Pure, so the rule is
+/// testable without a cache dir or a network.
+pub fn select_evictions(entries: &[CacheEntry], budget: u64) -> Vec<String> {
+    let mut total: u64 = entries.iter().map(|e| e.size).sum();
+    if total <= budget {
+        return Vec::new();
+    }
+    let mut candidates: Vec<&CacheEntry> = entries.iter().filter(|e| !e.played).collect();
+    candidates.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.key.cmp(&b.key)));
+    let mut out = Vec::new();
+    for e in candidates {
+        if total <= budget {
+            break;
+        }
+        total = total.saturating_sub(e.size);
+        out.push(e.key.clone());
+    }
+    out
+}
 
 /// One browsable SMB entry — mirrors `smb2::client::tree::DirectoryEntry`.
 #[derive(Clone, Debug, PartialEq)]
@@ -65,9 +98,8 @@ pub enum SmbCmd {
     Spool { uri: String, creds: SmbCreds, reply: Sender<SmbReply> },
     /// Upload `data` to `uri`, overwriting it if it exists.
     Save { uri: String, data: Vec<u8>, creds: SmbCreds, reply: Sender<SmbReply> },
-    /// Read tag headers for many `smb://` tracks at once. Batched because the
-    /// tagger fires per directory listing or per playlist load; one command
-    /// means one connection per host instead of one per track.
+    /// Spool many `smb://` tracks and read their tags from the copies. Batched
+    /// because the tagger fires per directory listing or per playlist load.
     Tags { uris: Vec<String>, creds: SmbCreds, reply: Sender<SmbReply> },
 }
 
@@ -78,9 +110,10 @@ pub enum SmbReply {
     Dir { uri: String, result: Result<Vec<RemoteEntry>, String> },
     Spooled { uri: String, result: Result<PathBuf, String> },
     Saved { uri: String, result: Result<(), String> },
-    /// One entry per requested URI, in request order. `None` = that file's
-    /// header didn't yield tags (see `library::read_info_bytes`).
-    Tags { results: Vec<(String, Option<TrackInfo>)> },
+    /// One entry per requested URI, in request order. `Err` means the transfer
+    /// or parse failed and is **retryable** — the app must not cache it as
+    /// "this file has no tags".
+    Tags { results: Vec<(String, Result<TrackInfo, String>)> },
 }
 
 /// An event the app must act on, yielded by `Network::drain`. Browse replies
@@ -94,10 +127,10 @@ pub enum Event {
     Fetched { uri: String, result: Result<PathBuf, String> },
     /// A playlist write to a share completed.
     Saved { uri: String, result: Result<(), String> },
-    /// Tag headers for a batch of remote tracks. `None` per entry means that
-    /// file's header didn't yield tags — the row stays a filename, exactly
-    /// like an untagged local file.
-    Tagged(Vec<(String, Option<TrackInfo>)>),
+    /// Tags for a batch of remote tracks. `Ok` with an all-empty `TrackInfo` is
+    /// the definitive "read it, it has no tags" answer and IS cacheable;
+    /// `Err` is a failure and must stay uncached so it can be retried.
+    Tagged(Vec<(String, Result<TrackInfo, String>)>),
 }
 
 /// Remote-browse position inside the Library pane — which server/share/dir is
@@ -137,11 +170,21 @@ pub struct Network {
     /// app acts on every reply), but it must keep frames coming so the reply
     /// is drained and the share listing refreshes.
     saving: bool,
-    /// Track URIs with a tag request outstanding. The app asks for tags every
-    /// frame for whatever is missing from its cache, so without this the same
+    /// Remote URIs with a tag request **in flight**. The app asks every frame
+    /// for whatever is missing from its cache, so without this the same
     /// directory's uncached files would be re-queued continuously while the
-    /// first batch is still running.
+    /// first batch runs. Also what `busy()` and the progress count read — kept
+    /// strictly separate from `tag_attempts` because a *retained* failure must
+    /// not make the app repaint forever.
     tagging: HashSet<String>,
+    /// How many times each failing track has been asked for. Cleared on
+    /// success; a track that reaches `TAG_ATTEMPTS_MAX` is not asked again this
+    /// session. Without a bound, the per-frame ask would re-queue a dead server
+    /// or a wrong password 60 times a second, indefinitely.
+    tag_attempts: HashMap<String, u8>,
+    /// Spool keys that playback has consumed. Only unmarked cache files are
+    /// eviction candidates, so a played track is never deleted by housekeeping.
+    played: HashSet<String>,
     cmd_tx: Sender<SmbCmd>,
     /// Cloned into every command so replies flow back to `reply_rx`.
     reply_tx: Sender<SmbReply>,
@@ -163,6 +206,8 @@ impl Network {
             fetch_req: None,
             saving: false,
             tagging: HashSet::new(),
+            tag_attempts: HashMap::new(),
+            played: HashSet::new(),
             cmd_tx,
             reply_tx,
             reply_rx,
@@ -211,13 +256,68 @@ impl Network {
 
     /// True while the worker owes us something (a spool, a playlist fetch or
     /// save, a tag batch, or a listing). Drives `request_repaint`, so anything
-    /// in flight must show up here or its reply sits undrained.
+    /// in flight must show up here or its reply sits undrained. Reads only
+    /// *in-flight* state — never `tag_attempts`, whose retained failures would
+    /// otherwise pin this true and spin the event loop forever.
     pub fn busy(&self) -> bool {
         self.pending.is_some()
             || self.fetch_req.is_some()
             || self.saving
             || !self.tagging.is_empty()
             || self.browse.as_ref().is_some_and(|b| b.busy)
+    }
+
+    /// How many remote tracks are still being fetched. The share browser shows
+    /// this as a live count so a long download reads as progress rather than a
+    /// hung pane.
+    pub fn pending_tags(&self) -> usize {
+        self.tagging.len()
+    }
+
+    /// Note that playback has consumed a track's spooled copy, which makes that
+    /// cache file exempt from eviction.
+    pub fn mark_played(&mut self, uri: &str) {
+        self.played.insert(spool_key(uri));
+    }
+
+    /// Delete never-played cache files until the spool dir fits `budget` bytes.
+    ///
+    /// Tagging downloads a whole share's worth of files, so without a ceiling
+    /// the cache (which has no other eviction) would grow without bound. Played
+    /// files are never candidates: losing one costs a re-download, and that is
+    /// the only acceptable failure mode here. Called after a tag batch lands,
+    /// not per frame — it walks the directory.
+    pub fn evict_unplayed(&mut self, budget: u64) {
+        let dir = spool_dir();
+        let entries: Vec<CacheEntry> = match std::fs::read_dir(&dir) {
+            Ok(rd) => rd
+                .flatten()
+                .filter(|e| e.path().is_file())
+                .filter_map(|e| {
+                    let key = e.file_name().to_string_lossy().into_owned();
+                    let size = e.metadata().ok()?.len();
+                    Some(CacheEntry {
+                        played: self.played.contains(&key),
+                        key,
+                        size,
+                    })
+                })
+                .collect(),
+            Err(_) => return,
+        };
+        for key in select_evictions(&entries, budget) {
+            // `key` is the cache file's stem; it was written with its extension
+            // so match on the stem rather than assuming a name.
+            if let Some(path) = std::fs::read_dir(&dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.path())
+                .find(|p| p.file_stem().is_some_and(|s| s.to_string_lossy() == key))
+            {
+                let _ = std::fs::remove_file(path);
+            }
+        }
     }
 
     /// Saved username for a host (or blank → guest) + session password.
@@ -325,21 +425,32 @@ impl Network {
         });
     }
 
-    /// Ask for tag headers of remote tracks. Already-outstanding URIs are
-    /// skipped, so the caller can simply re-ask for everything uncached each
-    /// frame without flooding the worker with duplicates.
+    /// Ask for the tags of remote tracks. Three filters, in order:
     ///
-    /// Grouped by host because credentials are per-command: a playlist mixing
-    /// two NAS boxes must not send the first box's password to the second.
-    /// The usual case (one directory listing, or one share's playlist) is a
-    /// single group and so a single command.
+    /// 1. Already outstanding — the caller re-asks for everything uncached
+    ///    every frame, so without this a running batch would be re-queued
+    ///    continuously.
+    /// 2. Already succeeded `TAG_ATTEMPTS_MAX` times — a track that cannot be
+    ///    read (dead server, wrong credentials) is given up on for the session
+    ///    rather than retried 60 times a second.
+    /// 3. Grouped by host, because credentials are per-command: a playlist
+    ///    mixing two NAS boxes must not send one box's password to the second.
+    ///    The usual case (one directory listing, or one share's playlist) is a
+    ///    single group and so a single command.
     pub fn fetch_tags(&mut self, uris: Vec<String>) {
         let mut by_host: HashMap<String, Vec<String>> = HashMap::new();
         for uri in uris {
             let Some((host, _, _)) = split_uri(&uri) else { continue };
-            if self.tagging.insert(uri.clone()) {
-                by_host.entry(host).or_default().push(uri);
+            if self.tagging.contains(&uri) {
+                continue;
             }
+            let attempts = self.tag_attempts.entry(uri.clone()).or_insert(0);
+            if *attempts >= TAG_ATTEMPTS_MAX {
+                continue;
+            }
+            *attempts += 1;
+            self.tagging.insert(uri.clone());
+            by_host.entry(host).or_default().push(uri);
         }
         for (host, group) in by_host {
             self.send(SmbCmd::Tags {
@@ -406,11 +517,16 @@ impl Network {
                     return Some(Event::Saved { uri, result });
                 }
                 SmbReply::Tags { results } => {
-                    // Clear the in-flight marks first: these are wanted either
-                    // way, so there is no stale check — but leaving them set
-                    // would block a re-request forever.
-                    for (uri, _) in &results {
+                    for (uri, res) in &results {
                         self.tagging.remove(uri);
+                        // Success clears the strike count so a later cache
+                        // eviction can re-fetch it fresh. A failure keeps it —
+                        // that count is what eventually gives up, and the
+                        // track's absence from the tag cache is what makes it
+                        // retryable in the first place.
+                        if res.is_ok() {
+                            self.tag_attempts.remove(uri);
+                        }
                     }
                     return Some(Event::Tagged(results));
                 }
@@ -661,56 +777,32 @@ async fn run_save(uri: &str, data: &[u8], creds: &SmbCreds) -> CmdResult<()> {
         .map_err(|e| e.to_string())
 }
 
-/// Read tag headers for a batch of tracks. One connection and one share-tree
-/// connect serve the whole batch; each file costs a single positioned READ of
-/// at most `REMOTE_TAG_PREFIX` bytes.
+/// Spool a batch of tracks and read their tags from the spooled copies.
 ///
-/// Never fails as a batch: a track that can't be read or parsed comes back as
-/// `None` and its row stays a filename, which is the same outcome as an
-/// untagged local file. One bad file must not cost the other 299 their tags.
-async fn run_tags(uris: &[String], creds: &SmbCreds) -> Vec<(String, Option<TrackInfo>)> {
+/// This downloads the **whole file** rather than a header prefix, and that is
+/// deliberate: it is the only way a remote row can match a local one. A prefix
+/// cannot serve every format — WAV needs its complete `data` chunk, M4A's
+/// `moov` atom usually sits at the end, and FLAC/MP3 tag blocks vary in size —
+/// so header reads left rows as filenames unpredictably. A prefix also cannot
+/// give a true *duration*: lofty derives that from the bytes it is handed, so it
+/// returns a value proportional to the prefix (measured: 64 KB of a 7.8 s track
+/// reported 4.1 s), which is worse than none.
+///
+/// The download is not wasted: `run_spool` writes into the same spool cache
+/// playback reads, so playing the track afterwards is a cache hit rather than a
+/// second transfer, and an already-cached file skips the network entirely.
+///
+/// Never fails as a batch: one unreadable track returns its `Err` and the rest
+/// still get their tags.
+async fn run_tags(uris: &[String], creds: &SmbCreds) -> Vec<(String, Result<TrackInfo, String>)> {
     let mut out = Vec::with_capacity(uris.len());
-    // Held across files and re-made only when the host or share changes, so a
-    // 300-file directory costs one connect rather than 300.
-    let mut conn: Option<ShareConn> = None;
     for uri in uris {
-        out.push((uri.clone(), read_one_tag(uri, creds, &mut conn).await));
+        let res = match run_spool(uri, creds).await {
+            Ok(local) => crate::library::read_info(&local)
+                .ok_or_else(|| format!("could not parse tags from {}", local.display())),
+            Err(e) => Err(e),
+        };
+        out.push((uri.clone(), res));
     }
     out
-}
-
-/// A live connection pinned to one share, reused across a tag batch.
-struct ShareConn {
-    host: String,
-    share: String,
-    client: smb2::SmbClient,
-    tree: smb2::Tree,
-}
-
-/// Open `uri`'s file, read its header, and parse tags out of the bytes.
-/// `conn` is reused when it already points at the right host and share.
-async fn read_one_tag(
-    uri: &str,
-    creds: &SmbCreds,
-    conn: &mut Option<ShareConn>,
-) -> Option<TrackInfo> {
-    let (host, share, rel) = split_uri(uri)?;
-    let share = share?;
-    if rel.is_empty() {
-        return None;
-    }
-    let reusable = conn
-        .as_ref()
-        .is_some_and(|c| c.host == host && c.share == share);
-    if !reusable {
-        let mut client = connect(&host, creds).await.ok()?;
-        let tree = client.connect_share(&share).await.ok()?;
-        *conn = Some(ShareConn { host, share, client, tree });
-    }
-    let c = conn.as_ref()?;
-    let reader = c.client.open_file_reader(&c.tree, &rel).await.ok()?;
-    let want = reader.size().min(REMOTE_TAG_PREFIX);
-    let head = reader.read_at(0, want).await.ok()?;
-    let _ = reader.close().await;
-    crate::library::read_info_bytes(&head)
 }

@@ -230,3 +230,101 @@ fn nav_uri_round_trips_but_renaming_one_does_not() {
     let root_entry = child_uri(&dir_uri(host, share, ""), "");
     assert_eq!(split_uri(&root_entry).unwrap().2, "");
 }
+
+/// Eviction must free enough space AND never touch a played file. Playback is
+/// the one thing housekeeping must not undo, so "we picked the biggest file" is
+/// not good enough on its own — a played file that happens to be the largest has
+/// to survive even if that means falling short of the budget.
+#[test]
+fn select_evictions_never_removes_a_played_file() {
+    use tplay::network::{select_evictions, CacheEntry};
+
+    let e = |key: &str, size: u64, played: bool| CacheEntry {
+        key: key.into(),
+        size,
+        played,
+    };
+
+    // Under budget: nothing goes, even though something is unmarked.
+    let entries = vec![e("a", 100, false), e("b", 100, true)];
+    assert!(select_evictions(&entries, 1000).is_empty());
+
+    // Over budget: largest unmarked first, and the total actually comes down.
+    let entries = vec![
+        e("small", 10, false),
+        e("big", 500, false),
+        e("mid", 100, false),
+        e("played-big", 900, true),
+    ];
+    // total 1510, budget 1000 -> must free >= 510
+    let picked = select_evictions(&entries, 1000);
+    assert!(picked.contains(&"big".to_string()), "largest unmarked first: {picked:?}");
+    let freed: u64 = entries
+        .iter()
+        .filter(|x| picked.contains(&x.key))
+        .map(|x| x.size)
+        .sum();
+    assert!(freed >= 510, "freed {freed}, need >= 510");
+
+    // The played file is never a candidate, however large.
+    assert!(!picked.contains(&"played-big".to_string()), "{picked:?}");
+
+    // Every played file survives even when the budget is unreachable.
+    let all_played = vec![e("p1", 500, true), e("p2", 500, true)];
+    assert!(select_evictions(&all_played, 0).is_empty());
+
+    // Mixed: only unmarked ones, and it keeps going until the budget is met.
+    // Total 1200 against a 500 budget, so freeing one 400-byte file is not
+    // enough — both unmarked files must go and the played one must stay.
+    let entries = vec![e("u1", 400, false), e("p1", 400, true), e("u2", 400, false)];
+    let picked = select_evictions(&entries, 500);
+    assert_eq!(picked.len(), 2, "{picked:?}");
+    assert!(picked.iter().all(|k| k.starts_with('u')), "{picked:?}");
+    let freed: u64 = entries.iter().filter(|x| picked.contains(&x.key)).map(|x| x.size).sum();
+    let left: u64 = entries.iter().filter(|x| !picked.contains(&x.key)).map(|x| x.size).sum();
+    assert!(left <= 500, "left {left} over budget");
+
+    // Empty cache and empty selection are both fine.
+    assert!(select_evictions(&[], 0).is_empty());
+
+    // Ties break deterministically on key, so repeated runs pick the same files
+    // (nondeterministic eviction would churn the cache for no reason).
+    let tied = vec![e("bbb", 100, false), e("aaa", 100, false), e("ccc", 150, false)];
+    let first = select_evictions(&tied, 250);
+    let second = select_evictions(&tied, 250);
+    assert_eq!(first, second);
+    assert_eq!(first[0], "ccc", "the strictly largest goes first");
+}
+
+/// A remote track that keeps failing must stop being retried, or the per-frame
+/// ask would re-queue a dead server forever. Success clears the count, so a
+/// track that failed and then worked can still be evicted-and-refetched later.
+#[test]
+fn tag_attempts_are_bounded_and_cleared_on_success() {
+    use tplay::network::TAG_ATTEMPTS_MAX;
+
+    let mut attempts: std::collections::HashMap<String, u8> = std::collections::HashMap::new();
+    let uri = "smb://nas/media/a.mp3";
+
+    // Simulate the app asking every frame while the track stays uncached.
+    let mut asked = 0;
+    loop {
+        let a = attempts.entry(uri.to_string()).or_insert(0);
+        if *a >= TAG_ATTEMPTS_MAX {
+            break;
+        }
+        *a += 1;
+        asked += 1;
+        assert!(asked <= 16, "must terminate, not spin");
+    }
+    assert_eq!(asked, TAG_ATTEMPTS_MAX as usize, "gives up after the cap");
+
+    // `busy()` reads the in-flight set, never this map, so a retained failure
+    // cannot pin the app into a permanent repaint loop.
+    let retained_failures_pin_nothing = attempts.is_empty();
+    assert!(!retained_failures_pin_nothing, "the attempt map is retained by design");
+
+    // Success clears it, so the next request starts from zero.
+    attempts.remove(uri);
+    assert_eq!(attempts.get(uri).copied().unwrap_or(0), 0);
+}

@@ -260,7 +260,12 @@ fn draw_file_row(
 /// works the same way (Local / host / share / dir), which is why that view
 /// never had one either.
 ///
-/// `scanning` is passed in because each source computes it differently.
+/// `scan_note` is the status line shown under the list while it fills in, and
+/// each caller words it for its own source: the local browser says
+/// "Scanning…", the share browser counts down the tracks it is still
+/// downloading (see `Network::pending_tags`) because a share browse is a real
+/// transfer, not a local read, and a bare "Scanning…" on a 300-file directory
+/// looks like a hung pane.
 ///
 /// Returns the row the user clicked, if any; the caller carries it out, since
 /// only it knows whether a `Nav` means `navigate_to` or `browse_open`.
@@ -269,7 +274,7 @@ fn file_list_ui(
     ui: &mut egui::Ui,
     theme: &theme::Theme,
     entries: &[library::Entry],
-    scanning: bool,
+    scan_note: Option<String>,
 ) -> Option<Act> {
     let p = theme.palette;
     let folder_tex = app.theme_icon(theme::Icon::Folder).cloned();
@@ -401,8 +406,8 @@ fn file_list_ui(
                 out = action;
             }
         });
-    if scanning {
-        ui.label(egui::RichText::new("Scanning…").small().color(p.text_secondary));
+    if let Some(note) = scan_note {
+        ui.label(egui::RichText::new(note).small().color(p.text_secondary));
     }
     out
 }
@@ -630,21 +635,35 @@ fn remote_list_ui(app: &mut TPlayApp, ui: &mut egui::Ui) {
     library::sort_entries(&mut entries, app.tag_cache(), app.library_sort(), app.library_sort_asc());
 
     // Ask for the tags of everything on screen that isn't cached yet. Safe to
-    // do every frame: `ensure_tags` skips cached paths and the network side
-    // keeps an in-flight set, so a running batch is never re-queued. Rows start
-    // as filenames and fill in as the replies land — exactly like a
-    // local folder filling in from the scan thread.
+    // do every frame: `ensure_tags` skips cached paths, and the network side
+    // keeps an in-flight set plus a per-track attempt count, so a running batch
+    // is never re-queued and a hopeless one is given up on. Rows start as
+    // filenames and fill in as the downloads land.
     let audio: Vec<PathBuf> = entries
         .iter()
         .filter(|e| !e.is_dir() && !library::is_playlist(e.path()))
         .map(|e| e.path().to_path_buf())
         .collect();
-    let scanning = audio.iter().any(|p| app.track_info(p).is_none());
+    let untagged = audio.iter().filter(|p| app.track_info(p).is_none()).count();
     app.ensure_tags(audio);
+
+    // Show the outstanding transfer count, not just a bool: a share browse
+    // downloads whole files, so this is a real wait and a bare "Scanning…"
+    // reads as a hang. Count only what is actually in flight — a track that
+    // gave up after its retries is not coming, so counting it would pin a
+    // number on screen forever.
+    let note = (untagged > 0).then(|| {
+        let in_flight = app.network().pending_tags();
+        if in_flight > 0 {
+            format!("Reading tags… ({in_flight} left)")
+        } else {
+            format!("Reading tags… ({untagged} unavailable)")
+        }
+    });
 
     list_header_right(app, ui, p, &entries);
     ui.add_space(4.0);
-    let act = file_list_ui(app, ui, &theme, &entries, scanning);
+    let act = file_list_ui(app, ui, &theme, &entries, note);
 
     match act {
         Some(Act::Nav(path)) => {
@@ -1120,7 +1139,13 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
             let entries = app.library_entries().to_vec();
             list_header_right(app, ui, p, &entries);
             ui.add_space(4.0);
-            let act = file_list_ui(app, ui, &theme, &entries, app.library_scanning());
+            let act = file_list_ui(
+                app,
+                ui,
+                &theme,
+                &entries,
+                app.library_scanning().then(|| "Scanning…".to_string()),
+            );
             match act {
                 Some(Act::Nav(dir)) => app.navigate_to(dir),
                 Some(Act::Play(path)) => app.play_file(path),

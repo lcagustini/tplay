@@ -179,76 +179,31 @@ fn read_info_returns_none_for_non_audio() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
+/// The remote tag path is now "spool the file, then `read_info` the copy", so
+/// the load-bearing claim is that a **full** read yields both tags and a real
+/// duration. (The prefix-read version this replaced could not: lofty derives
+/// duration from the bytes it is handed, so a truncated read reported a
+/// duration proportional to the prefix.)
 #[test]
-fn read_info_bytes_parses_tags_from_a_short_prefix() {
-    let dir = test_dir("read_info_bytes_parses_tags_from_a_short_prefix");
+fn read_info_gives_tags_and_a_true_duration_from_a_whole_file() {
+    let dir = test_dir("read_info_gives_tags_and_a_true_duration_from_a_whole_file");
     let path = dir.join("tagged.mp3");
     let bytes = write_tagged_mp3(&path, "Ne-Yo", "Test Artist", "Test Album");
 
-    // The whole premise of the remote tag fetch: an MP3's ID3v2 tag sits at the
-    // front, so a small prefix yields the same tags as the entire file. The
-    // production prefix is `network::REMOTE_TAG_PREFIX` (64 KB); 8 KB proves
-    // the point with room to spare.
-    for n in [bytes.len(), 64 * 1024, 8 * 1024, 2 * 1024] {
-        let n = n.min(bytes.len());
-        let info = read_info_bytes(&bytes[..n])
-            .unwrap_or_else(|| panic!("prefix of {n} bytes failed to parse"));
-        assert_eq!(info.title, "Ne-Yo", "prefix {n}");
-        assert_eq!(info.artist, "Test Artist", "prefix {n}");
-        assert_eq!(info.album, "Test Album", "prefix {n}");
-    }
-    fs::remove_dir_all(&dir).unwrap();
-}
+    let info = read_info(&path).expect("whole file parses");
+    assert_eq!(info.title, "Ne-Yo");
+    assert_eq!(info.artist, "Test Artist");
+    assert_eq!(info.album, "Test Album");
 
-#[test]
-fn read_info_bytes_never_reports_a_prefix_derived_duration() {
-    let dir = test_dir("read_info_bytes_never_reports_a_prefix_derived_duration");
-    let path = dir.join("tagged.mp3");
-    let bytes = write_tagged_mp3(&path, "Ne-Yo", "Test Artist", "Test Album");
-
-    // lofty derives duration from whatever bytes it was handed, so a prefix
-    // yields a value proportional to the PREFIX, not the file (measured: 64 KB
-    // of a 7.8 s file reports 4.1 s, 8 KB reports 0.5 s). A wrong duration is
-    // worse than none, so `read_info_bytes` drops it. This test is the guard
-    // against that ever being "fixed" by trusting lofty again.
-    let full = read_info(&path).expect("full read parses");
-    assert!(full.duration.is_some(), "premise: the full file has a duration");
-    for n in [bytes.len(), 64 * 1024, 8 * 1024] {
-        let n = n.min(bytes.len());
-        let info = read_info_bytes(&bytes[..n]).expect("prefix parses");
-        assert_eq!(info.duration, None, "prefix of {n} bytes leaked a bogus duration");
-    }
-    fs::remove_dir_all(&dir).unwrap();
-}
-
-#[test]
-fn read_info_bytes_matches_read_info_on_the_same_tags() {
-    // The `info_of` extraction is shared, so a full read and a byte read of the
-    // same file must agree on every tag field (duration aside, by design).
-    let dir = test_dir("read_info_bytes_matches_read_info_on_the_same_tags");
-    let path = dir.join("tagged.mp3");
-    let bytes = write_tagged_mp3(&path, "Title", "Artist", "Album");
-
-    let from_path = read_info(&path).unwrap();
-    let from_bytes = read_info_bytes(&bytes).unwrap();
-    assert_eq!(from_path.title, from_bytes.title);
-    assert_eq!(from_path.artist, from_bytes.artist);
-    assert_eq!(from_path.album, from_bytes.album);
-    fs::remove_dir_all(&dir).unwrap();
-}
-
-#[test]
-fn read_info_bytes_returns_none_for_unparseable_bytes() {
-    // A prefix that isn't audio (or is truncated past what the format needs —
-    // a WAV's whole `data` chunk, say) must degrade to "no tags", which the
-    // caller renders as the filename. Never a panic.
-    assert!(read_info_bytes(b"not audio at all").is_none());
-    assert!(read_info_bytes(&[]).is_none());
-    let dir = test_dir("read_info_bytes_returns_none_for_unparseable_bytes");
-    let path = dir.join("t.wav");
-    write_wav(&path);
-    let bytes = fs::read(&path).unwrap();
-    assert!(read_info_bytes(&bytes[..1024]).is_none(), "premise: a WAV prefix does not parse");
+    // 300 frames of 1152 samples at 44.1 kHz ≈ 7.84 s. The point is that it is
+    // the FILE's length, not a function of how much was read: a prefix of any
+    // size would have produced a smaller number.
+    let secs = info.duration.expect("whole file has a duration").as_secs_f64();
+    assert!(
+        (secs - 7.8).abs() < 0.5,
+        "duration {secs:.2}s should match the file's 300 frames (~7.8s), not a prefix"
+    );
+    assert!(bytes.len() > 100_000, "premise: the fixture is much larger than any prefix");
     fs::remove_dir_all(&dir).unwrap();
 }
 
