@@ -251,7 +251,7 @@ impl Network {
     /// A remote track waiting on its spool, if any — Now Playing shows
     /// "Loading from server…" while set.
     pub fn pending(&self) -> Option<&Path> {
-        self.pending.as_ref().map(|p| p.as_path())
+        self.pending.as_deref()
     }
 
     /// True while the worker owes us something (a spool, a playlist fetch or

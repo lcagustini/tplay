@@ -84,7 +84,7 @@ impl Volume {
                 continue;
             }
             // Skip boot/ESP partitions — system partitions, not user volumes.
-            if BOOT_MOUNTPOINTS.iter().any(|&b| mountpoint == b) {
+            if BOOT_MOUNTPOINTS.contains(&mountpoint) {
                 continue;
             }
 
@@ -107,7 +107,7 @@ impl Volume {
             vols.push(Volume { label, path });
         }
         // Sort by label, case-insensitive
-        vols.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
+        vols.sort_by_key(|a| a.label.to_lowercase());
         vols
     }
 
@@ -409,4 +409,29 @@ pub fn sort_key(e: &Entry, info: Option<&TrackInfo>, col: usize) -> String {
     };
     // Prefix empty strings with \x7f (DEL) so they sort after normal content
     if s.is_empty() { format!("\x7f{}", s) } else { s.to_lowercase() }
+}
+
+/// Fixed user-folder shortcuts (Home + XDG user dirs) shown above the
+/// Favorites list in the Library pane. Missing dirs are skipped; dupes (e.g.
+/// Music == Home) are dropped.
+///
+/// Free function, not a `TPlayApp` method: it reads no app state, and it
+/// belongs next to the rest of the folder-listing code.
+pub fn quick_folders() -> Vec<(String, PathBuf)> {
+    let mut v: Vec<(String, PathBuf)> = Vec::new();
+    if let Some(h) = dirs::home_dir() {
+        v.push(("Home".into(), h));
+    }
+    for (label, d) in [
+        ("Music", dirs::audio_dir()),
+        ("Downloads", dirs::download_dir()),
+        ("Desktop", dirs::desktop_dir()),
+    ] {
+        if let Some(p) = d.filter(|p| p.is_dir()) {
+            if !v.iter().any(|(_, e)| e == &p) {
+                v.push((label.into(), p));
+            }
+        }
+    }
+    v
 }

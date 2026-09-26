@@ -59,7 +59,7 @@ pub fn write_minimal_flac(path: &Path) {
     data.extend_from_slice(&[0x00; 16]); // MD5
     // PADDING block (type 1, last=1, length=100)
     data.extend_from_slice(&[0x81, 0x00, 0x00, 0x64]);
-    data.extend_from_slice(&vec![0u8; 100]);
+    data.extend_from_slice(&[0u8; 100]);
     fs::write(path, data).unwrap();
 }
 

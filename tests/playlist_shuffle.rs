@@ -50,6 +50,39 @@ fn shuffle_next(len: usize, played: &mut Vec<usize>, rng_state: &mut u64, repeat
     Some(idx)
 }
 
+/// Mirror of TPlayApp::peek_prev_index (shuffle branch) — pure.
+fn shuffle_prev_peek(len: usize, played: &[usize], repeat: bool) -> Option<usize> {
+    if len == 0 { return None; }
+    if len == 1 { return repeat.then_some(0); }
+    if played.len() > 1 {
+        played.get(played.len() - 2).copied()
+    } else if repeat {
+        played.last().copied()
+    } else {
+        None
+    }
+}
+
+/// Mirror of TPlayApp::commit_prev.
+fn shuffle_prev_commit(len: usize, played: &mut Vec<usize>) {
+    if len > 1 && played.len() > 1 {
+        played.pop();
+    }
+}
+
+/// Mirror of TPlayApp::prev_track_index (shuffle branch) — peek, then commit.
+fn shuffle_prev(len: usize, played: &mut Vec<usize>, repeat: bool) -> Option<usize> {
+    let idx = shuffle_prev_peek(len, played, repeat)?;
+    shuffle_prev_commit(len, played);
+    Some(idx)
+}
+
+/// The *old* `has_prev_track` shuffle arm, kept verbatim so the regression below
+/// is visible in the diff rather than only described in prose.
+fn old_has_prev_track(played: &[usize], repeat: bool) -> bool {
+    played.len() > 1 || repeat
+}
+
 #[test]
 fn added_tracks_join_the_unplayed_pool() {
     // History: played 0 and 2 of a 4-track playlist. Tracks are appended via
@@ -223,4 +256,103 @@ fn repeat_restarts_the_cycle_on_commit_not_on_peek() {
     shuffle_commit(len, &mut played, &mut rng, idx, r);
     assert_eq!(played, vec![idx], "the commit is what starts the new cycle");
     assert!((0..len).contains(&idx));
+}
+
+// ── Prev: the same peek/commit discipline, and the bug it was hiding ─────────
+
+/// **The bug.** With shuffle on and an empty history, the old `has_prev_track`
+/// returned `played.len() > 1 || repeat` — **true** — while the traversal had
+/// nothing to walk and returned `None`. The transport button lit and did
+/// nothing. Reachable by clicking any playlist row with shuffle on, because
+/// `play_track` resets the history and `start` never pushes to it; with repeat
+/// on the button was permanently lit in that state.
+#[test]
+fn prev_is_unavailable_on_an_empty_shuffle_history() {
+    let len = 4;
+    let played: Vec<usize> = vec![];
+
+    // Premise: the state is real and reachable — a direct row click with
+    // shuffle on has committed nothing to the history yet.
+    assert!(played.is_empty(), "premise: play_track reset the history");
+
+    // Premise: the old predicate really did say "there is somewhere to go".
+    assert!(
+        old_has_prev_track(&played, true),
+        "premise: the old formula lit the button here"
+    );
+
+    // The traversal has nowhere to go, so the predicate derived from it is
+    // false, and the button is correctly disabled.
+    assert_eq!(shuffle_prev_peek(len, &played, true), None);
+    assert!(!shuffle_prev_peek(len, &played, true).is_some());
+}
+
+/// Everywhere else the two agree — the fix must be *only* the empty-history
+/// case, so pin the neighbours that must not move.
+#[test]
+fn prev_predicate_is_unchanged_everywhere_else() {
+    let len = 4;
+    // One entry + repeat: both the old formula and the traversal say yes.
+    assert_eq!(shuffle_prev_peek(len, &[7], true), Some(7));
+    assert!(old_has_prev_track(&[7], true));
+    // One entry, no repeat: both say no.
+    assert_eq!(shuffle_prev_peek(len, &[7], false), None);
+    assert!(!old_has_prev_track(&[7], false));
+    // Several entries: both say yes.
+    assert_eq!(shuffle_prev_peek(len, &[7, 8, 9], false), Some(8));
+    assert!(old_has_prev_track(&[7, 8, 9], false));
+}
+
+/// Stepping back pops the track being left, so the target is the *second*-to-
+/// last entry — the classic off-by-one if the pop is folded into the peek.
+#[test]
+fn prev_targets_the_second_to_last_entry_and_the_commit_pops() {
+    let len = 5;
+    let mut played = vec![3, 1, 4];
+
+    assert_eq!(shuffle_prev_peek(len, &played, false), Some(1));
+    assert_eq!(played, vec![3, 1, 4], "peeking must not pop");
+
+    assert_eq!(shuffle_prev(len, &mut played, false), Some(1));
+    assert_eq!(played, vec![3, 1], "the commit drops the track we left");
+}
+
+/// The transport buttons ask every frame, so a prev peek has the same
+/// idempotence requirement as a next peek.
+#[test]
+fn peeking_prev_repeatedly_changes_nothing() {
+    let len = 5;
+    let played = vec![2, 0, 3];
+    let first = shuffle_prev_peek(len, &played, false);
+    for _ in 0..1000 {
+        assert_eq!(shuffle_prev_peek(len, &played, false), first);
+    }
+    // A peek that returns None must stay None, or the button would flicker.
+    for _ in 0..1000 {
+        assert_eq!(shuffle_prev_peek(len, &[], true), None);
+    }
+}
+
+/// An unavailable prev must not disturb the history — a disabled button the
+/// user can still click must not silently pop an entry.
+#[test]
+fn an_unavailable_prev_commits_nothing() {
+    let len = 4;
+    let mut played = vec![]; // shuffle + repeat, empty history
+    assert!(shuffle_prev(len, &mut played, true).is_none());
+    assert!(played.is_empty(), "a refused step must not touch the history");
+}
+
+/// A single-entry history loops on that track, so stepping onto it must not
+/// consume the entry: the commit's pop is gated on `len() > 1`, and if it were
+/// not, the *second* Prev would find an empty history and stop dead.
+#[test]
+fn prev_on_a_single_entry_loops_without_consuming_it() {
+    let len = 4;
+    let mut played = vec![7];
+
+    assert_eq!(shuffle_prev(len, &mut played, true), Some(7));
+    assert_eq!(played, vec![7], "the commit must not pop the only entry");
+    assert_eq!(shuffle_prev(len, &mut played, true), Some(7));
+    assert_eq!(played, vec![7], "and it must survive for the next step too");
 }

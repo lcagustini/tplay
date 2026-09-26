@@ -38,10 +38,10 @@ fn config_round_trip_preserves_every_field() {
     let back: Config = serde_json::from_str(&json).unwrap();
 
     assert_eq!(back.theme, "neon");
-    assert_eq!(back.eq.enabled, true);
+    assert!(back.eq.enabled);
     assert_eq!(back.eq.gains, [1.0; 10]);
-    assert_eq!(back.shuffle, true);
-    assert_eq!(back.repeat, true);
+    assert!(back.shuffle);
+    assert!(back.repeat);
     assert_eq!(back.viz_view, VizView::Wave);
     assert_eq!(back.volume, 0.5);
     assert_eq!(back.buffer_size, 16384);
@@ -49,7 +49,7 @@ fn config_round_trip_preserves_every_field() {
     assert_eq!(back.last_playlist.as_deref(), Some("/music/chill.tplay"));
     assert_eq!(back.library.favorites, vec![PathBuf::from("/music/favs")]);
     assert_eq!(back.library.last_dir, "/music");
-    assert_eq!(back.library.show_hidden, true);
+    assert!(back.library.show_hidden);
     assert_eq!(back.balance, 0.25);
     assert!(back.remaining);
     assert!(back.gapless);

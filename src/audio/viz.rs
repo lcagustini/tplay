@@ -86,12 +86,6 @@ where
             acc_count: 0,
         }
     }
-
-    /// Access the buffer for snapshots (GUI thread).
-    #[allow(dead_code)]
-    pub fn buf(&self) -> &VizBuf {
-        &self.buf
-    }
 }
 
 impl<S> Iterator for TapSource<S>
@@ -101,7 +95,9 @@ where
     type Item = f32;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next().map(|sample| {
+        // `inspect` for the downmix side effect; the sample itself still passes
+        // through unchanged.
+        self.inner.next().inspect(|&sample| {
             // Mono downmix: accumulate across channels, push when frame complete.
             self.acc += sample;
             self.acc_count += 1;
@@ -111,7 +107,6 @@ where
                 self.acc = 0.0;
                 self.acc_count = 0;
             }
-            sample
         })
     }
 }
@@ -146,8 +141,8 @@ where
 /// Hann window for the FFT.
 fn hann_window() -> [f32; FFT_SIZE] {
     let mut w = [0.0f32; FFT_SIZE];
-    for i in 0..FFT_SIZE {
-        w[i] = 0.5 * (1.0 - (2.0 * PI * i as f32 / (FFT_SIZE - 1) as f32).cos());
+    for (i, win) in w.iter_mut().enumerate() {
+        *win = 0.5 * (1.0 - (2.0 * PI * i as f32 / (FFT_SIZE - 1) as f32).cos());
     }
     w
 }
@@ -258,7 +253,7 @@ pub fn compute_bands(viz: &VizBuf, prev: &mut [f32; VIZ_BANDS], attack: f32, rel
 
     // Log-spaced band averaging (skip DC, start at bin 1)
     let max_bin = mag.len() - 1; // Nyquist
-    for b in 0..VIZ_BANDS {
+    for (b, prev_b) in prev.iter_mut().enumerate() {
         // Log spacing: 20 Hz .. sample_rate/2
         let f_min: f32 = 20.0;
         let f_max: f32 = 22050.0; // 44.1k/2
@@ -283,10 +278,10 @@ pub fn compute_bands(viz: &VizBuf, prev: &mut [f32; VIZ_BANDS], attack: f32, rel
         let clamped = db.clamp(-60.0, 0.0);
 
         // Attack/release smoothing
-        if clamped > prev[b] {
-            prev[b] = prev[b] + (clamped - prev[b]) * attack;
+        if clamped > *prev_b {
+            *prev_b += (clamped - *prev_b) * attack;
         } else {
-            prev[b] = prev[b] + (clamped - prev[b]) * release;
+            *prev_b += (clamped - *prev_b) * release;
         }
     }
 }

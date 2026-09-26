@@ -127,10 +127,9 @@ pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
 
                 let row_rect = rect;
                 if let Some(pointer_pos) = ui.input(|i| i.pointer.hover_pos()) {
-                    if drag_from.is_some() && drag_from != Some(i) {
-                        if row_rect.contains(pointer_pos) {
-                            drag_hover = Some(i);
-                        }
+                    if drag_from.is_some() && drag_from != Some(i) && row_rect.contains(pointer_pos)
+                    {
+                        drag_hover = Some(i);
                     }
                 }
 

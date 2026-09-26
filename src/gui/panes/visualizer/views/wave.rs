@@ -21,9 +21,12 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &P
         palette.accent.b(),
         80,
     );
-    for i in 0..n {
+    // Iterate the vector, not `0..n`: `compute_wave` returns exactly `n`
+    // buckets today, and if that ever changed, indexing would panic where
+    // iterating just draws fewer columns.
+    for (i, &w) in wave.iter().enumerate() {
         let x = rect.left() + i as f32 * bar_w;
-        let y = wave[i] * amp;
+        let y = w * amp;
         painter.rect_filled(
             egui::Rect::from_min_max(
                 egui::pos2(x, mid_y - y),
@@ -34,13 +37,15 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &P
         );
     }
 
-    // Outline along the upper and lower envelope curves
+    // Outline along the upper and lower envelope curves. `windows(2)` rather
+    // than `0..n-1` for the same reason as the fill loop: walk what `wave`
+    // actually holds instead of trusting its length.
     let stroke = egui::Stroke::new(1.5_f32, palette.progress_fill);
-    for i in 0..n - 1 {
+    for (i, pair) in wave.windows(2).enumerate() {
         let x0 = rect.left() + i as f32 * bar_w;
         let x1 = x0 + bar_w;
-        let y0 = wave[i] * amp;
-        let y1 = wave[i + 1] * amp;
+        let y0 = pair[0] * amp;
+        let y1 = pair[1] * amp;
         painter.line_segment([egui::pos2(x0, mid_y - y0), egui::pos2(x1, mid_y - y1)], stroke);
         painter.line_segment([egui::pos2(x0, mid_y + y0), egui::pos2(x1, mid_y + y1)], stroke);
     }

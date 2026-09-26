@@ -128,6 +128,33 @@ pub fn fade_gains(p: f32) -> (f32, f32) {
     (angle.cos(), angle.sin())
 }
 
+/// Sink gains for a live gapless/crossfade overlap, from how much of the
+/// **outgoing** track is left. The second half of the arm, and pure for the same
+/// reason `arm_plan` is: the curve was tested, but *when* it is called with
+/// which `p` was not, and that is the part that decides whether a track is
+/// audible or dropped.
+///
+/// Progress runs from 0 (a full `crossfade_secs` still to go) to 1 (the outgoing
+/// track has ended), linearly in remaining time — not a wall clock, so it is
+/// pause- and seek-safe. Duration-probe drift can push `remaining` past the
+/// window, which makes `p` overshoot [0, 1]; `fade_gains` clamps it there, so
+/// this does not repeat the clamp. (`f32::FRAC_PI_2` also rounds up, so
+/// `fade_gains(1.0)` is `(-4.37e-8, 1.0)` rather than exactly `(0.0, 1.0)` —
+/// the outgoing sink is set to that on the last frame before the swap, which is
+/// −4e-8 of full volume and inaudible.)
+///
+/// Gapless has no fade to run: the incoming track is held at zero and the swap
+/// is instant, so this returns `(1.0, 0.0)` — full volume out, silence in — for
+/// any `remaining`. Returning a pair rather than an `Option` keeps the caller's
+/// per-frame block to three lines with no branch.
+pub fn xf_gains(remaining: Duration, crossfade: bool, crossfade_secs: f32) -> (f32, f32) {
+    if !crossfade {
+        return (1.0, 0.0);
+    }
+    let p = 1.0 - remaining.as_secs_f32() / crossfade_secs;
+    fade_gains(p)
+}
+
 /// Open a track's file and return a fully-wrapped decoder (EQ → Tap → Balance),
 /// *buffered* so decode happens off the audio thread.
 /// Used for the crossfade incoming track and gapless next track.

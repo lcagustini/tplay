@@ -209,7 +209,7 @@ impl Themes {
     pub fn load_from(dirs: &[PathBuf]) -> Themes {
         let mut list: Vec<Arc<Theme>> = Vec::new();
         for dir in dirs {
-            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            let Ok(entries) = std::fs::read_dir(dir) else { continue };
             for entry in entries.flatten() {
                 let theme_dir = entry.path();
                 if !theme_dir.is_dir() {
@@ -527,7 +527,7 @@ pub fn install_fallback_fonts(ctx: &egui::Context, candidates: &[&str]) -> bool 
 pub fn row(ui: &mut egui::Ui, i: usize, is_current: bool, row_h: f32, theme: &Theme) -> (egui::Rect, egui::Ui) {
     let p = theme.palette;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h), egui::Sense::hover());
-    let bg = if i % 2 == 0 { p.row_even } else { p.row_odd };
+    let bg = if i.is_multiple_of(2) { p.row_even } else { p.row_odd };
     ui.painter().rect_filled(rect, 2.0, bg);
     if is_current {
         let alpha = theme.layout.with_defaults().row_tint_alpha;

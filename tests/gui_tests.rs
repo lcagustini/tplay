@@ -151,11 +151,13 @@ fn sidebar_column_and_scroll_content_ignore_textedit_overflow() {
 
     /// Returns (sidebar width, file-list min.x, scroll content width).
     fn layout(shape: Shape, text: &str) -> (f32, f32, f32) {
-        let mut raw = egui::RawInput::default();
-        raw.screen_rect = Some(egui::Rect::from_min_size(
-            egui::pos2(0.0, 0.0),
-            egui::vec2(680.0, 460.0),
-        ));
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(680.0, 460.0),
+            )),
+            ..Default::default()
+        };
         let out = std::cell::Cell::new((0.0f32, 0.0f32, 0.0f32));
         let content_w = std::cell::Cell::new(0.0f32);
         let ctx = egui::Context::default();
@@ -163,8 +165,6 @@ fn sidebar_column_and_scroll_content_ignore_textedit_overflow() {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.horizontal_top(|ui| {
                     let mut text = text.to_string();
-                    #[allow(unused_assignments)]
-                    let mut sidebar_w = 0.0f32;
 
                     // The scroll content, including the fixed-rect form.
                     let mut sidebar_body = |ui: &mut egui::Ui, wrap_form: bool| {
@@ -209,13 +209,18 @@ fn sidebar_column_and_scroll_content_ignore_textedit_overflow() {
                         content_w.set(sa.content_size.x);
                     };
 
-                    match shape {
+                    // The match *is* the sidebar width: every arm lays the
+                    // column out differently and yields the width it ended up
+                    // with. Written as an expression rather than a `let mut`
+                    // assigned per arm, which needed an `#[allow]` for a
+                    // never-read `0.0` initializer.
+                    let sidebar_w = match shape {
                         Shape::Vertical => {
                             let inner = ui.vertical(|ui| {
                                 ui.set_min_width(SIDEBAR);
                                 sidebar_body(ui, false);
                             });
-                            sidebar_w = inner.response.rect.width();
+                            inner.response.rect.width()
                         }
                         Shape::ChildNoAdvance => {
                             let rect = egui::Rect::from_min_size(
@@ -228,7 +233,7 @@ fn sidebar_column_and_scroll_content_ignore_textedit_overflow() {
                                     .layout(egui::Layout::top_down(egui::Align::Min)),
                             );
                             sidebar_body(&mut child, true);
-                            sidebar_w = rect.width();
+                            rect.width()
                         }
                         Shape::UnwrappedForm | Shape::Fixed => {
                             let (_, rect) =
@@ -239,9 +244,9 @@ fn sidebar_column_and_scroll_content_ignore_textedit_overflow() {
                                     .layout(egui::Layout::top_down(egui::Align::Min)),
                             );
                             sidebar_body(&mut child, matches!(shape, Shape::Fixed));
-                            sidebar_w = rect.width();
+                            rect.width()
                         }
-                    }
+                    };
                     let files = ui.vertical(|ui| {
                         ui.label("files");
                     });
@@ -367,7 +372,9 @@ fn right_to_left_center_does_not_swallow_the_column() {
         };
         let mut consumed = 0.0;
         let mut scroll_top = f32::NAN;
-        ctx.run(raw, |ctx| {
+        // `Context::run` returns a `#[must_use]` FullOutput; this test only cares
+        // about the side effects on the Cells below.
+        let _ = ctx.run(raw, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.horizontal_top(|ui| {
                     // Sidebar, exactly as the pane allocates it.
@@ -385,7 +392,8 @@ fn right_to_left_center_does_not_swallow_the_column() {
                         });
                         let before = ui.min_rect().height();
                         ui.with_layout(egui::Layout::right_to_left(align), |ui| {
-                            ui.button("Add All");
+                            // Drawn for its layout effect only; no click needed.
+                            let _ = ui.button("Add All");
                             ui.label("12 tracks · 3 folders · 1 playlist");
                         });
                         consumed = ui.min_rect().height() - before;

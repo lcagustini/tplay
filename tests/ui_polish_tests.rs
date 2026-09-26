@@ -79,7 +79,7 @@ fn new_layout_tokens_round_trip_from_json() {
     )
     .unwrap();
 
-    let themes = Themes::load_from(&[dir.clone()]);
+    let themes = Themes::load_from(std::slice::from_ref(&dir));
     let t = themes.get("tok").expect("fixture theme loaded");
     assert_eq!(t.layout.eq_band_w_min, 24.0);
     assert_eq!(t.layout.text_meta, 11.0);

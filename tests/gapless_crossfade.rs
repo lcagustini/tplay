@@ -5,7 +5,7 @@
 
 mod common;
 
-use tplay::audio::transition::{arm_plan, build_gapless_next, fade_gains, ArmInput, PREROLL_SECS};
+use tplay::audio::transition::{arm_plan, build_gapless_next, fade_gains, xf_gains, ArmInput, PREROLL_SECS};
 use tplay::audio::eq::{EqShared, EqSource, EQ_FREQUENCIES};
 use tplay::audio::viz::{TapSource, VizBuf};
 use tplay::audio::balance::{BalanceSource, balance_gains};
@@ -189,6 +189,100 @@ fn balance_gains_curve() {
 fn eq_frequencies_ten_ascending() {
     assert_eq!(EQ_FREQUENCIES.len(), 10);
     assert!(EQ_FREQUENCIES.windows(2).all(|w| w[0] < w[1]));
+}
+
+// ── xf_gains: the fade progression ──────────────────────────────────────────
+//
+// `fade_gains` above pins the equal-power *curve*. What was untested was the
+// other half: what `p` is computed from, and when. That is what decides whether
+// a track is audible at full volume or dropped to silence mid-overlap, so it
+// lives in a pure function and is pinned here.
+
+const CF: f32 = 3.0;
+
+#[test]
+fn xf_gains_starts_silent_and_ends_full() {
+    // A full window still to go: the outgoing track is untouched, the incoming
+    // one has not started.
+    let (out, inc) = xf_gains(Duration::from_secs_f32(CF), true, CF);
+    assert!((out - 1.0).abs() < 1e-6, "out should be full at the window edge, got {out}");
+    assert!(inc.abs() < 1e-6, "in should be silent at the window edge, got {inc}");
+
+    // The outgoing track has ended: fully handed over. `out` is -4.37e-8 rather
+    // than 0 — see `xf_gains_advances_monotonically` for why.
+    let (out, inc) = xf_gains(Duration::ZERO, true, CF);
+    assert!(out.abs() < 1e-6, "out should be silent at the end, got {out}");
+    assert!((inc - 1.0).abs() < 1e-6, "in should be full at the end, got {inc}");
+}
+
+#[test]
+fn xf_gains_midpoint_is_equal_power() {
+    let (out, inc) = xf_gains(Duration::from_secs_f32(CF / 2.0), true, CF);
+    assert!((out - inc).abs() < 1e-5, "midpoint should be symmetric, got {out}/{inc}");
+    assert!((out * out + inc * inc - 1.0).abs() < 1e-5, "midpoint should not dip");
+}
+
+/// Progress is linear in *remaining time*, so a probe that overshoots the track
+/// length must not run the curve backwards. The clamping is `fade_gains`'s, not
+/// this function's — it is a thin wrapper and deliberately does not repeat it.
+#[test]
+fn xf_gains_clamps_past_the_window() {
+    // remaining > crossfade window: the clamp pins p at 0 rather than going
+    // negative, which would have swapped the gains and faded the wrong way.
+    let (out, inc) = xf_gains(Duration::from_secs_f32(CF * 2.0), true, CF);
+    assert!((out - 1.0).abs() < 1e-6, "overshoot must stay at the start, got {out}");
+    assert!(inc.abs() < 1e-6, "overshoot must stay at the start, got {inc}");
+}
+
+/// Progress advances monotonically as the track plays out, and stays within
+/// [0, 1] across the window — allowing float error at the ends, which is real
+/// and not a rounding artefact of the test: `f32::FRAC_PI_2` rounds *up*
+/// (1.5707963705 vs 1.5707963268), so `fade_gains(1.0)` is `(-4.37e-8, 1.0)`
+/// rather than `(0.0, 1.0)`. The outgoing sink is set to that instead of zero on
+/// the last frame before the swap, i.e. −4e-8 of full volume — inaudible, and
+/// the sink is replaced immediately afterwards. The tolerance is here so that
+/// value is *documented* rather than merely tolerated.
+#[test]
+fn xf_gains_advances_monotonically() {
+    const EPS: f32 = 1e-6;
+    let mut prev_out = f32::INFINITY;
+    for i in (0..=300).rev() {
+        let remaining = Duration::from_secs_f32(CF * i as f32 / 300.0);
+        let (out, inc) = xf_gains(remaining, true, CF);
+        assert!(out.is_finite() && inc.is_finite(), "i={i}: non-finite gain {out}/{inc}");
+        assert!(
+            (-EPS..=1.0 + EPS).contains(&out) && (-EPS..=1.0 + EPS).contains(&inc),
+            "i={i}: gain out of range: {out}/{inc}"
+        );
+        assert!(out <= prev_out + EPS, "i={i}: outgoing gain must fall, {out} > {prev_out}");
+        prev_out = out;
+    }
+}
+
+/// Gapless has no fade: the incoming track is held at zero and the swap is
+/// instant, whatever is left of the outgoing one. This is the whole of the
+/// gapless arm's per-frame maths, and returning `(1, 0)` unconditionally is why
+/// the caller needs no branch.
+#[test]
+fn xf_gains_holds_silence_for_gapless() {
+    for i in 0..=10 {
+        let remaining = Duration::from_secs_f32(CF * i as f32 / 10.0);
+        let (out, inc) = xf_gains(remaining, false, CF);
+        assert_eq!((out, inc), (1.0, 0.0), "gapless must hold at {remaining:?} left");
+    }
+    // Including the degenerate window: a zero-length crossfade must not divide
+    // by zero on the crossfade path, and gapless never looks at cf at all.
+    assert_eq!(xf_gains(Duration::ZERO, false, 0.0), (1.0, 0.0));
+}
+
+#[test]
+fn xf_gains_agrees_with_fade_gains() {
+    // It is a thin wrapper, so the two must not drift: p is the whole difference.
+    for i in 0..=50 {
+        let remaining = Duration::from_secs_f32(CF * i as f32 / 50.0);
+        let p = (1.0 - remaining.as_secs_f32() / CF).clamp(0.0, 1.0);
+        assert_eq!(xf_gains(remaining, true, CF), fade_gains(p), "i={i}");
+    }
 }
 
 // ── arm_plan: the pre-buffer decision ───────────────────────────────────────

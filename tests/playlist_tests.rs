@@ -192,19 +192,24 @@ fn shuffle_next(len: usize, played: &mut Vec<usize>, rng_state: &mut u64, repeat
     Some(idx)
 }
 
-/// Replicates TPlayApp::prev_track_index shuffle logic for testing.
+/// Replicates TPlayApp::prev_track_index shuffle logic for testing. That is
+/// `peek_prev_index` + `commit_prev` composed; the split, the idempotence it
+/// buys and the empty-history case it fixes are pinned in playlist_shuffle.rs.
 fn shuffle_prev(len: usize, played: &mut Vec<usize>, repeat: bool) -> Option<usize> {
     if len == 0 { return None; }
     if len == 1 { return repeat.then_some(0); }
 
-    if played.len() > 1 {
-        played.pop();
-        played.last().copied()
-    } else if repeat && !played.is_empty() {
+    let idx = if played.len() > 1 {
+        played.get(played.len() - 2).copied()
+    } else if repeat {
         played.last().copied()
     } else {
         None
+    };
+    if idx.is_some() && len > 1 && played.len() > 1 {
+        played.pop();
     }
+    idx
 }
 
 /// XorShift64 - matches TPlayApp::rand_u64
@@ -412,7 +417,7 @@ fn eq_presets_have_correct_length() {
     for (name, gains) in EQ_PRESETS {
         assert_eq!(gains.len(), 10, "preset {} has wrong band count", name);
         for &g in &gains {
-            assert!(g >= -12.0 && g <= 12.0, "preset {} gain {} out of range", name, g);
+            assert!((-12.0..=12.0).contains(&g), "preset {} gain {} out of range", name, g);
         }
     }
 }

@@ -9,6 +9,10 @@
 
 use std::path::PathBuf;
 
+// `RGB` is the conventional name for red/green/blue and the fields are exactly
+// that; `Rgb` would be strictly worse to read. This is the one lint in the tree
+// that is allowed rather than fixed.
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Clone)]
 struct RGB {
     r: f64,

@@ -117,7 +117,7 @@ fn volumes_sorted_by_label() {
     let labels: Vec<String> = vols.iter().map(|v| v.label.clone()).collect();
     // Should be sorted case-insensitively
     let mut sorted = labels.clone();
-    sorted.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    sorted.sort_by_key(|a| a.to_lowercase());
     assert_eq!(labels, sorted);
 }
 

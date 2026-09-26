@@ -61,7 +61,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                     .pending()
                     .map(|p| library::title_or_stem(p, None))
                     .unwrap_or_default();
-                ui.label(meta(format!("{name}"), &theme, layout.text_time));
+                ui.label(meta(name.to_string(), &theme, layout.text_time));
                 ui.label(meta("Loading from server…", &theme, layout.text_meta));
             }
 

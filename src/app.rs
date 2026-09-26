@@ -361,7 +361,7 @@ impl TPlayApp {
     /// Cancel any live crossfade/gapless: stop the xf sink and restore main volume.
     fn cancel_xf(&mut self) {
         if let Some(xf) = self.xf_sink.take() {
-            let _ = xf.stop();
+            xf.stop();
         }
         self.xf_out_total = None;
         // Restore main sink to full volume.
@@ -439,7 +439,10 @@ impl TPlayApp {
         self.played.clear();
     }
 
-    fn prev_track_index(&mut self) -> Option<usize> {
+    /// The index Prev would go to, **without recording it**. Pure, for the same
+    /// reason `peek_next_index` is: the transport buttons ask this every frame
+    /// to decide whether to light up, so it must not touch the history.
+    fn peek_prev_index(&self) -> Option<usize> {
         if self.playlist.is_empty() {
             return None;
         }
@@ -457,16 +460,34 @@ impl TPlayApp {
             };
         }
 
-        // Shuffle mode: pop from history
+        // Shuffle walks back through the history. With more than one entry the
+        // target is the second-to-last, because taking a step back *pops* the
+        // track being left — that pop is `commit_prev`'s job, not ours.
         if self.played.len() > 1 {
-            self.played.pop();
-            self.played.last().copied()
-        } else if self.repeat && !self.played.is_empty() {
-            // Loop back to last played
+            self.played.get(self.played.len() - 2).copied()
+        } else if self.repeat {
+            // One entry, so step back onto it. **An empty history has nothing to
+            // walk**, however repeat is set: this used to read `self.repeat`
+            // and report `true`, which lit a button that then did nothing. An
+            // empty history is reachable by clicking any playlist row with
+            // shuffle on — `play_track` resets it and `start` never pushes.
             self.played.last().copied()
         } else {
             None
         }
+    }
+
+    /// Record the step back: the track we are leaving leaves the walk-back too.
+    fn commit_prev(&mut self) {
+        if self.shuffle && self.playlist.len() > 1 && self.played.len() > 1 {
+            self.played.pop();
+        }
+    }
+
+    fn prev_track_index(&mut self) -> Option<usize> {
+        let idx = self.peek_prev_index()?;
+        self.commit_prev();
+        Some(idx)
     }
 
     pub fn seek(&mut self, progress: f32) {
@@ -521,18 +542,13 @@ impl TPlayApp {
                 return;
             }
             let remaining = out_total.saturating_sub(pos);
-            if self.crossfade {
-                // Equal-power fade over the crossfade window. Probe drift can
-                // push remaining past cf — the clamp keeps p in [0, 1].
-                let p = (1.0 - remaining.as_secs_f32() / self.crossfade_secs).clamp(0.0, 1.0);
-                let (out_gain, in_gain) = transition::fade_gains(p);
-                self.sink.set_volume(self.volume * out_gain);
-                xf.set_volume(self.volume * in_gain);
-            } else {
-                // Gapless: incoming sits silent until the swap — zero gap, no overlap.
-                self.sink.set_volume(self.volume);
-                xf.set_volume(0.0);
-            }
+            // The fade decision is `xf_gains`'s (pure, tested); this is only the
+            // effect. Gapless gets (1.0, 0.0) from it too — the incoming track
+            // sits silent until the swap, so there is no branch here at all.
+            let (out_gain, in_gain) =
+                transition::xf_gains(remaining, self.crossfade, self.crossfade_secs);
+            self.sink.set_volume(self.volume * out_gain);
+            xf.set_volume(self.volume * in_gain);
             return;
         }
 
@@ -630,7 +646,7 @@ impl TPlayApp {
     /// Promotes the incoming sink to the main sink, restores full volume.
     fn finish_xf(&mut self) {
         if let Some(xf) = self.xf_sink.take() {
-            let _ = self.sink.stop();
+            self.sink.stop();
             // Promote the incoming sink; its position is self-relative.
             self.sink = xf;
             self.sink.set_volume(self.volume);
@@ -650,8 +666,7 @@ impl TPlayApp {
         if f >= 1000.0 { format!("{}K", (f / 1000.0) as i32) } else { format!("{}", f as i32) }
     }
 
-    /// Public actions called by GUI layer
-
+    /// Public actions called by GUI layer.
     /// The transport play button. A track that is already playing is resumed;
     /// otherwise this starts playback, and the source of the track is not the
     /// concern — `play_now` resolves it.
@@ -665,8 +680,8 @@ impl TPlayApp {
             // A track is already requested and on its way — it will start on its
             // own when it lands. Without this, the fresh empty sink and the
             // `None` current_path would fall through to `play_first_track` and
-            // start a *different* track out from under the pending one.
-            return;
+            // start a *different* track out from under the pending one. This arm
+            // exists to do nothing, so it is empty by design.
         } else if let Some(path) = self.current_path.clone() {
             // Replay the current track. Goes through `play_now`, never
             // `start_track`: `current_path` is an `smb://` URI for a remote
@@ -703,7 +718,7 @@ impl TPlayApp {
     /// top of the playlist (or shuffle order) instead of resuming.
     pub fn stop(&mut self) {
         self.cancel_xf();
-        let _ = self.sink.stop();
+        self.sink.stop();
         self.current_path = None;
         self.current_index = None;
         self.total_duration = None;
@@ -1267,25 +1282,11 @@ impl TPlayApp {
     }
 
     /// Fixed user-folder shortcuts (Home + XDG user dirs) shown above the
-    /// Favorites list in the Library pane. Missing dirs are skipped; dupes
-    /// (e.g. Music == Home) are dropped.
+    /// Favorites list in the Library pane. The logic is `library`'s — it never
+    /// touched app state — so the delegate here is only to keep the GUI's
+    /// uniform `app.*()` call shape.
     pub fn quick_folders(&self) -> Vec<(String, PathBuf)> {
-        let mut v: Vec<(String, PathBuf)> = Vec::new();
-        if let Some(h) = dirs::home_dir() {
-            v.push(("Home".into(), h));
-        }
-        for (label, d) in [
-            ("Music", dirs::audio_dir()),
-            ("Downloads", dirs::download_dir()),
-            ("Desktop", dirs::desktop_dir()),
-        ] {
-            if let Some(p) = d.filter(|p| p.is_dir()) {
-                if !v.iter().any(|(_, e)| e == &p) {
-                    v.push((label.into(), p));
-                }
-            }
-        }
-        v
+        library::quick_folders()
     }
 
     pub fn show_hidden(&self) -> bool { self.show_hidden }
@@ -1315,39 +1316,17 @@ impl TPlayApp {
         self.network.pending().is_none() && !self.playlist.is_empty()
     }
 
+    /// Both transport predicates ask the picker rather than re-implementing it.
+    /// They used to be independent copies of `peek_next_index` /
+    /// `prev_track_index`'s branches, and the copies had already drifted: the
+    /// prev one reported `true` for a shuffle history that was empty, lighting a
+    /// button that did nothing. One source of truth cannot drift.
     pub fn has_next_track(&self) -> bool {
-        if self.playlist.is_empty() {
-            return false;
-        }
-        if self.playlist.len() == 1 {
-            return self.repeat;
-        }
-        if !self.shuffle {
-            return match (self.repeat, self.current_index) {
-                (false, Some(i)) => i + 1 < self.playlist.len(),
-                (true, _) => true,
-                _ => false,
-            };
-        }
-        let unplayed = (0..self.playlist.len()).filter(|i| !self.played.contains(i)).count();
-        unplayed > 0 || self.repeat
+        self.peek_next_index().is_some()
     }
 
     pub fn has_prev_track(&self) -> bool {
-        if self.playlist.is_empty() {
-            return false;
-        }
-        if self.playlist.len() == 1 {
-            return self.repeat;
-        }
-        if !self.shuffle {
-            return match (self.repeat, self.current_index) {
-                (false, Some(i)) => i > 0,
-                (true, _) => true,
-                _ => false,
-            };
-        }
-        self.played.len() > 1 || self.repeat
+        self.peek_prev_index().is_some()
     }
 
     pub fn playback_position(&self) -> f32 {

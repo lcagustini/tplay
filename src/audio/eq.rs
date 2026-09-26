@@ -139,6 +139,13 @@ where
             });
             self.cached_gains = state.gains;
         } else {
+            // An index loop on purpose: this walks four parallel arrays at once
+            // (`state.gains`, `cached_gains`, `bands`, `EQ_FREQUENCIES`), two of
+            // which are mutated. Clippy's `needless_range_loop` suggests
+            // `EQ_FREQUENCIES.iter().enumerate()`, which still needs the index
+            // for the other three, so it is not shorter — and a 4-way `zip`
+            // would read worse than the parallel-array form it replaces.
+            #[allow(clippy::needless_range_loop)]
             for i in 0..10 {
                 if state.gains[i] != self.cached_gains[i] {
                     self.cached_gains[i] = state.gains[i];
