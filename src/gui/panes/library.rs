@@ -6,6 +6,7 @@
 //! to play it directly; the `+` button adds it to the playlist.
 
 use crate::app::TPlayApp;
+use crate::gui::dialogs;
 use crate::gui::theme;
 use crate::library;
 use crate::network;
@@ -268,13 +269,16 @@ fn draw_file_row(
 /// looks like a hung pane.
 ///
 /// Returns the row the user clicked, if any; the caller carries it out, since
-/// only it knows whether a `Nav` means `navigate_to` or `browse_open`.
+/// only it knows whether a `Nav` means `navigate_to` or `browse_open`. `remote`
+/// says which browser this is — the share list's paths are `smb://` URIs, so
+/// arming a playlist load needs to know which transport to run it through.
 fn file_list_ui(
     app: &mut TPlayApp,
     ui: &mut egui::Ui,
     theme: &theme::Theme,
     entries: &[library::Entry],
     scan_note: Option<String>,
+    remote: bool,
 ) -> Option<Act> {
     let p = theme.palette;
     let folder_tex = app.theme_icon(theme::Icon::Folder).cloned();
@@ -370,11 +374,17 @@ fn file_list_ui(
                             .unwrap_or_default();
                         // Replacing a playlist with unsaved edits asks first —
                         // on a share exactly as on disk.
-                        if TPlayApp::confirm(
-                            "Load playlist",
-                            &format!("Replace the current playlist with '{stem}'?"),
-                            app.playlist_dirty(),
-                        ) {
+                        if app.playlist_dirty() {
+                            dialogs::ask(
+                                ui.ctx(),
+                                dialogs::ConfirmAction::LoadPlaylist {
+                                    path: path.to_path_buf(),
+                                    remote,
+                                },
+                                "Load playlist",
+                                &format!("Replace the current playlist with '{stem}'?"),
+                            );
+                        } else {
                             action = Some(Act::LoadPlaylist(path.to_path_buf()));
                         }
                     }
@@ -663,7 +673,7 @@ fn remote_list_ui(app: &mut TPlayApp, ui: &mut egui::Ui) {
 
     list_header_right(app, ui, p, &entries);
     ui.add_space(4.0);
-    let act = file_list_ui(app, ui, &theme, &entries, note);
+    let act = file_list_ui(app, ui, &theme, &entries, note, true);
 
     match act {
         Some(Act::Nav(path)) => {
@@ -1155,6 +1165,7 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                 &theme,
                 &entries,
                 app.library_scanning().then(|| "Scanning…".to_string()),
+                false,
             );
             match act {
                 Some(Act::Nav(dir)) => app.navigate_to(dir),

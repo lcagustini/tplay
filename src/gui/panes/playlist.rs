@@ -1,14 +1,10 @@
 use crate::app::TPlayApp;
+use crate::gui::dialogs;
 use crate::gui::theme::{self, Icon};
 use crate::library;
 use crate::network;
 use eframe::egui;
 use std::path::PathBuf;
-
-/// egui memory: the share-save prompt's state, `Option<(dir_uri, filename)>`.
-const SAVE_SHARE_ID: &str = "tplay.playlist.save_share";
-/// Width of the share-save name field.
-const SAVE_SHARE_FIELD_W: f32 = 220.0;
 
 pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
     // Owned Arc copy — panes call &mut app while using theme data.
@@ -159,9 +155,15 @@ pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                     .get(idx)
                     .map(|p| library::title_or_stem(p, app.track_info(p)))
                     .unwrap_or_default();
-                if TPlayApp::confirm("Remove track", &format!("Remove '{name}' from the playlist?"), true) {
-                    app.remove_track(idx);
-                }
+                // Armed, not run: the row's index can be gone by the time the
+                // modal is answered (an in-flight remote playlist can replace
+                // the list meanwhile), and `remove_track` panics on a stale one.
+                dialogs::ask(
+                    ui.ctx(),
+                    dialogs::ConfirmAction::RemoveTrack(idx),
+                    "Remove track",
+                    &format!("Remove '{name}' from the playlist?"),
+                );
             }
         });
 
@@ -171,19 +173,21 @@ pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
         m.data.insert_temp(drag_hover_id, drag_hover);
     });
 
-    // Bottom actions: Create Playlist (confirm only when there are unsaved edits —
-    // tracks are added from the Library now), Save Playlist (native save
-    // dialog, defaults to the Library's current folder; later saves overwrite
-    // the tracked file directly).
+    // Bottom actions: Create Playlist (asks first when there are unsaved
+    // edits — tracks are added from the Library now), Save Playlist (a name
+    // over the folder on screen; later saves overwrite the tracked file).
     ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 12.0;
         if ui.button("Create Playlist").clicked() {
-            if TPlayApp::confirm(
-                "New playlist",
-                "Discard unsaved changes and start a new playlist?",
-                app.playlist_dirty(),
-            ) {
+            if app.playlist_dirty() {
+                dialogs::ask(
+                    ui.ctx(),
+                    dialogs::ConfirmAction::NewPlaylist,
+                    "New playlist",
+                    "Discard unsaved changes and start a new playlist?",
+                );
+            } else {
                 app.new_playlist();
             }
         }
@@ -193,26 +197,31 @@ pub fn playlist_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
             .unwrap_or_else(|| "Save the playlist to a .tplay file".into());
         if ui.button("Save Playlist").on_hover_text(save_hover).clicked() {
             if let Some(path) = app.playlist_file().map(PathBuf::from) {
-                // Already saved once this session: overwrite, no dialog. A
+                // Already saved once this session: overwrite, no prompt. A
                 // tracked smb:// URI overwrites on the server.
                 app.save_playlist_to(path);
             } else if let Some(dir) = browsing_share_dir(app) {
-                // Browsing a share: the native dialog cannot target an
-                // smb:// URI, so ask for a filename and write into the
-                // directory on screen. No mount, no temp file, no dialog.
-                open_share_save(ui, dir, library::default_playlist_name(app.playlist_file()));
-            } else if let Some(path) = rfd::FileDialog::new()
-                .add_filter("TPlay playlist", &["tplay"])
-                .set_directory(app.library_dir())
-                .set_file_name("playlist.tplay")
-                .save_file()
-            {
-                app.save_playlist_to(path);
+                // Browsing a share: a name over the directory on screen, so no
+                // mount and no temp file. No dialog.
+                dialogs::ask_save_name(
+                    ui.ctx(),
+                    dialogs::SaveTarget::PlaylistShare,
+                    dir,
+                    library::default_playlist_name(app.playlist_file()),
+                );
+            } else {
+                // Local: a name over the Library's current folder. The user
+                // navigates there first if they want a different directory —
+                // the same rule the share branch follows.
+                dialogs::ask_save_name(
+                    ui.ctx(),
+                    dialogs::SaveTarget::PlaylistLocal,
+                    app.library_dir().to_string_lossy().into_owned(),
+                    library::default_playlist_name(app.playlist_file()),
+                );
             }
         }
     });
-
-    share_save_modal(app, ui);
 }
 
 /// The directory a share-save would write into: the share/dir currently open in
@@ -226,84 +235,4 @@ fn browsing_share_dir(app: &TPlayApp) -> Option<String> {
     }
     let share = b.share.as_ref()?;
     Some(network::dir_uri(&b.host, share, &b.rel))
-}
-
-/// Arm the share-save prompt. The directory is captured here, at press time, so
-/// the render needs no browse state and a later navigation can't retarget it.
-fn open_share_save(ui: &egui::Ui, dir: String, name: String) {
-    ui.ctx()
-        .memory_mut(|m| m.data.insert_temp(egui::Id::new(SAVE_SHARE_ID), Some((dir, name))));
-}
-
-/// The one non-native dialog in the app: a filename is needed, and
-/// `rfd::MessageDialog` is a native Yes/No with no text field. State lives in
-/// egui memory like every other per-frame UI value — `TPlayApp` stays
-/// UI-state-free, and no new state machine is needed because
-/// `save_playlist_to` is non-blocking (the write goes to the SMB worker).
-fn share_save_modal(app: &mut TPlayApp, ui: &egui::Ui) {
-    let id = egui::Id::new(SAVE_SHARE_ID);
-    let state = ui
-        .ctx()
-        .memory_mut(|m| m.data.get_temp::<Option<(String, String)>>(id).unwrap_or(None));
-    let Some((dir, mut name)) = state else { return };
-
-    let theme = app.theme().clone();
-    let p = theme.palette;
-    // Some(None) = dismissed, Some(Some(name)) = confirmed.
-    let mut action: Option<Option<String>> = None;
-    let resp = egui::Modal::new(id).show(ui.ctx(), |ui| {
-        ui.set_min_width(SAVE_SHARE_FIELD_W);
-        ui.label(egui::RichText::new("Save playlist to share").strong().color(p.text_primary));
-        // Full target, truncated to the modal but complete on hover.
-        ui.add(
-            egui::Label::new(egui::RichText::new(&dir).small().color(p.text_secondary)).truncate(),
-        )
-        .on_hover_text(&dir);
-        ui.add_space(4.0);
-
-        // Enter submits (TextEdit surrenders focus on Enter).
-        let mut enter = false;
-        let field = ui.add(
-            egui::TextEdit::singleline(&mut name)
-                .desired_width(SAVE_SHARE_FIELD_W)
-                .clip_text(true),
-        );
-        if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            enter = true;
-        }
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            if ui.button("Save").clicked() {
-                action = Some(Some(name.clone()));
-            }
-            if ui.button("Cancel").clicked() {
-                action = Some(None);
-            }
-        });
-        if enter {
-            action = Some(Some(name.clone()));
-        }
-    });
-    if resp.should_close() {
-        action = Some(None);
-    }
-
-    match action {
-        Some(Some(typed)) => {
-            ui.ctx().memory_mut(|m| m.data.insert_temp(id, None::<(String, String)>));
-            // `.tplay` is implied and separators are stripped, not sent to the
-            // server as a bogus path. Blank input cancels.
-            if let Some(file) = library::playlist_file_name(&typed) {
-                let target = network::child_uri(&dir, &file);
-                app.save_playlist_to(PathBuf::from(target));
-            }
-        }
-        Some(None) => {
-            ui.ctx().memory_mut(|m| m.data.insert_temp(id, None::<(String, String)>));
-        }
-        // Still open: keep whatever was typed so it survives the next frame.
-        None => {
-            ui.ctx().memory_mut(|m| m.data.insert_temp(id, Some((dir, name))));
-        }
-    }
 }

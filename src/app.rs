@@ -381,27 +381,6 @@ impl TPlayApp {
         app
     }
 
-    pub(crate) fn audio_dialog() -> rfd::FileDialog {
-        rfd::FileDialog::new().add_filter("Audio", &["mp3", "wav", "ogg", "flac", "m4a"])
-    }
-
-    /// Native Yes/No confirm for actions that lose state (New Playlist, Load
-    /// playlist, remove track). `at_risk` false → no dialog, caller proceeds.
-    pub(crate) fn confirm(title: &str, description: &str, at_risk: bool) -> bool {
-        if !at_risk {
-            return true;
-        }
-        match rfd::MessageDialog::new()
-            .set_title(title)
-            .set_description(description)
-            .set_buttons(rfd::MessageButtons::YesNo)
-            .show()
-        {
-            rfd::MessageDialogResult::Yes => true,
-            _ => false,
-        }
-    }
-
     /// Save all settings to unified config.json
     fn save_config(&self) {
         let eq_shared = self.eq_shared.read().unwrap();
@@ -806,12 +785,9 @@ impl TPlayApp {
             self.play_now(path);
         } else if !self.playlist.is_empty() {
             self.play_first_track();
-        } else {
-            if let Some(path) = Self::audio_dialog().pick_file() {
-                self.add_files(vec![path]);
-                self.play_first_track();
-            }
         }
+        // Nothing loaded and an empty playlist: nothing to play. Tracks are
+        // added from the Library pane, so play on an empty playlist is a no-op.
     }
 
     fn play_first_track(&mut self) {
@@ -1440,6 +1416,18 @@ impl TPlayApp {
         }
         self.show_hidden = show;
         self.navigate_to(self.library_dir.clone());
+    }
+
+    /// What the play button has to do: resume/replay the loaded track, or start
+    /// the first track of a non-empty playlist. False when nothing is loaded and
+    /// the playlist is empty (`play()` is then a no-op), and while a track is
+    /// spooling — that one starts on its own when it lands, and `play()` returns
+    /// early for it, so the button would do nothing either way.
+    pub fn can_play(&self) -> bool {
+        if self.current_path.is_some() {
+            return true;
+        }
+        self.network.pending().is_none() && !self.playlist.is_empty()
     }
 
     pub fn has_next_track(&self) -> bool {

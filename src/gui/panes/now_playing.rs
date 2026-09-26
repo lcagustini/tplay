@@ -151,7 +151,9 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
             let is_paused = app.is_paused();
             let is_empty = app.is_empty();
             if is_paused || is_empty {
-                if theme::icon_button(ui, app.theme_icon(Icon::Play), Icon::Play, 18.0, true, false).clicked() {
+                // Nothing loaded and an empty playlist: greyed out, since
+                // `play()` would have nothing to start.
+                if theme::icon_button(ui, app.theme_icon(Icon::Play), Icon::Play, 18.0, app.can_play(), false).clicked() {
                     app.play();
                 }
             } else if theme::icon_button(ui, app.theme_icon(Icon::Pause), Icon::Pause, 18.0, true, false).clicked() {
