@@ -113,6 +113,66 @@ pub fn write_tagged_mp3(path: &Path, title: &str, artist: &str, album: &str) -> 
     bytes
 }
 
+/// A `TPlayApp` with a software audio device.
+///
+/// `TPlayApp::new` needs a `Mixer` and nothing else, and `rodio::mixer::mixer`
+/// builds one with no hardware. It hands back the `MixerSource` that a real
+/// cpal callback would pull from — that is `driver` here, and calling `next()`
+/// on it is what advances the sink. This is how rodio's own `Sink` tests work.
+///
+/// The payoff is that the driver runs as fast as the CPU allows, so a test can
+/// "play" three seconds of audio in microseconds and assert on what the app did
+/// in response. Nothing here waits on a clock.
+///
+/// Hermetic by construction: `last_dir` points at an empty temp dir, because
+/// `TPlayApp::new` calls `navigate_to` on it and would otherwise walk the
+/// user's home directory and start a tag scan over it.
+pub struct TestApp {
+    pub app: tplay::app::TPlayApp,
+    driver: rodio::mixer::MixerSource,
+    rate: u32,
+}
+
+impl TestApp {
+    /// Stereo at 44.1 kHz — the rate the bundled test WAVs are written at, so
+    /// a `pump` of N seconds means roughly N seconds of the track.
+    pub fn new(name: &str) -> Self {
+        let dir = test_dir(name);
+        let (mixer, driver) = rodio::mixer::mixer(2, 44_100);
+        let config = tplay::config::Config {
+            library: tplay::config::LibraryData {
+                last_dir: dir.to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        Self { app: tplay::app::TPlayApp::new(&config, mixer), driver, rate: 44_100 }
+    }
+
+    /// Pull `secs` worth of samples. This is the only thing that makes the sink
+    /// advance — `get_pos`, `empty()` and the `pausable` flag are all applied
+    /// from `periodic_access` inside the source chain, which only runs when a
+    /// consumer asks for samples.
+    pub fn pump(&mut self, secs: f32) {
+        for _ in 0..(secs * self.rate as f32) as usize {
+            self.driver.next();
+        }
+    }
+
+    /// Pump until the sink has drained or `max_secs` of audio have gone by.
+    ///
+    /// Bounded on purpose: a track that never drains (an unreadable file, a
+    /// source that stalls) must fail the assertion rather than hang the suite.
+    pub fn pump_until_empty(&mut self, max_secs: f32) {
+        let step = 0.05;
+        let mut elapsed = 0.0;
+        while !self.app.is_empty() && elapsed < max_secs {
+            self.pump(step);
+            elapsed += step;
+        }
+    }
+}
+
 /// Asserts two durations are approximately equal (within 1 second).
 pub fn assert_duration_approx(actual: Option<Duration>, expected: Duration, msg: &str) {
     match actual {
