@@ -926,6 +926,16 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                 .show(ui, |ui| {
                     let mut jump: Option<PathBuf> = None;
 
+                    // The local row the sidebar should highlight — and `None`
+                    // while a share is open. Entering network mode does NOT
+                    // change `library_dir`, so comparing against it directly
+                    // kept the last local folder lit *alongside* the server
+                    // row. Exactly one row is active at a time: the server when
+                    // browsing, otherwise the local folder. (The other
+                    // direction already worked: clicking a local folder calls
+                    // `leave_network`, so the server row un-highlights.)
+                    let current_local = (!network_mode).then(|| app.library_dir().to_path_buf());
+
                     // Places: fixed user-folder shortcuts (Home + XDG dirs) —
                     // same row style as favorites, no ✕ (not removable).
                     let places = app.quick_folders();
@@ -933,7 +943,7 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                         ui.label(egui::RichText::new("Places").small().strong().color(p.text_secondary));
                         ui.add_space(4.0);
                         for (label, path) in places {
-                            let active = app.library_dir() == path;
+                            let active = current_local.as_deref() == Some(path.as_path());
                             if ui
                                 .add_sized(
                                     egui::vec2(100.0, 18.0),
@@ -960,7 +970,7 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                         ui.label(egui::RichText::new("Volumes").small().strong().color(p.text_secondary));
                         ui.add_space(4.0);
                         for vol in volumes {
-                            let active = app.library_dir() == vol.path;
+                            let active = current_local.as_deref() == Some(vol.path.as_path());
                             if ui
                                 .add_sized(
                                     egui::vec2(100.0, 18.0),
@@ -1103,7 +1113,7 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                     for dir in app.favorite_dirs().to_vec() {
                         ui.horizontal(|ui| {
                             let name = dir_name(&dir);
-                            let active = app.library_dir() == dir;
+                            let active = current_local.as_deref() == Some(dir.as_path());
                             if ui
                                 .add_sized(
                                     egui::vec2(100.0, 18.0),
