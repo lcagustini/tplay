@@ -1,5 +1,5 @@
-use crate::app::{EQ_PRESETS, Pane, TPlayApp};
-use crate::audio::eq::EQ_FREQUENCIES;
+use crate::app::{Pane, TPlayApp};
+use crate::audio::eq::{EQ_FREQUENCIES, EQ_PRESETS};
 use eframe::egui;
 
 pub fn equalizer_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {

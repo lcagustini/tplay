@@ -5,7 +5,8 @@
 //! `CreationContext`, so end-to-end playback can't run headless; the pure
 //! logic behind the public surface is pinned here instead.
 
-use tplay::app::{EQ_PRESETS, Pane, TPlayApp, VizView};
+use tplay::app::{Pane, TPlayApp, VizView};
+use tplay::audio::eq::EQ_PRESETS;
 use std::time::Duration;
 
 #[test]

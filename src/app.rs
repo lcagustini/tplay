@@ -1,7 +1,9 @@
 //! App state and logic — no UI code here.
 
 use crate::audio;
+use crate::audio::eq::EQ_PRESETS;
 use crate::audio::transition;
+use crate::config;
 use crate::gui::theme::{self, Theme, Themes};
 use crate::library;
 use crate::network;
@@ -10,13 +12,9 @@ use eframe::egui;
 use rodio::{cpal::BufferSize, Decoder, OutputStream, OutputStreamBuilder, Sink, Source};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-
-/// How far before track end (seconds) to arm gapless/crossfade next track.
-const PREROLL_SECS: f32 = 2.0;
 
 /// Tiny inline RNG (XorShift64) - replaces fastrand dependency.
 fn rand_u64(state: &mut u64) -> u64 {
@@ -37,133 +35,11 @@ impl Pane {
     pub const ALL: [Pane; 6] = [Pane::NowPlaying, Pane::Playlist, Pane::Equalizer, Pane::Library, Pane::Visualizer, Pane::AlbumCover];
 }
 
-/// Visualizer views (serde'd into config.json `viz_view`). The pane matches
-/// on this; the app just stores/serializes it — same shape as `Pane`.
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug, Default)]
-pub enum VizView {
-    #[default]
-    Bars,
-    Wave,
-}
-
-impl VizView {
-    pub const ALL: [VizView; 2] = [VizView::Bars, VizView::Wave];
-
-    /// Dropdown label in the visualizer pane header.
-    pub fn name(self) -> &'static str {
-        match self {
-            VizView::Bars => "Bars",
-            VizView::Wave => "Wave",
-        }
-    }
-}
-
-/// Unified config — single JSON file. Dock layout stays separate.
-/// `pub` so the integration tests can pin the on-disk shape.
-#[derive(Serialize, Deserialize, Default)]
-pub struct Config {
-    pub theme: String,
-    #[serde(default)]
-    pub eq: EqData,
-    #[serde(default)]
-    pub shuffle: bool,
-    #[serde(default)]
-    pub repeat: bool,
-    #[serde(default)]
-    pub viz_view: VizView,
-    #[serde(default = "default_volume")]
-    pub volume: f32,
-    /// Output buffer size in frames — larger = more underrun slack, more latency.
-    #[serde(default = "default_buffer_size")]
-    pub buffer_size: u32,
-    /// Ceiling in megabytes for the SMB spool cache. Tagging a share downloads
-    /// whole files, so without a bound the cache (which has no other eviction)
-    /// would grow without limit. Only files playback has never used are
-    /// evicted; a played track is never a candidate.
-    #[serde(default = "default_spool_cache_mb")]
-    pub spool_cache_mb: u32,
-    #[serde(default)]
-    pub last_playlist: Option<String>,
-    #[serde(default)]
-    pub library: LibraryData,
-    /// Balance (L/R) — -1 = full left, 0 = center, 1 = full right.
-    #[serde(default)]
-    pub balance: f32,
-    /// Show remaining time instead of elapsed.
-    #[serde(default)]
-    pub remaining: bool,
-    /// Gapless playback — pre-buffer the next track.
-    #[serde(default)]
-    pub gapless: bool,
-    /// Crossfade playback — overlap tracks with a fade.
-    #[serde(default)]
-    pub crossfade: bool,
-    /// Crossfade duration in seconds.
-    #[serde(default = "default_crossfade_secs")]
-    pub crossfade_secs: f32,
-    /// Saved SMB servers (host + username; passwords are session-memory only).
-    #[serde(default)]
-    pub servers: Vec<network::ServerCfg>,
-}
-
-fn default_volume() -> f32 { 1.0 }
-fn default_crossfade_secs() -> f32 { 3.0 }
-fn default_buffer_size() -> u32 { 8192 }
-/// 2 GiB of never-played spool. Sized for a laptop with room to spare; raise
-/// `spool_cache_mb` in config.json to keep more of a browsed share on disk.
-fn default_spool_cache_mb() -> u32 { 2048 }
-
-#[derive(Serialize, Deserialize, Default)]
-pub struct EqData {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default = "default_gains")]
-    pub gains: [f32; 10],
-}
-
-fn default_gains() -> [f32; 10] { [0.0; 10] }
-
-#[derive(Serialize, Deserialize, Default)]
-pub struct LibraryData {
-    #[serde(default)]
-    pub favorites: Vec<String>,
-    #[serde(default)]
-    pub last_dir: String,
-    #[serde(default)]
-    pub show_hidden: bool,
-}
-
-/// Generic config persistence: create dir, serialize/deserialize JSON.
-fn config_path(name: &str) -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("tplay").join(name))
-}
-
-fn save_config<T: Serialize>(name: &str, data: &T) {
-    if let Some(path) = config_path(name) {
-        if let Some(parent) = path.parent() { let _ = fs::create_dir_all(parent); }
-        if let Ok(json) = serde_json::to_string_pretty(data) { let _ = fs::write(&path, json); }
-    }
-}
-
-fn load_config<T: for<'de> Deserialize<'de>>(name: &str) -> Option<T> {
-    config_path(name).and_then(|p| fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str(&s).ok())
-}
-
-/// Equalizer presets — Flat is the reset. A manually tweaked slider
-/// switches the selection to Custom (None).
-/// Curves follow sfxengine.com/blog/best-equalizer-settings-for-music:
-/// Flat ⇐ Flat, Rock ⇐ Rock/Metal, Pop ⇐ V-Shape, Jazz ⇐ Treble Boost,
-/// Classical ⇐ gentle V-Shape, Electronic ⇐ Bass Boost, Vocal ⇐ Vocal Enhancement.
-pub const EQ_PRESETS: [(&str, [f32; 10]); 7] = [
-    ("Flat", [0.0; 10]),
-    ("Rock", [2.0, 2.5, 3.0, -1.0, 0.0, 3.0, 2.0, 0.5, 0.5, 0.0]),
-    ("Pop", [3.0, 2.5, 1.0, -0.5, -0.5, -1.5, 1.0, 2.0, 2.5, 2.0]),
-    ("Jazz", [0.0, 0.5, 0.5, 0.0, 0.5, 1.0, 2.5, 2.0, 1.5, 1.0]),
-    ("Classical", [2.5, 2.0, 0.5, 0.0, -0.5, -1.0, 0.5, 1.5, 2.0, 1.5]),
-    ("Electronic", [4.0, 5.0, -2.0, -1.0, 0.0, 0.0, 0.5, 1.0, 1.0, 0.5]),
-    ("Vocal", [0.0, -2.0, -1.0, 0.0, 0.5, 3.0, 1.5, -1.0, 0.0, 0.0]),
-];
+/// Visualizer views and the settings structs live in `config`; re-exported
+/// here because the GUI and the tests both reach them through `app`. The EQ
+/// presets are NOT re-exported — they sit in `audio::eq` beside the
+/// frequencies they curve, and every caller imports them from there.
+pub use crate::config::{Config, EqData, LibraryData, VizView};
 
 pub struct TPlayApp {
     /// Owns the cpal output stream + mixer; must outlive every Sink.
@@ -286,7 +162,7 @@ impl TPlayApp {
         let themes = Themes::load();
 
         // Load unified config
-        let config = load_config::<Config>("config.json").unwrap_or_default();
+        let config = config::load();
 
         // Output stream with a fixed, configurable buffer — a too-small buffer
         // is the classic cause of ALSA "underrun occurred" at track
@@ -410,7 +286,7 @@ impl TPlayApp {
             crossfade_secs: self.crossfade_secs,
             servers: self.network.servers().to_vec(),
         };
-        save_config("config.json", &config);
+        config::save(&config);
     }
 
     pub fn add_files(&mut self, paths: Vec<PathBuf>) {
@@ -492,38 +368,70 @@ impl TPlayApp {
         self.sink.set_volume(self.volume);
     }
 
-    fn next_track_index(&mut self) -> Option<usize> {
+    /// The index that plays next, **without recording it** — and the RNG state
+    /// that drawing produced, for `commit_next_index` to install.
+    ///
+    /// Pure by construction: the draw comes from a scratch copy of `rng_state`,
+    /// so asking on every frame of the arm window returns the same candidate
+    /// and burns no entropy. That is the whole point of the split — the arm
+    /// evaluates this per frame, and a mutating pick there rewrote the shuffle
+    /// order 60 times a second. See **Shuffle order** in AGENTS.md.
+    fn peek_next_index(&self) -> Option<(usize, u64)> {
         if self.playlist.is_empty() {
             return None;
         }
         let len = self.playlist.len();
         if len == 1 {
-            return self.repeat.then_some(0);
+            return self.repeat.then_some(0).map(|i| (i, self.rng_state));
         }
 
         if !self.shuffle {
-            return match (self.repeat, self.current_index) {
+            let idx = match (self.repeat, self.current_index) {
                 (false, Some(i)) if i + 1 < len => Some(i + 1),
                 (true, Some(i)) => Some((i + 1) % len),
                 (true, None) => Some(0),
                 _ => None,
             };
+            return idx.map(|i| (i, self.rng_state));
         }
 
-        // Shuffle mode: pick random from unplayed
+        // Shuffle mode: pick random from unplayed.
         let unplayed: Vec<usize> = (0..len).filter(|i| !self.played.contains(i)).collect();
-        if unplayed.is_empty() {
-            if self.repeat {
-                self.played.clear();
-                // Pick from all tracks
-                let idx = rand_usize(&mut self.rng_state, len);
-                self.played.push(idx);
-                return Some(idx);
-            }
-            return None;
+        let mut rng = self.rng_state;
+        let idx = if unplayed.is_empty() {
+            // Repeat restarts the cycle, so the draw is over the whole
+            // playlist. `commit_next_index` is what clears `played` for it.
+            self.repeat.then(|| rand_usize(&mut rng, len))
+        } else {
+            Some(unplayed[rand_usize(&mut rng, unplayed.len())])
+        };
+        idx.map(|i| (i, rng))
+    }
+
+    /// Record `idx` as played: the one place the shuffle cycle advances.
+    ///
+    /// Called exactly once per track that actually starts playing, so
+    /// `played` only ever changes on a play, a playlist edit (`reset_shuffle`
+    /// on add/remove/move) or a stop — never on a frame of deliberation.
+    fn commit_next_index(&mut self, idx: usize, rng: u64) {
+        self.rng_state = rng;
+        if !self.shuffle || self.playlist.len() < 2 {
+            return;
         }
-        let idx = unplayed[rand_usize(&mut self.rng_state, unplayed.len())];
+        // An exhausted pool + repeat is a new cycle: drop the history so the
+        // track about to play is not immediately in `played`. Spelled as the
+        // same "every index played" test the peek used, not a length compare.
+        if (0..self.playlist.len()).all(|i| self.played.contains(&i)) {
+            self.played.clear();
+        }
         self.played.push(idx);
+    }
+
+    /// Peek, then commit — the pick-and-play entry point for every caller that
+    /// is genuinely about to start a track.
+    fn next_track_index(&mut self) -> Option<usize> {
+        let (idx, rng) = self.peek_next_index()?;
+        self.commit_next_index(idx, rng);
         Some(idx)
     }
 
@@ -629,102 +537,83 @@ impl TPlayApp {
         }
 
         // 2) No live xf — arm one when the current track nears its end.
-        // Playing from playlist, unpaused, exactly one item queued (the
-        // current track, nothing pre-buffered), and a mode enabled.
+        // The sink-shape gate lives here because it is `Sink` state with no
+        // data equivalent: playing from the playlist, unpaused, exactly one
+        // source queued (the current track, nothing pre-buffered). The mode
+        // check is repeated by `arm_plan` — keep it here too, because with
+        // both modes off this block would otherwise run (and peek) every frame
+        // of every track for nothing.
         if self.current_index.is_some()
             && self.current_path.is_some()
             && !self.sink.is_paused()
             && self.sink.len() == 1
             && (self.crossfade || self.gapless)
         {
-            let total = match self.total_duration { Some(d) => d, None => return };
-            let pos = self.sink.get_pos().saturating_add(self.position_offset);
-            let remaining_secs = total.saturating_sub(pos).as_secs_f32();
+            // PEEK, don't pick: this block runs on every frame until the arm
+            // resolves, and a picking call here appended to `played` 60 times a
+            // second — the shuffle order was being rewritten by deliberation.
+            // Nothing is recorded until the arm actually succeeds, below.
+            let peeked = self.peek_next_index();
+            let next = peeked.map(|(i, _)| (i, self.playlist[i].clone()));
+            let (ready, tagged) = next
+                .as_ref()
+                .map(|(_, p)| (tracks::is_ready(p), self.tag_cache.get(p).and_then(|i| i.duration)))
+                .unzip();
 
-            let cf = Duration::from_secs_f32(self.crossfade_secs);
-            // Crossfade: arm within cf seconds of end (track longer than cf).
-            // Gapless: arm within PREROLL_SECS (the silent pre-buffer hold).
-            let should_arm = if self.crossfade {
-                remaining_secs <= self.crossfade_secs && total > cf
-            } else {
-                remaining_secs <= PREROLL_SECS
+            let input = transition::ArmInput {
+                crossfade: self.crossfade,
+                gapless: self.gapless,
+                crossfade_secs: self.crossfade_secs,
+                total: self.total_duration,
+                pos: self.sink.get_pos().saturating_add(self.position_offset),
+                next: next.as_ref().map(|(i, p)| (*i, p.as_path())),
+                next_ready: ready.unwrap_or(false),
+                next_duration: tagged.flatten(),
             };
-
-            if should_arm {
-                if let Some(next_idx) = self.next_track_index() {
-                    let next_path = self.playlist[next_idx].clone();
-                    // The pre-buffer question is "are this track's bytes on hand
-                    // right now", not "where did it come from". A local track
-                    // with no file on disk can't be pre-buffered, and neither
-                    // can a remote one that isn't in the spool cache yet — it
-                    // arrives later through the pending-spool path. A remote
-                    // track that IS cached pre-buffers like any other, so gapless
-                    // and crossfade stop being a source-based rule and become the
-                    // same data-availability rule local tracks already follow.
-                    // Either way: skip the arm, and let natural advance handle it.
-                    // The pre-buffer question is "are this track's bytes on hand
-                    // right now", not "where did it come from". A local track
-                    // with no file on disk can't be pre-buffered, and neither
-                    // can a remote one that isn't in the spool cache yet — it
-                    // arrives later through the pending-spool path. A remote
-                    // track that IS cached pre-buffers like any other, so gapless
-                    // and crossfade stop being a source-based rule and become the
-                    // same data-availability rule local tracks already follow.
-                    // Either way: skip the arm, and let natural advance handle it.
-                    if !tracks::is_ready(&next_path) {
-                        return;
-                    }
-                    // A track shorter than the hold/fade window drains muted
-                    // before the swap (gapless) or mid-fade (crossfade) and
-                    // would be promoted empty — silently skipped. Prefer a
-                    // natural-advance gap instead. Untagged tracks are allowed
-                    // through (they're real music in practice).
-                    let hold = if self.crossfade {
-                        cf
-                    } else {
-                        Duration::from_secs_f32(remaining_secs)
-                    };
-                    if let Some(d) = self.tag_cache.get(&next_path).and_then(|i| i.duration) {
-                        if d < hold {
-                            return;
-                        }
-                    }
-                    // Build the incoming track source (full track, buffered)
-                    // BEFORE any state flips, so a build failure leaves the
-                    // arm cleanly skipped rather than half-applied. A `None`
-                    // here is a gap, not a crash: `advance` returns and natural
-                    // advance picks the track up a moment later.
-                    let Some(xf_source) = transition::build_gapless_next(
-                        &next_path,
-                        Arc::clone(&self.eq_shared),
-                        Arc::clone(&self.balance),
-                        self.viz.clone(),
-                    ) else {
-                        return;
-                    };
-                    // Capture the outgoing duration for the fade math BEFORE
-                    // flipping total_duration to the incoming track below.
-                    self.xf_out_total = Some(total);
-                    // Second sink on the same mixer — plays simultaneously.
-                    let xf_sink = Sink::connect_new(self.output.mixer());
-                    xf_sink.append(xf_source);
-                    xf_sink.set_volume(0.0);
-                    self.xf_sink = Some(xf_sink);
-                    // Pre-flip the playlist metadata so Now Playing shows the new track.
-                    self.current_index = Some(next_idx);
-                    // Tags and duration come from the track's file; the cache
-                    // entry is keyed by the id, so every pane still finds it.
-                    if let Some(info) = tracks::info(&next_path) {
-                        self.total_duration = info.duration;
-                        self.tag_cache.insert(next_path.clone(), info);
-                    }
-                    if self.total_duration.is_none() {
-                        self.total_duration = tracks::probe(&next_path);
-                    }
-                    self.current_path = Some(next_path);
-                    self.seek_target = None;
+            // Every guard lives in `arm_plan`; this is only the side effects.
+            if let Some(armed) = transition::arm_plan(&input) {
+                // Build the incoming track source (full track, buffered) BEFORE
+                // any state flips, so a build failure leaves the arm cleanly
+                // skipped rather than half-applied. A `None` here is a gap, not
+                // a crash: `advance` returns and natural advance picks the track
+                // up a moment later.
+                let Some(xf_source) = transition::build_gapless_next(
+                    &armed.track,
+                    Arc::clone(&self.eq_shared),
+                    Arc::clone(&self.balance),
+                    self.viz.clone(),
+                ) else {
                     return;
+                };
+                // The incoming track is now really playing, so this is the one
+                // moment the shuffle cycle may advance — one push, with the RNG
+                // draw the peek already made. A skipped or failed arm commits
+                // nothing, and natural advance picks fresh at the track end.
+                if let Some((_, rng)) = peeked {
+                    self.commit_next_index(armed.index, rng);
                 }
+                // Capture the outgoing duration for the fade math BEFORE
+                // flipping total_duration to the incoming track below.
+                self.xf_out_total = Some(armed.out_total);
+                // Second sink on the same mixer — plays simultaneously.
+                let xf_sink = Sink::connect_new(self.output.mixer());
+                xf_sink.append(xf_source);
+                xf_sink.set_volume(0.0);
+                self.xf_sink = Some(xf_sink);
+                // Pre-flip the playlist metadata so Now Playing shows the new track.
+                self.current_index = Some(armed.index);
+                // Tags and duration come from the track's file; the cache
+                // entry is keyed by the id, so every pane still finds it.
+                if let Some(info) = tracks::info(&armed.track) {
+                    self.total_duration = info.duration;
+                    self.tag_cache.insert(armed.track.clone(), info);
+                }
+                if self.total_duration.is_none() {
+                    self.total_duration = tracks::probe(&armed.track);
+                }
+                self.current_path = Some(armed.track);
+                self.seek_target = None;
+                return;
             }
         }
 
@@ -864,15 +753,14 @@ impl TPlayApp {
         self.eq_shared.read().unwrap().gains
     }
 
+    /// The preset the current gains match, or `None` = Custom (the ComboBox
+    /// holds a `None` option, so the caller needs the Option, not the label).
     pub fn eq_preset(&self) -> Option<&str> {
-        let gains = self.eq_gains();
-        EQ_PRESETS.iter()
-            .find(|(_, g)| *g == gains)
-            .map(|(n, _)| *n)
+        audio::eq::preset_for(self.eq_gains())
     }
 
     pub fn eq_preset_name(&self) -> &str {
-        self.eq_preset().unwrap_or("Custom")
+        audio::eq::preset_for(self.eq_gains()).unwrap_or("Custom")
     }
 
     /// Switch theme by id (from the Theme dropdown); persisted, applied the
@@ -1172,9 +1060,6 @@ impl TPlayApp {
         }
     }
 
-    /// Play a library file directly. `current_index = None` is the "direct
-    /// open" semantics: the playlist's sequential flow isn't touched and
-    /// auto-advance won't cascade off it.
     /// Play a library file directly. `current_index = None` is the "direct
     /// open" semantics: the playlist's sequential flow isn't touched and
     /// auto-advance won't cascade off it.

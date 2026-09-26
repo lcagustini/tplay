@@ -1,6 +1,6 @@
 # tplay
 
-Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window. LAN-only network access: a built-in SMB browser (no mount) plus a Volumes list of local block partitions — no internet services, connects only to user-specified hosts. 21 source files + `themes/` data folder; read all of them before changing anything — there is nothing else to explore.
+Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window. LAN-only network access: a built-in SMB browser (no mount) plus a Volumes list of local block partitions — no internet services, connects only to user-specified hosts. 26 source files + `themes/` data folder; read all of them before changing anything — there is nothing else to explore.
 
 ## Rules
 
@@ -10,8 +10,9 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window. LAN-
 ## Layout
 
 - `src/main.rs` — bootstrap: window options (680x460 default, resizable, min 320x160, no native title bar), hands off to `app::TPlayApp`.
-- `src/app.rs` — `TPlayApp`: ALL app state + logic, zero UI code. Owns the rodio stream/sink. The GUI calls in through pub methods; read-only getters sit at the bottom. **No docking state** — that lives in GUI layer.
-- `src/lib.rs` — public re-exports for testing (`app`, `audio`, `gui`, `library`).
+- `src/app.rs` — `TPlayApp`: ALL app state + logic, zero UI code. Owns the rodio stream/sink. The GUI calls in through pub methods; read-only getters sit at the bottom. **No docking state** — that lives in GUI layer. Two things deliberately do *not* live here despite being app state: the settings file's on-disk shape (`src/config.rs`) and the gapless/crossfade pre-buffer decision (`audio/transition.rs`).
+- `src/config.rs` — `~/.config/tplay/config.json` and nothing else: `Config`/`EqData`/`LibraryData`/`VizView`, their serde defaults, and `load()`/`save()`. The dependency is **one-way** — `TPlayApp::save_config` builds a `Config` from its own fields and hands it over; this module has no idea what a theme or a shuffle *does*. The fields are `pub` because they document the format `config_persistence.rs` pins, not because anything reads them back through here. Re-exported from `app` (`pub use crate::config::{…}`) since the GUI and the tests already reach those types through `app`. The generic `save_config<T>(name, …)`/`load_config<T>(name)` pair it replaced had exactly one caller (`config.json`), so it is now un-generic and un-parameterized.
+- `src/lib.rs` — public re-exports for testing (`app`, `audio`, `config`, `gui`, `library`).
 - `src/gui/mod.rs` — declares `coordinator` + `dialogs` + `panes` + `theme`.
 - `src/gui/dialogs.rs` — the app's only two dialogs, both in-app `egui::Modal`s: the Yes/No `ConfirmAction` and the shared save-name prompt (`SaveTarget`). A call site arms one (`ask` / `ask_save_name`) and the coordinator calls `dialogs::show` at the end of the frame, above the dock area. State lives in egui memory under `CONFIRM_ID` / `SAVE_NAME_ID`, so `TPlayApp` stays UI-state-free; actions are enums, never closures (a closure cannot be stored in egui memory).
 - `src/gui/coordinator.rs` — `update_ui(app, ctx)`: applies the theme's egui visuals, then draws one frame's `DockArea` (egui_dock). Implements `TabViewer` for `Pane` enum; calls the six pane functions in `ui()`. Loads dock layout from egui memory + `~/.config/tplay/dock_layout.json`; saves to disk only when the layout changes or the app closes. The ☰ menu re-adds closed panes. Draws `dialogs::show` **after** the dock area, so any dialog armed mid-frame (by a pane or the menu) paints on top and runs there.
@@ -23,19 +24,21 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window. LAN-
 - `src/tracks.rs` — **the source-agnostic track surface** (see **Tracks: one surface per source** below). The single place that knows a track can be local or remote, and the only module that touches the filesystem for a track: readers that take a track id and return the *thing* asked for (`open`/`info`/`probe`/`cover`) plus `is_ready` (the pre-buffer predicate), `normalize` (playlist entry → the id everything stores), `split_for_tags` (batch → the two tag transports), and `TagReader` (owns the local scan receiver and applies remote tag results).
 - `src/audio/mod.rs` — file-level helpers, no playback logic:
   - `probe_duration` — symphonia-based duration probe; fallback when rodio's `Decoder::total_duration()` is None (mainly MP3). This is why `symphonia` is a direct dep.
-- `src/audio/eq.rs` — 10-band graphic EQ (`EqSource` wrapping `rodio::Source<Item=f32>`). RBJ peaking EQ coefficients (w3.org audio-eq-cookbook). Gains live in `Arc<RwLock<EqShared>>` shared with GUI; `EqSource::refresh()` read-locks per sample, UI write-locks — no sink rebuild, no audio restart. 0 dB = exact identity filter (A=1).
+- `src/audio/eq.rs` — 10-band graphic EQ (`EqSource` wrapping `rodio::Source<Item=f32>`). RBJ peaking EQ coefficients (w3.org audio-eq-cookbook). Gains live in `Arc<RwLock<EqShared>>` shared with GUI; `EqSource::refresh()` read-locks per sample, UI write-locks — no sink rebuild, no audio restart. 0 dB = exact identity filter (A=1). Also owns `EQ_PRESETS` and `preset_for(gains)` — the presets sit beside `EQ_FREQUENCIES` because they are curves over those bands, and `preset_for` is pure, so the preset name is derived from the gains and never stored.
 - `tests/` — ALL tests live here; each file is its own auto-discovered test binary (cargo runs each once). `tests/common.rs` provides shared helpers (temp dirs, minimal WAV/FLAC generators, duration assertions). `common::write_tagged_mp3` hand-builds a real ~125 KB MP3 with real ID3v2 tags (ID3v2.3 TIT2/TPE1/TALB + 300 silent MPEG-1 Layer III frames) — it exists because no encoder dependency is available and lofty ships no test assets, and it is the fixture the whole remote-tag path is verified against. Individual suites: `eq_tests.rs`, `playlist_tests.rs`, `library_tests.rs`, `gui_tests.rs`, plus the second-wave suites below. `playlist_tests.rs` also carries the **share-playlist** serialization rules: `smb_uris_are_not_joined_onto_the_base` (the `is_relative` trap — an `smb://` entry read with a share base must survive verbatim), `relative_entries_resolve_against_a_share_uri_base` (with a premise guard proving the cache-dir base is wrong), `mixed_playlist_roundtrips_through_json`, `default_playlist_name_keeps_the_tracked_stem` and `playlist_file_name_appends_the_extension_and_strips_separators`. `library_tests.rs` carries `read_info_gives_tags_and_a_true_duration_from_a_whole_file` (the remote path's load-bearing claim: a full read gives tags AND a duration matching the file's 300 frames, which no prefix could) and `sort_entries_orders_both_sources_the_same_way` (one sorter, and the Title column interleaving folders by their own name). `smb_helpers.rs` carries `select_evictions_never_removes_a_played_file` (must free enough AND never touch a played file, even when that means falling short) and `tag_attempts_are_bounded_and_cleared_on_success` (the retry cap, and that `busy()` ignores the attempt map so a retained failure cannot pin a permanent repaint).
-- **Headless boundary**: `TPlayApp::new()` needs a real audio device + eframe `CreationContext`, so no test constructs it. Pure playback logic (shuffle navigation, drag index math) is mirrored branch-for-branch as free functions in `tests/` — the same convention `playlist_tests.rs` and `drag_drop.rs` follow. The `pub` static helpers that *are* reachable (`fmt_duration`, `format_freq`, `EQ_PRESETS`, `Pane::ALL`) are tested directly in `app_integration.rs`, along with `probe_duration` on a real WAV.
+- **Headless boundary**: `TPlayApp::new()` needs a real audio device + eframe `CreationContext`, so no test constructs it. Pure playback logic (shuffle navigation, drag index math) is mirrored branch-for-branch as free functions in `tests/` — the same convention `playlist_tests.rs` and `drag_drop.rs` follow. **Prefer moving the logic out to mirroring it** (see `transition::arm_plan`, below): a mirror is a second copy that can drift from the first. The `pub` static helpers that *are* reachable (`fmt_duration`, `format_freq`, `Pane::ALL`) are tested directly in `app_integration.rs`, along with `EQ_PRESETS` (now in `audio::eq`) and `probe_duration` on a real WAV.
 - Second-wave suites (added to lock down logic the first wave didn't reach):
   - `app_integration.rs` — TPlayApp static helpers, Pane/EQ preset invariants, `probe_duration`.
-  - `config_persistence.rs` — `Config` serde round-trip, missing-field defaults, JSON key shape. Requires `Config`/`EqData`/`LibraryData` and their fields to be `pub` (they are — the structs document the on-disk format for tests).
+  - `config_persistence.rs` — `Config` serde round-trip, missing-field defaults, JSON key shape. Imports the structs from `tplay::app` (re-exports of `src/config.rs`); requires `Config`/`EqData`/`LibraryData` and their fields to be `pub` (they are — the structs document the on-disk format for tests).
   - `dock_layout.rs` — egui_dock round-trip of tabs/splits/floating windows via `lay_out` + the `finite` viewport substitution (a never-painted leaf has `Rect::NOTHING` viewports that serialize as `null`, which serde_json can't read back — a session always saves after painting).
   - `drag_drop.rs` — every branch of `move_track`/`remove_track` current-index adjustment.
   - `library_search.rs` — sort_key beyond the basics: case-insensitivity, year, genre, zero-padded millisecond duration ordering (9 s < 10 s).
   - `eq_live.rs` — `EqSource` live behavior at Source level: 0 dB exact identity, band boost amplitude, gain change mid-iteration, disable/reenable.
   - `tag_cache.rs` — the `drain_tag_scan` mpsc pattern (Empty/Disconnected branches) and dropped-receiver replacement.
-  - `playlist_shuffle.rs` — reset semantics (remove/move/play_track/toggle) and newly-added tracks joining the unplayed pool.
+  - `playlist_shuffle.rs` — reset semantics (remove/move/play_track/toggle) and newly-added tracks joining the unplayed pool, plus the **peek/commit invariant** (`peeking_repeatedly_changes_neither_history_nor_rng`, `an_uncommitted_peek_leaves_the_order_alone`, `an_armed_track_commits_exactly_one_entry`, `history_length_tracks_plays_not_frames`, `repeat_restarts_the_cycle_on_commit_not_on_peek`) — the guards that keep the crossfade arm's per-frame evaluation from rewriting the shuffle order. Its mirrors are split to match `app.rs`; `playlist_tests.rs` keeps the composed form, which is behaviourally identical.
   - `contrast_tests.rs` — WCAG contrast verification of the *bundled* themes: text (primary/secondary/accent) on every surface ≥ 4.5:1, UI components (focus ring, progress fill, slider handle) ≥ 3:1, and the active-row tint composite keeping title text ≥ 4.5:1. `eq_band_w_min` floor ≤ 320px window. Guards palette regressions.
+  - `viz_tests.rs` — the visualizer DSP: `VizBuf` push/snapshot/clear, `fft_magnitude` (DC bin and a 1 kHz sine landing on the expected bin), and `compute_bands`/`compute_wave` (empty decay, empty wave, peak envelope, and that the wave reaches the *last* bucket — the `div_ceil` grouping bug). Lived in `src/audio/viz.rs` as a `#[cfg(test)] mod tests` until it was moved; see **Test conventions**.
+  - `no_inline_tests.rs` — one structural test: no `#[cfg(test)]`/`#[test]`/`mod tests` anywhere in `src/`, so the convention above cannot regress. Skips comment lines, since a doc comment is allowed to mention `#[test]`.
   - `ui_polish_tests.rs` — theme-app behavior: `apply` zeroes `animation_time` (instant switch) and maps tokens to `Visuals`; new layout tokens (`text_meta`/`text_time`/`row_tint_alpha`) round-trip through `load_from`; the 10 × `eq_band_w_min` floor stays under the minimum window.
   - `layout_save_load.rs` — named layout save/load round-trips through the coordinator helpers: `save_layout`/`load_layout`/`list_layouts` + the finite-viewport fix for serde stability.
   - `font_fallback.rs` — headless verification that bundled egui fonts miss U+2010 and `install_fallback_fonts` makes both families render it (skipped on machines with no candidate system font).
@@ -97,7 +100,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window. LAN-
   - A remote `last_playlist` restores through the same async `fetch`, because `Path::exists()` is always false for an `smb://` path and would skip the restore silently. It fails until the user logs in again — passwords are session-memory only, so there is nothing to reuse.
 - **New Playlist** — clears the current playlist (replaced the old Load button); the button label reads **Create Playlist**. Loading now happens in the Library by clicking a `.tplay` file. New and Load ask first (the in-app confirm modal) only when the playlist has unsaved edits (`playlist_dirty`) — a clean switch is silent, and the check lives at the call site, which acts directly instead of arming. The ✕ per-row remove always asks.
 - Action buttons (Create Playlist / Save Playlist) live in a `horizontal_wrapped` row at the bottom of the pane (`item_spacing.x = 12` between them).
-- **Shuffle algorithm** (in `app.rs`): `next_track_index` picks a random unplayed index (XorShift64); `prev_track_index` pops from `played` history; `repeat=true` restarts the cycle when the pool is exhausted. `reset_shuffle()` clears `played` — called on toggle, play_track, remove/move, load, stop.
+- **Shuffle algorithm** (in `app.rs`): `peek_next_index` picks a random unplayed index (XorShift64) **without recording it**, `commit_next_index` records it, and `next_track_index` is the two composed — see **Shuffle order** below for why the split is load-bearing. `prev_track_index` pops from `played` history; `repeat=true` restarts the cycle when the pool is exhausted. `reset_shuffle()` clears `played` — called on toggle, play_track, remove/move, load, stop.
 - **Drag-and-drop reorder**: `drag_from` / `drag_hover` live in egui Memory (`tplay.drag_from`, `tplay.drag_hover`) and persist across frames. On drop, item is removed from `from` and inserted at `to` (no `-1` adjustment), so dragging item 1 over item 3 puts it at position 3. `current_index` updated to follow the moved track.
 
 ---
@@ -174,7 +177,7 @@ branches on where a track came from**.
 ## Equalizer
 
 - 10 bands at `audio::eq::EQ_FREQUENCIES` (20, 100, 300, 600, 1K, 3K, 5K, 8K, 12K, 16K — the reference UI's labels; the same constant drives the filters *and* the pane labels, so they can't drift).
-- Pane header: left `ON` toggle, then `Reset` button and preset dropdown — all three grouped in one row with matching button chrome. Presets: `EQ_PRESETS` in app.rs — Flat, Rock, Pop, Jazz, Classical, Electronic, Vocal. Curves follow sfxengine.com/blog/best-equalizer-settings-for-music (Rock ⇐ Rock/Metal, Pop ⇐ V-Shape, Jazz ⇐ Treble Boost, Electronic ⇐ Bass Boost, Vocal ⇐ Vocal Enhancement). Selecting one applies its gains immediately; any manual slider tweak switches the selection to `EQ_PRESET_CUSTOM`. Preset is derived from gains (never stored — one source of truth) in `~/.config/tplay/config.json`.
+- Pane header: left `ON` toggle, then `Reset` button and preset dropdown — all three grouped in one row with matching button chrome. Presets: `EQ_PRESETS` in `audio/eq.rs` — Flat, Rock, Pop, Jazz, Classical, Electronic, Vocal. Curves follow sfxengine.com/blog/best-equalizer-settings-for-music (Rock ⇐ Rock/Metal, Pop ⇐ V-Shape, Jazz ⇐ Treble Boost, Electronic ⇐ Bass Boost, Vocal ⇐ Vocal Enhancement). Selecting one applies its gains immediately; any manual slider tweak switches the selection to `EQ_PRESET_CUSTOM`. The name is derived from the gains by `eq::preset_for` (never stored — one source of truth) and only the gains persist, in `~/.config/tplay/config.json`.
 - **Live EQ**: `EqSource` chains 10 biquad filters (Direct Form II transposed) in series. `refresh()` runs per sample frame; reads shared gains under a read lock; rebuilds only changed bands (fresh `Biquad` with zeroed state — no click from stale history). `enabled=false` skips processing entirely.
 - **Sliders**: vertical, trailing fill (theme `--progress-fill`), height clamped to theme layout tokens (`eq_slider_min_h`..`eq_slider_max_h`). Band width dynamic: max 80px, shrinks with spacing to fit the pane; the pane width is floored at `10 × eq_band_w_min` (no scrollbars on the EQ pane). Frequency labels use the `text_meta` size. (A "scale the slider on press" effect isn't implemented — egui has no transform API for widgets; the drag already responds instantly with `animation_time = 0`.)
 
@@ -189,7 +192,7 @@ branches on where a track came from**.
 - **Bars view**: 1024-point radix-2 FFT with Hann window → 32 log-spaced bands → dB-normalized (-60..0) → per-bin attack/release smoothing (classic WMP feel).
 - **Wave view**: mirrored time-domain **peak envelope** downsampled from the ring buffer (one `|sample|` peak per ~2px display column, from a ~23 ms window), rendered as adjacent filled columns + outline strokes — column fills use `rect_filled` (polygon tessellation of raw sample waves rendered as garbage).
 - Drawing: full-rect `ui.painter()`, palette colors only (`accent`, `progress_fill`, `bg`), `scroll_bars = [false, false]` like the EQ pane.
-- No new dependencies — hand-rolled FFT and smoothing in `src/audio/viz.rs` (pure logic, tested without an audio device).
+- No new dependencies — hand-rolled FFT and smoothing in `src/audio/viz.rs` (pure logic, covered by `tests/viz_tests.rs` without an audio device).
  
 ---
  
@@ -286,6 +289,12 @@ branches on where a track came from**.
 - **Per-frame UI state in egui Memory**: `TPlayApp` has zero UI state. The seek slider position (`tplay.seek` in now_playing.rs), the drag-and-drop state (`tplay.drag_from` / `tplay.drag_hover` in playlist.rs), the library init flag and search query (`tplay.library.init` / `tplay.library.query` in library.rs) are stored via `ui.ctx().memory_mut` so they survive across frames and between panes.
 - **Drag-and-drop reorder**: `drag_from` / `drag_hover` live in egui Memory and persist across frames. On drop, item is removed from `from` and inserted at `to` (no `-1` adjustment), so dragging item 1 over item 3 puts it at position 3. `current_index` updated to follow the moved track.
 - **Shuffle order**: `played: Vec<usize>` is the history of indices played in this shuffle cycle. `next_track_index` picks random from the unplayed pool; `prev_track_index` pops from `played`. `repeat=true` restarts the cycle when the pool is exhausted. Clicking a track directly resets shuffle (`played.clear()`). Reordering/deleting calls `reset_shuffle()`.
+- **`played` changes only on a play, a playlist edit, or a stop — never on a frame.** The picking logic is split in two, and the split is the invariant:
+  - **`peek_next_index(&self) -> Option<(usize, u64)>`** — pure. `&self` plus an rng drawn from a *scratch copy* means it **cannot** write `played` or consume entropy; the type signature enforces it, not a convention. Returns the candidate together with the post-draw rng so a commit installs exactly the draw that was peeked.
+  - **`commit_next_index(idx, rng)`** — the only writer of `played`, called once per track that actually starts playing. On an exhausted pool with repeat it clears the history first (spelled as the same "every index played" test the peek used, not a length compare).
+  - **`next_track_index()`** — the two composed, for every caller that is genuinely about to start a track (`next`/`prev`/`play_track`/natural advance/the arm).
+
+  **Why it is split:** the gapless/crossfade arm re-evaluates itself on *every frame* until it resolves, so anything it calls runs 60×/second. It originally called the picking function, which appended to `played` every time — the shuffle order was rewritten by deliberation rather than by playback, and `prev_track_index` (which pops that history) walked to tracks that never played. Worse, the mode check had moved into `arm_plan`, so with both modes *off* the block still ran and did it for free. The arm now peeks, and commits only when the arm actually lands. Two consequences worth knowing: a peek is idempotent, so the candidate cannot flicker between frames; and a **skipped** arm (nothing to pre-buffer, too short, build failed) commits *nothing*, so natural advance picks fresh at the track end instead of inheriting a stale entry. Pinned by `playlist_shuffle.rs` (`peeking_repeatedly_changes_neither_history_nor_rng`, `an_uncommitted_peek_leaves_the_order_alone`, `an_armed_track_commits_exactly_one_entry`, `history_length_tracks_plays_not_frames`, `repeat_restarts_the_cycle_on_commit_not_on_peek`).
 - **Dock state in egui Memory**: `DockState<Pane>` lives in `ctx.data()` under `tplay.dock_state`. Pure UI state — not in `TPlayApp`. Layout persists to disk each frame.
 - **Shared tag scan**: one cache (`tag_cache`) serves every pane, fed by two transports, and **`tracks::TagReader` owns the split** so the app holds no mpsc plumbing and no `tag_scan_rx` field. `TPlayApp::ensure_tags(paths)` forwards to `TagReader::request(cache, network, paths)`, which skips cached tracks and hands the local half to a background `scan_files` thread (replacing any in-flight receiver — per-track cache means a dropped scan just restarts next request) and the remote half to `Network::fetch_tags` (see **Remote tags**). Results drain per frame via `TagReader::drain_into` (local, including the mpsc `Empty`/`Disconnected` branches that clear "Scanning…") and `TagReader::absorb` from the `Event::Tagged` arm of `update()` (remote, including `MAX_TAG_FAILURES_LOGGED` which moved with it). Triggers: library `navigate_to` and the share browser, playlist `add_files`, `load_playlist_from`. `start_track` reads the playing track's tags inline (one file) so Now Playing shows title · artist · album immediately. `library_scanning()` recomputes as "any current-folder file missing from the cache" — a **local** question by construction, since `library_entries` only ever comes from `navigate_to` over a `dir.is_dir()`-checked `library_dir` and an `smb://` URI never passes that; the share browser computes the same thing over its own entries.
 - **SMB worker** (`network::spawn_worker`, spawned by `Network::new`): a single `std::thread` owns a tokio current-thread runtime and processes `SmbCmd`s sequentially (`ListShares`/`ListDir`/`Spool`/`Save`/`Tags` — paced by user clicks, spool is the one long op). Replies come back over a std mpsc drained every frame by `Network::drain` (same pattern as `drain_tag_scan`; `update()` repaints while `busy()` or playing). Each command carries its own `SmbCreds` snapshot (saved username + session password) — passwords exist only inside the command and are dropped after use. Stale replies are dropped by the `host`/`uri` match against the current browse/pending state. Sequential processing means a `Save` queues behind an in-flight track spool — fine for a few KB of JSON, but a large download makes Save feel slow. A `Tags` batch is likewise a long pole, and now a much heavier one: browsing into a 300-file directory queues one command that **downloads 300 whole files**, and browse clicks wait behind all of it. That is the price of remote rows matching local ones (see **Remote tags**); the share browser shows a live count so the wait is legible, and a revisit is instant because the files are already cached.
@@ -354,7 +363,7 @@ branches on where a track came from**.
 | constant | file | purpose |
 |---|---|---|
 | `EQ_FREQUENCIES` | audio/eq.rs | 10 band frequencies (Hz) — same constant drives filters and UI labels |
-| `EQ_PRESETS` | app.rs | 7 named gain curves |
+| `EQ_PRESETS` / `preset_for` | audio/eq.rs | 7 named gain curves, and the pure gains → name derivation |
 | `SORT_OPTIONS` | library.rs | 6 library columns |
 | `VIZ_BANDS` | audio/viz.rs | 32 log-spaced output bands for drawing |
 | `FFT_SIZE` | audio/viz.rs | 1024-point FFT window |
@@ -383,17 +392,19 @@ branches on where a track came from**.
 | `normalize` | tracks.rs | playlist entry → stored id (local canonicalized & dropped if gone, remote verbatim) |
 | `MAX_TAG_FAILURES_LOGGED` | tracks.rs | `3` — per-track tag failures printed before switching to a count |
 | `AUDIO_EXTENSIONS` | library.rs | `["mp3","wav","ogg","flac","m4a"]` |
-| `PREROLL_SECS` | app.rs | `2.0` (gapless/crossfade arm trigger, seconds before track end) |
+| `PREROLL_SECS` | audio/transition.rs | `2.0` (gapless arm trigger, seconds before track end) |
+| `arm_plan` / `Armed` / `ArmInput` | audio/transition.rs | the pre-buffer decision: `ArmInput` → `Option<Armed>`. Pure, and the reason the arm is testable at all |
+| `peek_next_index` / `commit_next_index` | app.rs | the shuffle pick, split so only a real play writes `played` (see **Shuffle order**) |
 | `SMB_PORT` | network.rs | `445` — SMB protocol default port |
 | `TAG_ATTEMPTS_MAX` | network.rs | `3` — tag-fetch attempts before a remote track is given up on for the session |
-| `spool_cache_mb` | app.rs (`Config`) | `2048` — MiB ceiling for never-played spool; eviction never touches a played file |
+| `spool_cache_mb` | config.rs (`Config`) | `2048` — MiB ceiling for never-played spool; eviction never touches a played file |
 | `spool_key` / `cache_path` | network.rs | FNV-1a 64 hex key + cache path for a `smb://` URI (`<cache>/tplay/smb/<key>.<ext>`) |
 
 ---
 
 ## Test conventions
 
-- **All tests live in `tests/`** — no `#[cfg(test)]` modules in src. Cargo auto-discovers each `tests/<suite>.rs` as its own binary, so every suite runs exactly once (`tests/main.rs` was removed — it re-declared the suites and doubled every run).
+- **All tests live in `tests/`** — no `#[cfg(test)]` modules in src, and `tests/no_inline_tests.rs` fails the build if one appears (it walks `src/`, skipping comment lines so a doc comment may still *mention* `#[test]`). The reason is not tidiness: cargo compiles an inline module into **both** the `lib` and the `main` unit-test binaries, so `src/audio/viz.rs`'s 8 tests ran **twice** under two unnameable targets and could not be run or filtered as a suite. Moving them to `tests/viz_tests.rs` made them run once, as a target you can name. Cargo auto-discovers each `tests/<suite>.rs` as its own binary, so every suite runs exactly once (`tests/main.rs` was removed — it re-declared the suites and doubled every run). A private helper is reachable from a suite by making it `pub` — the only reason `audio::viz::fft_magnitude` is public.
 - `tests/common.rs` helpers: `temp_dir()`, `test_dir(name)`, `write_wav(path)` (1s 8kHz mono PCM), `write_minimal_flac(path)`, `assert_duration_approx`.
 - Test isolation: each test makes its own temp dir under `/tmp/tplay-test-<pid>/<name>/` and removes it.
 - Run: `cargo test` (all suites, once each).
@@ -406,7 +417,7 @@ branches on where a track came from**.
 |---|---|
 | Add a theme | `themes/<id>/theme.json` + `themes/<id>/icons/*.png` (17 names) |
 | Change EQ band frequencies | `audio/eq.rs` (`EQ_FREQUENCIES`) — updates both filters and UI labels |
-| Add EQ preset | `app.rs` (`EQ_PRESETS` array) |
+| Add EQ preset | `audio/eq.rs` (`EQ_PRESETS` array) — the pane and the tests import it from there |
 | Add audio format | `library.rs` (`AUDIO_EXTENSIONS`), Cargo.toml (rodio features) |
 | Change a pane's UI | the one function in `gui/panes/<pane>.rs` |
 | Change the file list (rows, columns, sorting, search) | `file_list_ui` + `list_header_right` in `gui/panes/library.rs` — shared by the local folder browser AND the SMB share browser, so a change lands in both |
@@ -415,9 +426,10 @@ branches on where a track came from**.
 | Change spool cache retention | `Config::spool_cache_mb` + `Network::evict_unplayed`/`mark_played`, policy in the pure `select_evictions` |
 | Change visualizer rendering | `gui/panes/visualizer.rs` (bars/wave draw), `audio/viz.rs` (FFT/smoothing) |
 | Change docking behavior | `gui/coordinator.rs` (`apply_min_pane_sizes`, `default_tree`, `save_layout`/`load_layout`/`list_layouts`, Layouts menu section) |
-| Add a config field | `app.rs` — the `Config` struct, a `TPlayApp` field, and both `new()` and `save_config`; a value hand-edited into `config.json` is only preserved if `save_config` writes it back |
+| Add a config field | `config.rs` — the `Config` struct field + its `default_*` fn — plus a `TPlayApp` field, and both `new()` and `save_config`; a value hand-edited into `config.json` is only preserved if `save_config` writes it back |
 | Change tag fields | `library.rs` (`TrackInfo`, `read_info`, `SORT_OPTIONS`, `sort_key`) |
 | Adjust seek behavior | `app.rs` (`seek`, `advance`, `start_track`) |
+| Change when the next track pre-buffers | `audio/transition.rs` (`arm_plan` + its guards) — `advance` only applies the result |
 
 ---
 
@@ -432,7 +444,7 @@ implemented and this section rewritten.
 Turn the folder browser into a persistent library: the `tag_cache`
 (`HashMap<PathBuf, TrackInfo>` in `app.rs`, currently session-scoped) is the
 seed — persist it to `~/.config/tplay/` on scan completion (`drain_tag_scan`
-already has the hook; same pattern as `save_config`/`load_config`) so
+already has the hook; same pattern as `config::save`/`config::load`) so
 re-launch needs no re-scan. Add per-track metadata Winamp had that `TrackInfo`
 doesn't: **rating (1–5 ★)**, **play count**, **last-played date** (increment in
 `start_track`). Library-data fields go into `library.rs` (`TrackInfo` +
@@ -529,14 +541,38 @@ shared-constant rules apply to milestones as much as to shipped code.
   Tests: `tests/balance_tests.rs` (8 tests, identical harness to `eq_live.rs`).
 
 - `src/audio/transition.rs` — free functions `build_gapless_next()` (a full,
-  buffered EQ → Tap → Balance source — the unit both sinks play) and
-  `fade_gains(p) -> (f32, f32)` (equal-power cos/sin crossfade curve).
+  buffered EQ → Tap → Balance source — the unit both sinks play),
+  `fade_gains(p) -> (f32, f32)` (equal-power cos/sin crossfade curve), and
+  `arm_plan(&ArmInput) -> Option<Armed>` (the pre-buffer decision).
   **Seek-first helper** `seek_or_skip()`: attempts `try_seek()` (fast path for
   FLAC/WAV/OGG/M4A) before falling back to `skip_duration()` (eager decode for
   unseekable streams). No UI code, pure logic. Tests:
   `tests/gapless_crossfade.rs`.
+- **The arm is a decision, not a side effect** (`arm_plan`, added later — the one
+  piece of this milestone that is *not* in `app.rs`). It was a 50-line block
+  inside `TPlayApp::advance`, which put it out of reach of every test:
+  `TPlayApp::new` needs an audio device, and the arm's failure modes are silent
+  (a skipped arm is a gap, a wrong arm is a silently skipped track), so nothing
+  would ever have caught a regression. It now reads an `ArmInput` struct and
+  returns `Option<Armed>`; `advance` keeps only the effects (build the source,
+  make the sink, flip the metadata). What stayed in `advance`, and why:
+  - **the sink-shape gate** — `!is_paused`, `len() == 1`, a current track and
+    index, and the mode check. `Sink` facts with no data equivalent, and the
+    cheap outer gate. The mode check is duplicated by `arm_plan` on purpose:
+    with both modes off this block would otherwise run — and peek — on every
+    frame of every track for nothing.
+  - **choosing the candidate** — `peek_next_index()`, because choosing cannot
+    happen inside a pure `arm_plan` and, more importantly, must not happen on
+    every frame. The arm re-evaluates until it resolves, so a *picking* call
+    here rewrote the shuffle order 60 times a second. It peeks, and commits
+    (`commit_next_index`) only once the arm actually lands — see **Shuffle
+    order**. An earlier version picked up front and left the entry behind even
+    when the arm was then skipped, which marked never-played tracks as played;
+    that is fixed, not preserved.
+  Every guard in `arm_plan` is pinned by a test in `gapless_crossfade.rs`; the
+  suite is mutation-checked, so a loosened comparison there fails the build.
 
-**App state additions** (`src/app.rs`):
+**App state additions** (`src/app.rs`; the `Config` half now lives in `config.rs`):
 - `Config`: `balance`, `remaining`, `gapless`, `crossfade`, `crossfade_secs`.
 - `TPlayApp` fields: `balance: Arc<RwLock<f32>>`, `remaining: bool`,
   `gapless: bool`, `crossfade: bool`, `crossfade_secs: f32`,
@@ -562,19 +598,22 @@ shared-constant rules apply to milestones as much as to shipped code.
   queue (`A_body` + `mix(A_tail,B_head)` + `B_body`) is deleted, which also
   killed B's repeated tail (B_tail re-read at the end of B_body) and the
   multi-second UI freeze from eager `skip_duration()`.
-- **Arm** (`advance()` step 2): within `crossfade_secs` of the outgoing track's
-  end (or `PREROLL_SECS` with gapless), `next_track_index()` is called ONCE and
-  the incoming source is built synchronously (buffered decode — header-only,
-  ms). `xf_out_total` = outgoing duration is captured, then
-  `current_index`/`current_path`/`total_duration` flip to the incoming track so
-  Now Playing and the seek bar already show it. `playback_position()`/
-  `playback_position_secs()` prefer `xf_sink` while present. Missing next file →
-  skip the arm; natural advance fails it gracefully via `play_now`.
+- **Arm** (`advance()` step 2, decided by `transition::arm_plan`): within
+  `crossfade_secs` of the outgoing track's end (or `PREROLL_SECS` with gapless),
+  `peek_next_index()` is consulted (and the pick **committed** once, on success)
+  and the incoming source is built
+  synchronously (buffered decode — header-only, ms). `xf_out_total` = outgoing
+  duration is captured, then `current_index`/`current_path`/`total_duration` flip
+  to the incoming track so Now Playing and the seek bar already show it.
+  `playback_position()`/`playback_position_secs()` prefer `xf_sink` while present.
+  Missing next file → skip the arm; natural advance fails it gracefully via
+  `play_now`.
   **Short-incoming guard**: a track whose tagged duration is shorter than the
   hold/fade window would drain muted while "playing" then be promoted empty
-  (silent skip). The arm consults `tag_cache` and bails when `duration < hold`
-  (gapless hold / crossfade window) — such tracks play via natural advance
-  with a gap instead. Untagged tracks are allowed through.
+  (silent skip). `arm_plan` reads `tag_cache` and bails when `duration < hold`
+  (gapless hold = remaining time / crossfade hold = `crossfade_secs`) — such
+  tracks play via natural advance with a gap instead. Untagged tracks are
+  allowed through.
 - **Settle** (`advance()` step 1): fade progress `p = 1 − remaining/cf` from
   `sink.get_pos()` vs `xf_out_total` (pause/seek-safe, no wall clock);
   `fade_gains(p)` sets `sink`/`xf_sink` volumes each frame (equal-power, no

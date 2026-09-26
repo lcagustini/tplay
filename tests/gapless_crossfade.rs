@@ -1,11 +1,11 @@
-//! Crossfade/gapless tests — `fade_gains` curve properties (pure) and the
-//! shared xf source builder on a real WAV file (both sinks play the same
-//! full-track source; the two-sink playback logic itself is headless-boundary,
-//! mirrored only where pure).
+//! Crossfade/gapless tests — the `arm_plan` decision (pure), `fade_gains`
+//! curve properties (pure) and the shared xf source builder on a real WAV file
+//! (both sinks play the same full-track source; the two-sink playback logic
+//! itself is headless-boundary, mirrored only where pure).
 
 mod common;
 
-use tplay::audio::transition::{build_gapless_next, fade_gains};
+use tplay::audio::transition::{arm_plan, build_gapless_next, fade_gains, ArmInput, PREROLL_SECS};
 use tplay::audio::eq::{EqShared, EqSource, EQ_FREQUENCIES};
 use tplay::audio::viz::{TapSource, VizBuf};
 use tplay::audio::balance::{BalanceSource, balance_gains};
@@ -189,4 +189,170 @@ fn balance_gains_curve() {
 fn eq_frequencies_ten_ascending() {
     assert_eq!(EQ_FREQUENCIES.len(), 10);
     assert!(EQ_FREQUENCIES.windows(2).all(|w| w[0] < w[1]));
+}
+
+// ── arm_plan: the pre-buffer decision ───────────────────────────────────────
+//
+// These guards used to live inside `TPlayApp::advance`, unreachable from any
+// test because `TPlayApp::new` needs an audio device. Every one of them costs a
+// *gap* rather than a crash, so none of them was ever caught by a failure —
+// they had to be pinned deliberately. A default case that arms, then one case
+// per guard.
+
+const NEXT: &str = "/music/next.mp3";
+
+/// An armable crossfade case: 3s window, 2s left of a 3-minute track.
+fn armable<'a>(next: Option<(usize, &'a Path)>) -> ArmInput<'a> {
+    ArmInput {
+        crossfade: true,
+        gapless: false,
+        crossfade_secs: 3.0,
+        total: Some(Duration::from_secs(180)),
+        pos: Duration::from_secs(178),
+        next,
+        next_ready: true,
+        next_duration: Some(Duration::from_secs(200)),
+    }
+}
+
+#[test]
+fn arm_fires_in_the_default_case() {
+    let armed = arm_plan(&armable(Some((1, Path::new(NEXT))))).expect("2s left of a 3s window");
+    assert_eq!(armed.index, 1);
+    assert_eq!(armed.track, Path::new(NEXT));
+    // The OUTGOING duration — `advance` flips `total_duration` to the incoming
+    // track right after, so the fade math needs this saved separately.
+    assert_eq!(armed.out_total, Duration::from_secs(180));
+}
+
+#[test]
+fn arm_needs_a_mode_enabled() {
+    let mut i = armable(Some((1, Path::new(NEXT))));
+    i.crossfade = false;
+    i.gapless = false;
+    assert!(arm_plan(&i).is_none(), "no mode on → never arm");
+}
+
+#[test]
+fn arm_needs_a_known_outgoing_length() {
+    let mut i = armable(Some((1, Path::new(NEXT))));
+    i.total = None;
+    assert!(arm_plan(&i).is_none(), "unknown duration → never arm");
+
+    // The gapless arm has no `total > window` guard to fall back on, so this
+    // check is the only thing stopping an unknown-length track from arming on
+    // its very first frame.
+    i.crossfade = false;
+    i.gapless = true;
+    assert!(arm_plan(&i).is_none(), "unknown duration, gapless → never arm");
+}
+
+#[test]
+fn arm_needs_a_candidate() {
+    assert!(arm_plan(&armable(None)).is_none(), "no next track → never arm");
+}
+
+#[test]
+fn crossfade_window_is_inclusive_at_the_boundary() {
+    let mut i = armable(Some((1, Path::new(NEXT))));
+    // remaining == crossfade_secs exactly → arm (the boundary is inclusive).
+    i.pos = Duration::from_secs(180 - 3);
+    assert!(arm_plan(&i).is_some(), "remaining == cf must arm");
+
+    // A hair beyond the window → hold off.
+    i.pos = Duration::from_millis(180_000 - 3_001);
+    assert!(arm_plan(&i).is_none(), "remaining > cf must not arm");
+}
+
+#[test]
+fn a_track_shorter_than_the_fade_never_arms() {
+    let mut i = armable(Some((1, Path::new(NEXT))));
+    i.pos = Duration::from_secs(0);
+
+    // The boundary that matters is `total == crossfade_secs`: the track is over
+    // exactly as the fade ends, so there is nothing to fade into. Strictly
+    // shorter than the window, too.
+    i.total = Some(Duration::from_secs(3));
+    assert!(
+        arm_plan(&i).is_none(),
+        "a track exactly as long as the fade window has nothing to overlap — never arm"
+    );
+    i.total = Some(Duration::from_millis(2_900));
+    assert!(arm_plan(&i).is_none(), "a track shorter than the fade window — never arm");
+
+    // One frame longer and it is worth pre-buffering (1s in, so 2.1s left —
+    // inside the window, and the track outlasts the window).
+    i.total = Some(Duration::from_millis(3_100));
+    i.pos = Duration::from_secs(1);
+    assert!(arm_plan(&i).is_some(), "a track longer than the window arms");
+}
+
+/// Gapless arms on `PREROLL_SECS`, not on the crossfade window. The premise
+/// matters: `crossfade_secs` is set to 30s here, so a plan that reached for the
+/// wrong constant would arm at 2.5s remaining instead of 2.0s.
+#[test]
+fn gapless_uses_preroll_not_the_crossfade_window() {
+    let mut i = armable(Some((1, Path::new(NEXT))));
+    i.crossfade = false;
+    i.gapless = true;
+    i.crossfade_secs = 30.0;
+
+    i.pos = Duration::from_millis(180_000 - (PREROLL_SECS * 1000.0) as u64);
+    assert!(arm_plan(&i).is_some(), "remaining == PREROLL_SECS must arm");
+
+    i.pos = Duration::from_millis(180_000 - 2_500);
+    assert!(
+        arm_plan(&i).is_none(),
+        "2.5s left is outside the {PREROLL_SECS}s gapless preroll"
+    );
+}
+
+/// The pre-buffer question is "are the bytes on hand right now", not "where did
+/// it come from". A local track with no file and an unspooled remote track both
+/// read `false` here, and an already-cached remote track reads `true` — which is
+/// why gapless/crossfade are a data-availability rule and not a source rule.
+#[test]
+fn arm_is_skipped_when_the_bytes_are_not_on_hand() {
+    let mut i = armable(Some((1, Path::new("smb://nas/media/song.mp3"))));
+    i.next_ready = false;
+    assert!(
+        arm_plan(&i).is_none(),
+        "an unspooled remote track cannot be pre-buffered — skip the arm, natural advance takes it"
+    );
+}
+
+/// A track shorter than the hold/fade window drains muted (gapless) or mid-fade
+/// (crossfade) and would be promoted empty — silently skipped. An untagged
+/// track is allowed through: unknown length is not a short one.
+#[test]
+fn a_short_incoming_track_is_skipped_but_an_untagged_one_is_not() {
+    let mut i = armable(Some((1, Path::new(NEXT))));
+
+    i.next_duration = Some(Duration::from_secs(2));
+    assert!(arm_plan(&i).is_none(), "2s track under a 3s fade window → skip");
+
+    // Exactly the window is not "shorter than" it, so it arms.
+    i.next_duration = Some(Duration::from_secs(3));
+    assert!(arm_plan(&i).is_some(), "a track exactly as long as the window arms");
+
+    i.next_duration = None;
+    assert!(arm_plan(&i).is_some(), "an untagged track has no known length — allow it");
+}
+
+/// The hold gapless measures against is the *remaining* time, not the crossfade
+/// window: a 2s track still plays when only 2s of preroll is left, where the
+/// same track under crossfade (hold = 3s) would be rejected.
+#[test]
+fn the_gapless_hold_is_the_remaining_time_not_the_crossfade_window() {
+    let mut i = armable(Some((1, Path::new(NEXT))));
+    i.crossfade = false;
+    i.gapless = true;
+    i.next_duration = Some(Duration::from_secs(2));
+    // remaining is 2.0s (the default fixture), so hold = 2.0s and a 2s track
+    // is not shorter than it.
+    assert!(arm_plan(&i).is_some(), "hold = remaining = 2s, track is 2s → arm");
+
+    // One frame earlier the hold is smaller still, so the same track is fine.
+    i.pos = Duration::from_millis(180_000 - 1_500);
+    assert!(arm_plan(&i).is_some(), "hold shrinks with remaining → still arm");
 }

@@ -4,7 +4,7 @@ use tplay::library::{
     default_playlist_name, playlist_file_name, playlist_json, read_playlist, write_playlist,
     DEFAULT_PLAYLIST_NAME,
 };
-use tplay::app::EQ_PRESETS;
+use tplay::audio::eq::EQ_PRESETS;
 use std::path::{Path, PathBuf};
 #[path = "common.rs"]
 mod common;
@@ -170,7 +170,9 @@ fn playlist_file_name_appends_the_extension_and_strips_separators() {
 
 // ── Shuffle logic tests ────────────────────────────────────────────────
 
-/// Replicates TPlayApp::next_track_index shuffle logic for testing.
+/// Replicates TPlayApp::next_track_index shuffle logic for testing. That is
+/// `peek_next_index` + `commit_next_index` composed — the split itself, and the
+/// guarantee that a peek mutates nothing, are pinned in playlist_shuffle.rs.
 fn shuffle_next(len: usize, played: &mut Vec<usize>, rng_state: &mut u64, repeat: bool) -> Option<usize> {
     if len == 0 { return None; }
     if len == 1 { return repeat.then_some(0); }

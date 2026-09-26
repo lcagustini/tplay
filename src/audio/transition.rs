@@ -1,4 +1,13 @@
-//! Crossfade fade curve and gapless source builder — pure, headless-testable free functions.
+//! Crossfade fade curve, the arm decision, and the gapless source builder —
+//! pure, headless-testable free functions.
+//!
+//! The arm used to be a 50-line block inside `TPlayApp::advance`, which put it
+//! out of reach of every test: `TPlayApp::new` needs an audio device and an
+//! eframe `CreationContext`, so the most delicate branch in the app had zero
+//! coverage and its failure modes are silent (a skipped arm is a gap, a wrong
+//! arm is a skipped track). `arm_plan` is that block, moved out whole: it reads
+//! a struct of values and returns what to apply, so every guard below is
+//! reachable from a plain `#[test]`.
 
 use crate::audio::eq::{EqSource, EqShared};
 use crate::audio::viz::{TapSource, VizBuf};
@@ -6,8 +15,94 @@ use crate::audio::balance::BalanceSource;
 use rodio::{Decoder, Source};
 use std::fs::File;
 use std::io::BufReader;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+
+/// How far before track end (seconds) to arm gapless/crossfade next track.
+pub const PREROLL_SECS: f32 = 2.0;
+
+/// Everything the arm decision reads, grouped so a test can build one literal
+/// and vary a single field per case. `advance` fills this in; nothing here
+/// reads app state, so the whole decision is reachable headless.
+///
+/// The sink-shape preconditions (`!is_paused`, exactly one source queued, a
+/// current track) stay in `advance` — they are `Sink` facts with no data
+/// equivalent, and they are the cheap outer gate.
+pub struct ArmInput<'a> {
+    pub crossfade: bool,
+    pub gapless: bool,
+    /// Crossfade window in seconds; also the hold a short incoming track is
+    /// measured against.
+    pub crossfade_secs: f32,
+    /// The outgoing track's total duration. `None` = unknown, never arm.
+    pub total: Option<Duration>,
+    /// How far into the outgoing track playback already is.
+    pub pos: Duration,
+    /// The candidate next track — index into the playlist plus its id — already
+    /// chosen by the caller. It is passed in rather than picked here because
+    /// choosing it *mutates* shuffle's `played` history, and a skipped arm must
+    /// still leave that history marked (see `advance`).
+    pub next: Option<(usize, &'a Path)>,
+    /// `tracks::is_ready(next)` — are the incoming bytes on hand right now?
+    /// Free for a local track (no filesystem check), one stat for a remote one.
+    pub next_ready: bool,
+    /// The candidate's tagged duration, if `tag_cache` has one.
+    pub next_duration: Option<Duration>,
+}
+
+/// What a successful arm should apply. `out_total` is the *outgoing* track's
+/// duration, which the caller must capture before `total_duration` flips to
+/// the incoming track — the fade math needs both.
+pub struct Armed {
+    pub index: usize,
+    pub track: PathBuf,
+    pub out_total: Duration,
+}
+
+/// Decide whether to pre-buffer the next track, and for which one.
+///
+/// Every guard here is load-bearing and every one of them costs a *gap*, never
+/// a crash, so each returns `None` rather than aborting:
+/// - no mode on, or the outgoing track's length unknown → never arm
+/// - outside the window (crossfade within `crossfade_secs` of the end and only
+///   for a track longer than the window itself; gapless within `PREROLL_SECS`)
+/// - no candidate next track
+/// - the incoming bytes aren't on hand — a local file that isn't there, or a
+///   remote track not yet spooled. It arrives later through the pending-spool
+///   path, and an *already cached* remote track pre-buffers like any local one,
+///   so this is a data-availability rule, not a source rule
+/// - the incoming track is shorter than the hold/fade window: it would drain
+///   muted (gapless) or mid-fade (crossfade) and be promoted empty, i.e.
+///   silently skipped. An untagged track is allowed through — unknown length is
+///   not a short one
+pub fn arm_plan(input: &ArmInput) -> Option<Armed> {
+    if !input.crossfade && !input.gapless {
+        return None;
+    }
+    let total = input.total?;
+    let remaining_secs = total.saturating_sub(input.pos).as_secs_f32();
+    let cf = Duration::from_secs_f32(input.crossfade_secs);
+
+    let in_window = if input.crossfade {
+        remaining_secs <= input.crossfade_secs && total > cf
+    } else {
+        remaining_secs <= PREROLL_SECS
+    };
+    if !in_window {
+        return None;
+    }
+
+    let (index, track) = input.next?;
+    if !input.next_ready {
+        return None;
+    }
+    let hold = if input.crossfade { cf } else { Duration::from_secs_f32(remaining_secs) };
+    if input.next_duration.is_some_and(|d| d < hold) {
+        return None;
+    }
+    Some(Armed { index, track: track.to_path_buf(), out_total: total })
+}
 
 /// Try to seek a `Decoder<BufReader<File>>` to `target`; if the inner source reports
 /// NotSupported, fall back to `skip_duration` (eager decode).

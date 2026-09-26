@@ -2,6 +2,7 @@
 
 mod app;
 mod audio;
+mod config;
 mod gui;
 mod library;
 mod network;

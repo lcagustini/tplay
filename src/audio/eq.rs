@@ -12,6 +12,31 @@ pub const EQ_FREQUENCIES: [f32; 10] = [
     20.0, 100.0, 300.0, 600.0, 1000.0, 3000.0, 5000.0, 8000.0, 12000.0, 16000.0,
 ];
 
+/// Equalizer presets — Flat is the reset. A manually tweaked slider
+/// switches the selection to Custom (None).
+/// Curves follow sfxengine.com/blog/best-equalizer-settings-for-music:
+/// Flat ⇐ Flat, Rock ⇐ Rock/Metal, Pop ⇐ V-Shape, Jazz ⇐ Treble Boost,
+/// Classical ⇐ gentle V-Shape, Electronic ⇐ Bass Boost, Vocal ⇐ Vocal Enhancement.
+pub const EQ_PRESETS: [(&str, [f32; 10]); 7] = [
+    ("Flat", [0.0; 10]),
+    ("Rock", [2.0, 2.5, 3.0, -1.0, 0.0, 3.0, 2.0, 0.5, 0.5, 0.0]),
+    ("Pop", [3.0, 2.5, 1.0, -0.5, -0.5, -1.5, 1.0, 2.0, 2.5, 2.0]),
+    ("Jazz", [0.0, 0.5, 0.5, 0.0, 0.5, 1.0, 2.5, 2.0, 1.5, 1.0]),
+    ("Classical", [2.5, 2.0, 0.5, 0.0, -0.5, -1.0, 0.5, 1.5, 2.0, 1.5]),
+    ("Electronic", [4.0, 5.0, -2.0, -1.0, 0.0, 0.0, 0.5, 1.0, 1.0, 0.5]),
+    ("Vocal", [0.0, -2.0, -1.0, 0.0, 0.5, 3.0, 1.5, -1.0, 0.0, 0.0]),
+];
+
+/// The preset a gain set matches, or `None` for Custom. Derived, never stored:
+/// `gains` is the single source of truth, so a hand-tweaked curve can't drift
+/// out of sync with the name shown beside it.
+pub fn preset_for(gains: [f32; 10]) -> Option<&'static str> {
+    EQ_PRESETS
+        .iter()
+        .find(|(_, g)| *g == gains)
+        .map(|(n, _)| *n)
+}
+
 /// Live-controllable EQ state, shared between `TPlayApp` (writer) and `EqSource` (reader).
 /// Gains are in dB (-12..12); 0 dB is an exact identity filter.
 #[derive(Debug, Clone, Default)]
