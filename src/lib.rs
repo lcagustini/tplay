@@ -5,3 +5,4 @@ pub mod audio;
 pub mod gui;
 pub mod library;
 pub mod network;
+pub mod tracks;

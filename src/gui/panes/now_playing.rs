@@ -35,7 +35,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
         ui.vertical(|ui| {
             // Track info: title, then artist · album — its own line on top of the
             // time seeker. Tagged; the filename stands in until the tag scan lands
-            // (`load_file` reads the playing track up front, so this is already
+            // (`load_file_as` reads the playing track up front, so this is already
             // filled the moment a track starts).
             let cur = app.current_path().map(|p| p.to_path_buf());
             let info = cur.as_deref().and_then(|p| app.track_info(p));
@@ -130,7 +130,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
             } else {
                 // Resting state: track the real playback position. This is
                 // also what resets the bar to 0:00 on a track change, since
-                // load_file clears seek_target and the new track starts at 0.
+                // loading clears seek_target and the new track starts at 0.
                 seek_normalized = actual_ratio;
             }
 

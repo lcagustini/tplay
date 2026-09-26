@@ -384,6 +384,13 @@ impl Network {
     pub fn spool(&mut self, uri: PathBuf) {
         self.pending = Some(uri.clone());
         let uri_str = uri.to_string_lossy().into_owned();
+        // A spool requested here is one the user asked to *hear*, so its cache
+        // file is exempt from eviction for the rest of the session — including
+        // while the download is still in flight, so a large track is never
+        // evicted out from under the play request that asked for it. Tag-driven
+        // spools go through `fetch_tags` instead, which is what leaves those
+        // files evictable. The failure mode is a re-download, never a broken play.
+        self.mark_played(&uri_str);
         let host = split_uri(&uri_str).map(|(h, _, _)| h).unwrap_or_default();
         self.send(SmbCmd::Spool {
             uri: uri_str,
@@ -654,28 +661,6 @@ pub fn cache_path_in(uri: &str, dir: &Path) -> PathBuf {
 /// Cache path for `uri` in the real spool dir.
 pub fn cache_path(uri: &str) -> PathBuf {
     cache_path_in(uri, &spool_dir())
-}
-
-/// The local file to read for a track, for code that needs real **bytes**
-/// rather than a playlist entry.
-///
-/// A remote track has no file at its URI — there is nothing on disk named
-/// `smb://…` — so anything doing a filesystem read (album art, a probe) must
-/// resolve through here to the spool-cache copy. `None` when a remote track has
-/// not been spooled yet, i.e. there is nothing local to read. A local path is
-/// returned unchanged, whether or not it exists, so the caller's own error
-/// handling decides what a missing file means.
-pub fn local_copy_in(path: &Path, dir: &Path) -> Option<PathBuf> {
-    if !is_remote(path) {
-        return Some(path.to_path_buf());
-    }
-    let local = cache_path_in(&path.to_string_lossy(), dir);
-    local.is_file().then_some(local)
-}
-
-/// `local_copy_in` against the real spool dir.
-pub fn local_copy(path: &Path) -> Option<PathBuf> {
-    local_copy_in(path, &spool_dir())
 }
 
 // ── Worker thread ────────────────────────────────────────────────────────────

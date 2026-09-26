@@ -5,13 +5,13 @@ use crate::audio::transition;
 use crate::gui::theme::{self, Theme, Themes};
 use crate::library;
 use crate::network;
+use crate::tracks;
 use eframe::egui;
 use rodio::{cpal::BufferSize, Decoder, OutputStream, OutputStreamBuilder, Sink, Source};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -112,11 +112,6 @@ fn default_buffer_size() -> u32 { 8192 }
 /// 2 GiB of never-played spool. Sized for a laptop with room to spare; raise
 /// `spool_cache_mb` in config.json to keep more of a browsed share on disk.
 fn default_spool_cache_mb() -> u32 { 2048 }
-
-/// Cap on how many per-track tag failures one batch prints. A whole share
-/// failing at once (server went away mid-browse) would otherwise emit one line
-/// per file, hundreds of times, every frame it retries.
-const MAX_TAG_FAILURES_LOGGED: usize = 3;
 
 #[derive(Serialize, Deserialize, Default)]
 pub struct EqData {
@@ -266,9 +261,9 @@ pub struct TPlayApp {
     /// the Library, Playlist, and Now Playing panes. Filenames stand in until
     /// a track's entry lands.
     tag_cache: HashMap<PathBuf, library::TrackInfo>,
-    /// Receiver for the background tag scan. `Some` while a scan is running;
-    /// a new request replaces it (one scan at a time).
-    tag_scan_rx: Option<Receiver<(PathBuf, library::TrackInfo)>>,
+    /// Reads tags for any track into `tag_cache`, local or remote. Owns the
+    /// local scan's receiver, so the app holds no mpsc plumbing.
+    tracks: tracks::TagReader,
     /// Bookmarked folders shown in the Library pane, persisted to disk.
     favorite_dirs: Vec<PathBuf>,
     /// Whether the Library lists dot-prefixed (hidden) subfolders. Default
@@ -350,7 +345,7 @@ impl TPlayApp {
             library_dir: dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")),
             library_entries: Vec::new(),
             tag_cache: HashMap::new(),
-            tag_scan_rx: None,
+            tracks: tracks::TagReader::new(),
             favorite_dirs: config.library.favorites.into_iter().map(PathBuf::from).filter(|d| d.is_dir()).collect(),
             show_hidden: config.library.show_hidden,
             library_sort: 0,
@@ -452,11 +447,6 @@ impl TPlayApp {
             // Tag the new tracks in the background (dedup handles repeats).
             self.ensure_tags(self.playlist.clone());
         }
-    }
-
-    fn load_file(&mut self, path: PathBuf) {
-        let display = path.clone();
-        self.load_file_as(path, display);
     }
 
     /// Replace the sink with a fresh empty one — drops the old decoder/file.
@@ -673,14 +663,16 @@ impl TPlayApp {
             if should_arm {
                 if let Some(next_idx) = self.next_track_index() {
                     let next_path = self.playlist[next_idx].clone();
-                    // A missing file can't be pre-buffered — skip the arm and
-                    // let natural advance fail it gracefully via load_file.
-                    if !next_path.is_file() {
-                        return;
-                    }
-                    // Remote smb:// tracks are spooled by start() on arrival
-                    // (and skip gapless/crossfade) — never pre-buffered here.
-                    if network::is_remote(&next_path) {
+                    // The pre-buffer question is "are this track's bytes on hand
+                    // right now", not "where did it come from". A local track
+                    // with no file on disk can't be pre-buffered, and neither
+                    // can a remote one that isn't in the spool cache yet — it
+                    // arrives later through the pending-spool path. A remote
+                    // track that IS cached pre-buffers like any other, so gapless
+                    // and crossfade stop being a source-based rule and become the
+                    // same data-availability rule local tracks already follow.
+                    // Either way: skip the arm, and let natural advance handle it.
+                    if tracks::local_file_now(&next_path).is_none() {
                         return;
                     }
                     // A track shorter than the hold/fade window drains muted
@@ -764,14 +756,26 @@ impl TPlayApp {
 
     /// Public actions called by GUI layer
 
+    /// The transport play button. A track that is already playing is resumed;
+    /// otherwise this starts playback, and the source of the track is not the
+    /// concern — `play_now` resolves it.
     pub fn play(&mut self) {
         if self.sink.is_paused() && !self.sink.empty() {
             self.sink.play();
             if let Some(xf) = &self.xf_sink {
                 xf.play();
             }
+        } else if self.current_path.is_none() && self.network.pending().is_some() {
+            // A track is already requested and on its way — it will start on its
+            // own when it lands. Without this, the fresh empty sink and the
+            // `None` current_path would fall through to `play_first_track` and
+            // start a *different* track out from under the pending one.
+            return;
         } else if let Some(path) = self.current_path.clone() {
-            self.load_file(path);
+            // Replay the current track. Goes through `play_now`, never
+            // `load_file_as`: `current_path` is an `smb://` URI for a remote
+            // track, and opening that as a path always fails.
+            self.play_now(path);
         } else if !self.playlist.is_empty() {
             self.play_first_track();
         } else {
@@ -1046,14 +1050,9 @@ impl TPlayApp {
 
     /// Shared tail of both playlist-load paths: filter, stop, scan, track.
     fn apply_playlist(&mut self, paths: Vec<PathBuf>, file: PathBuf) {
-        self.playlist = paths
-            .into_iter()
-            // Remote tracks can't canonicalize — keep them as-is. Local paths
-            // that no longer exist are dropped.
-            .filter_map(|p| {
-                if network::is_remote(&p) { Some(p) } else { p.canonicalize().ok() }
-            })
-            .collect();
+        // Remote tracks can't canonicalize and are kept verbatim; local paths
+        // that no longer exist are dropped.
+        self.playlist = paths.into_iter().filter_map(tracks::normalize).collect();
         self.stop();
         self.ensure_tags(self.playlist.clone());
         self.playlist_file = Some(file);
@@ -1143,66 +1142,28 @@ impl TPlayApp {
         self.apply_library_sort();
     }
 
-    /// Ensure the given audio files have tag info in the cache. Local paths go
-    /// to a background `scan_files` thread — one scan runs at a time, and a new
-    /// request replaces the in-flight one (the cache is per-path, so a dropped
-    /// scan simply restarts the next time its paths are requested).
+    /// Ensure the given audio files have tag info in the cache.
     ///
-    /// Remote (`smb://`) paths go to the SMB worker instead, which reads each
-    /// file's header; there is no local file to scan. Both land in the same
-    /// `tag_cache`, remote keyed by URI, so every pane fills in identically.
+    /// Which transport a track needs is not this function's business — the
+    /// `TagReader` splits the batch and hands each half to the thread or the SMB
+    /// worker. Both land in the same `tag_cache`, remote keyed by URI, so every
+    /// pane fills in identically.
     ///
-    /// Safe to call every frame: cached paths are skipped and the network side
-    /// keeps its own in-flight set, so a batch still running isn't re-queued.
+    /// Safe to call every frame; the reader skips cached tracks and the network
+    /// side keeps its own in-flight set, so a batch still running isn't
+    /// re-queued.
     pub fn ensure_tags(&mut self, paths: Vec<PathBuf>) {
-        let mut local: Vec<PathBuf> = Vec::new();
-        let mut remote: Vec<String> = Vec::new();
-        for p in paths {
-            if self.tag_cache.contains_key(&p) {
-                continue;
-            }
-            if network::is_remote(&p) {
-                remote.push(p.to_string_lossy().into_owned());
-            } else {
-                local.push(p);
-            }
+        let cache = &self.tag_cache;
+        let started = self.tracks.request(cache, &mut self.network, &paths);
+        if started {
+            self.ctx.request_repaint();
         }
-        if !remote.is_empty() {
-            self.network.fetch_tags(remote);
-        }
-        if local.is_empty() {
-            return;
-        }
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || library::scan_files(local, tx));
-        self.tag_scan_rx = Some(rx);
-        self.ctx.request_repaint();
     }
 
-    /// Drain the background tag scan into the cache (called every frame).
-    /// Drops the receiver once the thread finishes so "Scanning…" clears.
+    /// Drain finished local tag results into the cache (called every frame).
     pub fn drain_tag_scan(&mut self) {
-        let mut ended = false;
-        let mut new = false;
-        if let Some(rx) = &self.tag_scan_rx {
-            loop {
-                match rx.try_recv() {
-                    Ok((path, info)) => {
-                        self.tag_cache.insert(path, info);
-                        new = true;
-                    }
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        ended = true;
-                        break;
-                    }
-                }
-            }
-        }
-        if ended {
-            self.tag_scan_rx = None;
-        }
-        if new || ended {
+        let cache = &mut self.tag_cache;
+        if self.tracks.drain_into(cache) {
             self.ctx.request_repaint();
         }
     }
@@ -1210,48 +1171,54 @@ impl TPlayApp {
     /// Play a library file directly. `current_index = None` is the "direct
     /// open" semantics: the playlist's sequential flow isn't touched and
     /// auto-advance won't cascade off it.
-    pub fn play_file(&mut self, path: PathBuf) {
+    /// Play a library file directly. `current_index = None` is the "direct
+    /// open" semantics: the playlist's sequential flow isn't touched and
+    /// auto-advance won't cascade off it.
+    pub fn play_file(&mut self, track: PathBuf) {
         self.current_index = None;
-        if network::is_remote(&path) {
-            self.play_uri(path);
-        } else {
-            self.load_file(path);
-        }
+        self.play_now(track);
     }
 
-    /// Common playback start: set current_index and load the track.
+    /// Common playback start: set current_index and play the track.
     fn start(&mut self, idx: usize) {
         self.current_index = Some(idx);
-        let path = self.playlist[idx].clone();
-        if network::is_remote(&path) {
-            self.play_uri(path);
-        } else {
-            self.load_file(path);
-        }
+        let track = self.playlist[idx].clone();
+        self.play_now(track);
     }
 
-    /// Play a remote (`smb://`) track: play its spooled copy if cached, else
-    /// request the spool and play when it lands (see `Network::drain`). The
-    /// caller already set `current_index`, so the spooled track plays into
-    /// the playlist's sequential/auto-advance flow.
-    fn play_uri(&mut self, uri: PathBuf) {
-        let local = network::cache_path(&uri.to_string_lossy());
-        // Mark it played on BOTH paths, including the spool request below: the
-        // user asked for this track, so its cache file must be exempt from
-        // eviction even while the download is still in flight. (Tag-driven
-        // spools never come through here, which is what leaves them evictable.)
-        self.network.mark_played(&uri.to_string_lossy());
-        if local.is_file() {
-            self.load_file_as(local, uri);
+    /// Make `track` the playing track, from whatever source it is.
+    ///
+    /// This is the **only** way a track starts playing. Its bytes are used
+    /// directly if they are on hand; otherwise the track is requested and
+    /// played when it lands, which `update()` promotes on the network event.
+    ///
+    /// Not to be confused with the public `play_track(index)`, which is the
+    /// Playlist pane's "play row N" verb and additionally resets shuffle.
+    /// `current_path` stays `None` until then, which is what stops `advance()`
+    /// cascading past a pending track.
+    ///
+    /// Callers own `current_index` — this is only "make this the track". That
+    /// split is deliberate: `play_file` (direct open) sets `None`, `start`
+    /// (playlist flow) sets the index, and neither decision belongs in here.
+    ///
+    /// The trap this function exists to kill: calling `load_file_as` directly
+    /// on a remote track does `File::open("smb://…")`, which always fails. A
+    /// caller that skips this path silently breaks playback rather than failing
+    /// loudly, so route every play through here.
+    fn play_now(&mut self, track: PathBuf) {
+        if let Some(local) = tracks::local_file_now(&track) {
+            self.load_file_as(local, track);
         } else {
-            // Stop current playback now (same as load_file would) and clear
-            // current_path so Now Playing shows "Loading from server…" and
-            // natural advance can't cascade past this pending track. The
-            // caller already set current_index.
+            // No bytes yet: stop the current track now (as loading would) and
+            // clear current_path so Now Playing shows "Loading from server…"
+            // while `Network::pending()` is set. `Network::spool` also marks the
+            // track played, so its cache file is exempt from eviction while the
+            // download is still in flight — tag-driven spools go via
+            // `fetch_tags` and stay evictable.
             self.fresh_sink();
             self.current_path = None;
             self.total_duration = None;
-            self.network.spool(uri);
+            self.network.spool(track);
         }
     }
 
@@ -1392,10 +1359,16 @@ impl TPlayApp {
     }
     /// Whether any file in the browsed folder is still missing from the tag
     /// cache (i.e. its scan is pending or underway).
+    ///
+    /// This is a **local** question by construction, not by filtering:
+    /// `library_entries` is only ever filled by `navigate_to`, from
+    /// `library::list_dir` on a `library_dir` that had to pass `dir.is_dir()` —
+    /// and an `smb://` URI never does. So there is no remote entry here to skip,
+    /// and the share browser computes its own count over its own entries.
     pub fn library_scanning(&self) -> bool {
         self.library_entries
             .iter()
-            .any(|e| !e.is_dir() && !library::is_playlist(e.path()) && !network::is_remote(e.path()) && !self.tag_cache.contains_key(e.path()))
+            .any(|e| !e.is_dir() && !library::is_playlist(e.path()) && !self.tag_cache.contains_key(e.path()))
     }
     pub fn favorite_dirs(&self) -> &[PathBuf] { &self.favorite_dirs }
     pub fn is_favorite(&self, dir: &std::path::Path) -> bool {
@@ -1548,39 +1521,8 @@ impl eframe::App for TPlayApp {
                 network::Event::Tagged(results) => {
                     // Same cache the local scan fills, keyed by URI, so rows
                     // switch from filename to tagged title on their own.
-                    let mut failed = 0usize;
-                    for (uri, res) in results {
-                        match res {
-                            // Cached even when every field is blank: that is the
-                            // definitive "we read it, it has no tags" answer,
-                            // and `title_or_stem` falls back to the stem on an
-                            // empty title, so it displays exactly like no cache
-                            // entry. It is also what stops a folder of genuinely
-                            // untagged files from re-requesting forever.
-                            Ok(info) => {
-                                self.tag_cache.insert(PathBuf::from(uri), info);
-                            }
-                            // NOT cached. A failed transfer says nothing about
-                            // the file's tags — it may be a blip, or expired
-                            // credentials — so caching it as untagged would
-                            // blank the row for the rest of the session.
-                            // Leaving it out is what makes it retryable;
-                            // `Network`'s attempt count is what stops that
-                            // retrying forever.
-                            Err(e) => {
-                                failed += 1;
-                                if failed <= MAX_TAG_FAILURES_LOGGED {
-                                    eprintln!("tplay: could not read tags for {uri}: {e}");
-                                }
-                            }
-                        }
-                    }
-                    if failed > MAX_TAG_FAILURES_LOGGED {
-                        eprintln!(
-                            "tplay: {failed} more remote track(s) failed to read; \
-                             see the first error above"
-                        );
-                    }
+                    let cache = &mut self.tag_cache;
+                    self.tracks.absorb(cache, results);
                     // Housekeeping after a batch, not per frame: this walks the
                     // spool dir, and tag spools are what fill it.
                     let budget = u64::from(self.spool_cache_mb).saturating_mul(1024 * 1024);

@@ -5,6 +5,7 @@ mod audio;
 mod gui;
 mod library;
 mod network;
+mod tracks;
 
 use eframe::egui;
 
