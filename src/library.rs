@@ -239,8 +239,6 @@ pub struct TrackInfo {
     pub title: String,
     pub artist: String,
     pub album: String,
-    pub genre: String,
-    pub year: Option<String>,
     pub track_no: Option<String>,
     pub duration: Option<Duration>,
 }
@@ -271,8 +269,6 @@ pub fn read_info(path: &Path) -> Option<TrackInfo> {
         title: get(ItemKey::TrackTitle),
         artist: get(ItemKey::TrackArtist),
         album: get(ItemKey::AlbumTitle),
-        genre: get(ItemKey::Genre),
-        year: get_opt(ItemKey::Year),
         track_no: get_opt(ItemKey::TrackNumber),
         duration: {
             let d = tagged.properties().duration();
@@ -347,7 +343,7 @@ pub fn scan_files(files: Vec<PathBuf>, tx: Sender<(PathBuf, TrackInfo)>) {
 /// (Title) is the default order: untagged files fall back to their name and
 /// folders to theirs, so it reads as the classic name sort everything mixes
 /// into.
-pub const SORT_OPTIONS: [&str; 6] = ["Title", "Artist", "Album", "Year", "Genre", "Duration"];
+pub const SORT_OPTIONS: [&str; 4] = ["Title", "Artist", "Album", "Duration"];
 
 /// Sort a file list in place by column `col`, ascending or descending. Shared
 /// by the local folder list and the SMB share list — both are `Vec<Entry>`, and
@@ -378,6 +374,8 @@ pub fn title_or_stem(path: &Path, info: Option<&TrackInfo>) -> String {
 /// Sort key for a library entry and column. Returns a string that sorts correctly:
 /// - Empty/missing values get a prefix that sorts after normal content.
 /// - Durations become zero-padded milliseconds.
+/// - The Album column is a composite `album \x01 track` key, so one album lists
+///   1, 2, 3… rather than alphabetically. `\x01` is below every printable char.
 pub fn sort_key(e: &Entry, info: Option<&TrackInfo>, col: usize) -> String {
     let s: String = match col {
         0 => {
@@ -393,18 +391,24 @@ pub fn sort_key(e: &Entry, info: Option<&TrackInfo>, col: usize) -> String {
             if e.is_dir { String::new() } else { info.map(|i| i.artist.as_str()).unwrap_or_default().to_string() }
         }
         2 => {
-            // Album
-            if e.is_dir { String::new() } else { info.map(|i| i.album.as_str()).unwrap_or_default().to_string() }
+            // Album, then track number within it. Unnumbered tracks fall back to
+            // the title so they group alphabetically *after* the numbered ones
+            // ('0' < '1'). A "3/12" multi-disc number does not parse and takes
+            // that same fallback — the album still groups, the order does not.
+            // ponytail: parse the leading digits if multi-disc ordering matters.
+            if e.is_dir { String::new() } else {
+                let album = info.map(|i| i.album.as_str()).unwrap_or_default();
+                // Same \x7f sink as the empty case below, so an untagged file
+                // ties with a folder instead of sorting above every album.
+                let head = if album.is_empty() { "\x7f" } else { album };
+                let track = match info.and_then(|i| i.track_no.as_deref()).and_then(|n| n.trim().parse::<u32>().ok()) {
+                    Some(n) => format!("{n:06}"),
+                    None => title_or_stem(e.path(), info),
+                };
+                format!("{head}\x01{track}")
+            }
         }
         3 => {
-            // Year
-            if e.is_dir { String::new() } else { info.and_then(|i| i.year.as_deref()).unwrap_or_default().to_string() }
-        }
-        4 => {
-            // Genre
-            if e.is_dir { String::new() } else { info.map(|i| i.genre.as_str()).unwrap_or_default().to_string() }
-        }
-        5 => {
             // Duration: zero-padded milliseconds, or ~ for missing (sorts last)
             if e.is_dir {
                 "~".to_string()

@@ -1,7 +1,7 @@
 //! Library pane — file browser + favorite folders + tag-scanning track list.
 //!
 //! Left: favorite folders. Right: the current folder's subfolders and audio
-//! files, each row showing title + artist/album/year/genre + duration from
+//! files, each row showing title + artist/album + duration from
 //! the tag scan (cached in `TPlayApp`, so revisits are instant). Click a row
 //! to play it directly; the `+` button adds it to the playlist.
 
@@ -43,10 +43,10 @@ fn dir_name(dir: &Path) -> String {
 
 
 /// Column widths shared by the sortable header and the file rows (matches SORT_OPTIONS).
-const CELL_WIDTHS: [f32; 6] = [0.0, 90.0, 100.0, 34.0, 64.0, 44.0]; // Title is flexible
-/// Fixed right-hand width per row: the five tag cells + the `+` button +
+const CELL_WIDTHS: [f32; 4] = [0.0, 90.0, 100.0, 44.0]; // Title is flexible
+/// Fixed right-hand width per row: the three tag cells + the `+` button +
 /// inter-cell spacing, leaving the title column the flexible remainder.
-const ROW_FIXED_W: f32 = CELL_WIDTHS[1] + CELL_WIDTHS[2] + CELL_WIDTHS[3] + CELL_WIDTHS[4] + CELL_WIDTHS[5] + 40.0;
+const ROW_FIXED_W: f32 = CELL_WIDTHS[1] + CELL_WIDTHS[2] + CELL_WIDTHS[3] + 40.0;
 
 /// One clickable column header. Returns true when clicked; the caller picks
 /// the sort key. The active column is accent-colored with a theme icon
@@ -193,8 +193,6 @@ fn draw_file_row(
     };
     let artist = info.map(|i| i.artist.as_str()).unwrap_or_default();
     let album = info.map(|i| i.album.as_str()).unwrap_or_default();
-    let year = info.and_then(|i| i.year.as_deref()).unwrap_or_default();
-    let genre = info.map(|i| i.genre.as_str()).unwrap_or_default();
     let dur = info.and_then(|i| i.duration);
 
     // Title takes the flexible remainder; the tag cells mirror the header.
@@ -218,10 +216,8 @@ fn draw_file_row(
     };
     cell(&mut row, CELL_WIDTHS[1], artist);
     cell(&mut row, CELL_WIDTHS[2], album);
-    cell(&mut row, CELL_WIDTHS[3], year);
-    cell(&mut row, CELL_WIDTHS[4], genre);
     row.add_sized(
-        egui::vec2(CELL_WIDTHS[5], row_h),
+        egui::vec2(CELL_WIDTHS[3], row_h),
         egui::Label::new(
             egui::RichText::new(TPlayApp::fmt_duration(dur))
                 .color(p.text_secondary)
@@ -243,7 +239,7 @@ fn draw_file_row(
 }
 
 /// The file list shared by the local folder browser and the SMB share browser:
-/// the search box, the sortable 6-column header, the folder/track/playlist rows
+/// the search box, the sortable 4-column header, the folder/track/playlist rows
 /// and the "Scanning…" note.
 ///
 /// Both sources are `&[library::Entry]`. For a share, `path` is the `smb://`

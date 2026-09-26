@@ -27,9 +27,7 @@ fn read_info_reads_tags_written_by_lofty() {
     tag.insert_text(ItemKey::TrackTitle, "Test Title".to_string());
     tag.insert_text(ItemKey::TrackArtist, "Test Artist".to_string());
     tag.insert_text(ItemKey::AlbumTitle, "Test Album".to_string());
-    tag.insert_text(ItemKey::Genre, "Test Genre".to_string());
-    // NOTE: no Year here — lofty's RIFF INFO writer drops `ItemKey::Year`
-    // (ICRD is date-typed); real files get year via their native tags.
+    tag.insert_text(ItemKey::TrackNumber, "3".to_string());
     tagged.insert_tag(tag);
     tagged.save_to_path(&path, WriteOptions::default()).unwrap();
 
@@ -37,7 +35,8 @@ fn read_info_reads_tags_written_by_lofty() {
     assert_eq!(info.title, "Test Title");
     assert_eq!(info.artist, "Test Artist");
     assert_eq!(info.album, "Test Album");
-    assert_eq!(info.genre, "Test Genre");
+    // The Album sort's second half — read as the raw tag string, parsed there.
+    assert_eq!(info.track_no.as_deref(), Some("3"));
     assert_eq!(info.duration, Some(Duration::from_secs(1)));
 
     // Untagged files give blank fields, not failure.
@@ -61,8 +60,7 @@ fn cmp_entries_sorts_by_tag_fields() {
         title: "Alpha".into(),
         artist: "Zed".into(),
         album: "Zeta".into(),
-        year: Some("2000".into()),
-        genre: "Rock".into(),
+        track_no: Some("2".into()),
         duration: Some(Duration::from_secs(300)),
         ..Default::default()
     };
@@ -70,28 +68,60 @@ fn cmp_entries_sorts_by_tag_fields() {
         title: "Bravo".into(),
         artist: "Amy".into(),
         album: "Alpha".into(),
-        year: Some("1995".into()),
-        genre: "Jazz".into(),
+        track_no: Some("1".into()),
         duration: None,
         ..Default::default()
     };
 
     // Title: Alpha (b.wav) sorts before Bravo (a.wav) — tags beat names.
     assert!(sort_key(&b, Some(&info_a), 0) < sort_key(&a, Some(&info_b), 0));
-    // Artist / Album / Year / Genre.
+    // Artist / Album.
     assert!(sort_key(&a, Some(&info_b), 1) < sort_key(&b, Some(&info_a), 1)); // Amy < Zed
     assert!(sort_key(&a, Some(&info_b), 2) < sort_key(&b, Some(&info_a), 2)); // Alpha < Zeta
-    assert!(sort_key(&a, Some(&info_b), 3) < sort_key(&b, Some(&info_a), 3)); // 1995 < 2000
-    assert!(sort_key(&a, Some(&info_b), 4) < sort_key(&b, Some(&info_a), 4)); // Jazz < Rock
     // Duration: present sorts before missing.
-    assert!(sort_key(&b, Some(&info_a), 5) < sort_key(&a, Some(&info_b), 5));
+    assert!(sort_key(&b, Some(&info_a), 3) < sort_key(&a, Some(&info_b), 3));
     // Missing tags sort last (empty artist after "Zed", not before).
     assert!(sort_key(&b, Some(&info_a), 1) < sort_key(&a, None, 1));
     // Folders are untagged: their name is the Title key, and they sort
     // last on the tag columns (no artist / no duration).
     assert!(sort_key(&dir, None, 0) > sort_key(&a, Some(&info_b), 0)); // "z-folder" > "Bravo"
     assert!(sort_key(&a, Some(&info_b), 1) < sort_key(&dir, None, 1)); // Amy < (no artist)
-    assert!(sort_key(&a, Some(&info_a), 5) < sort_key(&dir, None, 5)); // present < missing
+    assert!(sort_key(&a, Some(&info_a), 3) < sort_key(&dir, None, 3)); // present < missing
+}
+
+/// The Album column is `album \x01 track`: an album's tracks list in track
+/// order, not alphabetically, and the numbering is numeric rather than textual
+/// (so track 2 precedes track 10, which a plain string pad is what buys).
+#[test]
+fn sort_key_album_orders_tracks_within_an_album() {
+    let a = Entry { path: PathBuf::from("a.wav"), is_dir: false };
+    let b = Entry { path: PathBuf::from("b.wav"), is_dir: false };
+    let c = Entry { path: PathBuf::from("c.wav"), is_dir: false };
+    let two = TrackInfo { album: "Set".into(), track_no: Some("2".into()), title: "Zebra".into(), ..Default::default() };
+    let ten = TrackInfo { album: "Set".into(), track_no: Some("10".into()), title: "Aardvark".into(), ..Default::default() };
+    let unnumbered = TrackInfo { album: "Set".into(), title: "Bonus".into(), ..Default::default() };
+    let other = TrackInfo { album: "Tangent".into(), track_no: Some("1".into()), title: "First".into(), ..Default::default() };
+
+    // 2 before 10, even though "Aardvark" < "Zebra" alphabetically.
+    assert!(sort_key(&a, Some(&two), 2) < sort_key(&b, Some(&ten), 2));
+    // Unnumbered tracks sort after the numbered ones, still inside the album.
+    assert!(sort_key(&b, Some(&ten), 2) < sort_key(&c, Some(&unnumbered), 2));
+    // Album still groups first: everything in "Set" precedes "Tangent".
+    assert!(sort_key(&c, Some(&unnumbered), 2) < sort_key(&b, Some(&other), 2));
+}
+
+/// An untagged file must not sort above every album, and must not jump ahead of
+/// a folder either — both belong in the "no value" sink region.
+#[test]
+fn sort_key_album_untagged_sinks_with_folders() {
+    let file = Entry { path: PathBuf::from("a.wav"), is_dir: false };
+    let dir = Entry { path: PathBuf::from("z-folder"), is_dir: true };
+    let untagged = TrackInfo { title: "Plain".into(), ..Default::default() };
+    let album = TrackInfo { album: "Set".into(), track_no: Some("1".into()), ..Default::default() };
+    // Last: no album, so behind every tagged file.
+    assert!(sort_key(&file, Some(&untagged), 2) > sort_key(&file, Some(&album), 2));
+    // Same sink region as a folder, not in front of it.
+    assert!(sort_key(&file, Some(&untagged), 2) > sort_key(&dir, None, 2));
 }
 
 #[test]
@@ -296,7 +326,7 @@ fn sort_key_folders_untagged() {
     // Artist: file has "Amy", folder has none -> file first
     assert!(sort_key(&file, Some(&info), 1) < sort_key(&dir, None, 1));
     // Duration: file has duration, folder has none -> file first
-    assert!(sort_key(&file, Some(&info), 5) < sort_key(&dir, None, 5));
+    assert!(sort_key(&file, Some(&info), 3) < sort_key(&dir, None, 3));
 }
 
 #[test]
@@ -305,7 +335,7 @@ fn sort_key_duration_missing_sorts_last() {
     let b = Entry { path: PathBuf::from("b.wav"), is_dir: false };
     let info_a = TrackInfo { duration: Some(Duration::from_secs(100)), ..Default::default() };
     let info_b = TrackInfo { duration: None, ..Default::default() };
-    assert!(sort_key(&a, Some(&info_a), 5) < sort_key(&b, Some(&info_b), 5));
+    assert!(sort_key(&a, Some(&info_a), 3) < sort_key(&b, Some(&info_b), 3));
 }
 
 #[test]
@@ -351,5 +381,5 @@ fn scan_files_sends_results_and_stops_on_drop() {
 
 #[test]
 fn sort_options_constant_has_expected_columns() {
-    assert_eq!(SORT_OPTIONS, ["Title", "Artist", "Album", "Year", "Genre", "Duration"]);
+    assert_eq!(SORT_OPTIONS, ["Title", "Artist", "Album", "Duration"]);
 }
