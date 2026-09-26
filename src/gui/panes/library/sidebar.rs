@@ -7,7 +7,7 @@
 
 use super::dir_name;
 use crate::app::TPlayApp;
-use crate::gui::theme;
+use crate::gui::theme::{self, ThemeState};
 use crate::library;
 use crate::network;
 use eframe::egui;
@@ -41,12 +41,13 @@ enum RowClick {
 /// with different data, so they share this rather than three near-identical
 /// copies. Returns the row's click, if any.
 ///
-/// `app` is borrowed immutably (for the ✕ icon) because the *action* is the
-/// caller's: ✕ means "unbookmark" on a Favorite and "forget server" on a server
-/// row, so this only reports it.
+/// It takes no `app` at all: the *action* is the caller's (✕ means "unbookmark"
+/// on a Favorite and "forget server" on a server row, so this only reports it),
+/// and the ✕ texture comes from the `ThemeState` the shell owns. It used to
+/// borrow the app immutably just to reach the icon.
 fn sidebar_row(
     ui: &mut egui::Ui,
-    app: &TPlayApp,
+    themes: &ThemeState,
     theme: &theme::Theme,
     layout: &theme::Layout,
     label: &str,
@@ -73,7 +74,7 @@ fn sidebar_row(
             out = Some(RowClick::Jump);
         }
         if removable
-            && theme::icon_button(ui, app.theme_state().icon(theme::Icon::Remove), theme::Icon::Remove, 13.0, true, false)
+            && theme::icon_button(ui, themes.icon(theme::Icon::Remove), theme::Icon::Remove, 13.0, true, false)
                 .clicked()
         {
             out = Some(RowClick::Remove);
@@ -90,6 +91,7 @@ fn section_label(ui: &mut egui::Ui, p: theme::Palette, text: &str) {
 
 pub fn sidebar_ui(
     app: &mut TPlayApp,
+    themes: &ThemeState,
     ui: &mut egui::Ui,
     theme: &theme::Theme,
     form: &mut Option<String>,
@@ -150,7 +152,7 @@ pub fn sidebar_ui(
                     for (label, path) in places {
                         let active = current_local.as_deref() == Some(path.as_path());
                         if matches!(
-                            sidebar_row(ui, app, theme, &layout, &label, &path, active, false),
+                            sidebar_row(ui, themes, theme, &layout, &label, &path, active, false),
                             Some(RowClick::Jump)
                         ) {
                             jump = Some(path);
@@ -166,7 +168,7 @@ pub fn sidebar_ui(
                     for vol in volumes {
                         let active = current_local.as_deref() == Some(vol.path.as_path());
                         if matches!(
-                            sidebar_row(ui, app, theme, &layout, &vol.label, &vol.path, active, false),
+                            sidebar_row(ui, themes, theme, &layout, &vol.label, &vol.path, active, false),
                             Some(RowClick::Jump)
                         ) {
                             jump = Some(vol.path);
@@ -292,7 +294,7 @@ pub fn sidebar_ui(
                             {
                                 app.network_mut().browse_server(s.host.clone());
                             }
-                            if theme::icon_button(ui, app.theme_state().icon(theme::Icon::Remove), theme::Icon::Remove, 13.0, true, false)
+                            if theme::icon_button(ui, themes.icon(theme::Icon::Remove), theme::Icon::Remove, 13.0, true, false)
                                 .clicked()
                             {
                                 app.network_mut().remove_server(&s.host);
@@ -306,7 +308,7 @@ pub fn sidebar_ui(
                 for dir in app.library().favorites().to_vec() {
                     let name = dir_name(&dir);
                     let active = current_local.as_deref() == Some(dir.as_path());
-                    match sidebar_row(ui, app, theme, &layout, &name, &dir, active, true) {
+                    match sidebar_row(ui, themes, theme, &layout, &name, &dir, active, true) {
                         Some(RowClick::Jump) => jump = Some(dir),
                         Some(RowClick::Remove) => { app.library_mut().toggle_favorite(dir); }
                         None => {}

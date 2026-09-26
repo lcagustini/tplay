@@ -1,9 +1,10 @@
 //! TPlayApp public API — static helpers, constants and pure logic
 //! invariants.
 //!
-//! `TPlayApp::new()` needs an audio output device and an eframe
-//! `CreationContext`, so end-to-end playback can't run headless; the pure
-//! logic behind the public surface is pinned here instead.
+//! `TPlayApp::new(&config)` needs an audio output device, so end-to-end
+//! playback can't run headless; the pure logic behind the public surface is
+//! pinned here instead. (It no longer needs an eframe `CreationContext` — the
+//! app holds no `egui::Context` — but the device is still the blocker.)
 
 use tplay::app::{Pane, TPlayApp, VizView};
 use tplay::audio::eq::EQ_PRESETS;

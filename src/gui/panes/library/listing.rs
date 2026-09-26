@@ -12,7 +12,7 @@
 use super::dir_name;
 use crate::app::TPlayApp;
 use crate::gui::dialogs;
-use crate::gui::theme;
+use crate::gui::theme::{self, ThemeState};
 use crate::library;
 use crate::network;
 use eframe::egui;
@@ -241,6 +241,7 @@ fn draw_file_row(
 /// playlist load needs to know which transport to run it through.
 fn file_list_ui(
     app: &mut TPlayApp,
+    themes: &ThemeState,
     ui: &mut egui::Ui,
     theme: &theme::Theme,
     entries: &[library::Entry],
@@ -248,7 +249,7 @@ fn file_list_ui(
     remote: bool,
 ) -> Option<Act> {
     let p = theme.palette;
-    let folder_tex = app.theme_state().icon(theme::Icon::Folder).cloned();
+    let folder_tex = themes.icon(theme::Icon::Folder).cloned();
     let mut out = None;
 
     // Search box. State is the one `LIB_QUERY` key, so the query deliberately
@@ -275,8 +276,8 @@ fn file_list_ui(
         .any(|e| !e.is_dir() && !library::is_playlist(e.path()));
     if has_audio {
         let (cur, asc) = (app.library().sort(), app.library().sort_asc());
-        let asc_tex = app.theme_state().icon(theme::Icon::SortAsc).cloned();
-        let desc_tex = app.theme_state().icon(theme::Icon::SortDesc).cloned();
+        let asc_tex = themes.icon(theme::Icon::SortAsc).cloned();
+        let desc_tex = themes.icon(theme::Icon::SortDesc).cloned();
         ui.horizontal(|ui| {
             let (head, _) = ui.allocate_exact_size(
                 egui::vec2(ui.available_width(), 22.0),
@@ -392,12 +393,13 @@ fn file_list_ui(
 /// The local folder browser's main column: composition counts + Add All, then
 /// the shared file list. `remote_list_ui` is the same two steps with
 /// `browse_open` behind `Nav`, which is why both end in `file_list_ui`.
-pub fn local_list_ui(app: &mut TPlayApp, ui: &mut egui::Ui, theme: &theme::Theme) {
+pub fn local_list_ui(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui, theme: &theme::Theme) {
     let entries = app.library().entries().to_vec();
     list_header_right(app, ui, theme.palette, &entries);
     ui.add_space(4.0);
     let act = file_list_ui(
         app,
+        themes,
         ui,
         theme,
         &entries,
@@ -486,12 +488,13 @@ fn list_header_right(
 /// standing in for `navigate_to`. The breadcrumb above it is `header`'s.
 pub fn remote_list_ui(
     app: &mut TPlayApp,
+    themes: &ThemeState,
     ui: &mut egui::Ui,
     theme: &theme::Theme,
     browse: &network::NetworkBrowse,
 ) {
     let p = theme.palette;
-    let folder_tex = app.theme_state().icon(theme::Icon::Folder).cloned();
+    let folder_tex = themes.icon(theme::Icon::Folder).cloned();
 
     // Busy / error states replace the list entirely: nothing to show while a
     // listing is in flight, and on a logon failure the main pane owes the user a
@@ -597,7 +600,7 @@ pub fn remote_list_ui(
 
     list_header_right(app, ui, p, &entries);
     ui.add_space(4.0);
-    let act = file_list_ui(app, ui, theme, &entries, note, true);
+    let act = file_list_ui(app, themes, ui, theme, &entries, note, true);
 
     match act {
         Some(Act::Nav(path)) => {

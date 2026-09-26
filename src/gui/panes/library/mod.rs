@@ -16,6 +16,7 @@ pub mod listing;
 pub mod sidebar;
 
 use crate::app::TPlayApp;
+use crate::gui::theme::ThemeState;
 use eframe::egui;
 use std::path::Path;
 
@@ -33,8 +34,8 @@ fn dir_name(dir: &Path) -> String {
         .unwrap_or_else(|| dir.to_string_lossy().into_owned())
 }
 
-pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
-    let theme = app.theme_state().current().clone();
+pub fn library_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui) {
+    let theme = themes.current().clone();
     let browse = app.network().browse().cloned();
     let network_mode = browse.is_some();
 
@@ -49,7 +50,7 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
             ui.ctx().memory_mut(|m| m.data.insert_temp(egui::Id::new(LIB_INIT), true));
             app.navigate_to(app.library().dir().to_path_buf());
         }
-        header::local_header(app, ui, &theme);
+        header::local_header(app, themes, ui, &theme);
     }
 
     ui.add_space(4.0);
@@ -65,7 +66,7 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
 
     // Places + Favorites column, file browser column.
     ui.horizontal_top(|ui| {
-        sidebar::sidebar_ui(app, ui, &theme, &mut form, network_mode);
+        sidebar::sidebar_ui(app, themes, ui, &theme, &mut form, network_mode);
         ui.separator();
         ui.vertical(|ui| match &browse {
             // The remote breadcrumb is drawn inside the main column, below the
@@ -74,9 +75,9 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
             Some(browse) => {
                 header::remote_header(app, ui, &theme, browse);
                 ui.add_space(4.0);
-                listing::remote_list_ui(app, ui, &theme, browse);
+                listing::remote_list_ui(app, themes, ui, &theme, browse);
             }
-            None => listing::local_list_ui(app, ui, &theme),
+            None => listing::local_list_ui(app, themes, ui, &theme),
         });
     });
     ui.ctx().memory_mut(|m| m.data.insert_temp(egui::Id::new(NET_FORM), form));

@@ -3,11 +3,9 @@
 use crate::audio;
 use crate::audio::transition;
 use crate::config;
-use crate::gui::theme::{self, Themes};
 use crate::library;
 use crate::network;
 use crate::tracks;
-use eframe::egui;
 use rodio::{cpal::BufferSize, Decoder, OutputStream, OutputStreamBuilder, Sink, Source};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -107,11 +105,6 @@ pub struct TPlayApp {
     /// `ctx` time of the last config.json write, for the debounce window.
     last_config_save: f64,
 
-    /// Active theme + loadable list + decoded icons.
-    theme: theme::ThemeState,
-    /// Needed to (re)load icon textures on theme switch.
-    ctx: egui::Context,
-
     // ── Library pane ──────────────────────────────────────────────────────
     /// Browsed dir, rows, sort, bookmarks, hidden-folder toggle. What it can't
     /// own stays here: the tag cache, shared with the other two panes.
@@ -129,14 +122,14 @@ pub struct TPlayApp {
 }
 
 impl TPlayApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let ctx = cc.egui_ctx.clone();
-        let themes = Themes::load();
-
-        let config = config::load();
+    /// Everything the app needs, from config alone. `cc` is deliberately not a
+    /// parameter: the app holds no `egui::Context` and owns no theme, so it
+    /// cannot construct one — `main.rs`'s `TPlay` does both and hands over the
+    /// settings `config.json` already carries.
+    pub fn new(config: &Config) -> Self {
         // Seed the "what's on disk" baseline with what we just read, so the
         // first flush only writes if a setter has already changed something.
-        let saved_config = serde_json::to_string_pretty(&config).unwrap_or_default();
+        let saved_config = serde_json::to_string_pretty(config).unwrap_or_default();
 
         // A too-small buffer is the classic cause of ALSA "underrun occurred" at
         // track transitions (the crossfade/gapless arm decodes two files at
@@ -149,7 +142,6 @@ impl TPlayApp {
             _ => OutputStreamBuilder::open_default_stream().expect("No audio output device found"),
         };
         let sink = Sink::connect_new(output.mixer());
-        let theme = theme::ThemeState::load(&ctx, themes, &config.theme);
 
         // Channels + worker are owned by `network::Network`.
         let mut app = Self {
@@ -172,16 +164,14 @@ impl TPlayApp {
             rng_state: 0xC0FFEE, // arbitrary seed
             eq: audio::eq::EqSettings::new(config.eq.enabled, config.eq.gains),
             viz: audio::viz::VizBuf::new(),
-            prefs: config::Prefs::from_config(&config),
+            prefs: config::Prefs::from_config(config),
             xf_sink: None,
             xf_out_total: None,
             saved_config,
             last_config_save: 0.0,
-            theme,
-            ctx,
             library: library::LibraryState::new(
                 dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")),
-                config.library.favorites.into_iter().map(PathBuf::from).filter(|d| d.is_dir()).collect(),
+                config.library.favorites.clone().into_iter().map(PathBuf::from).filter(|d| d.is_dir()).collect(),
                 config.library.show_hidden,
             ),
             tag_cache: library::TagCache::new(),
@@ -201,7 +191,7 @@ impl TPlayApp {
         // fetch a click uses, and the reply lands on the first frame's drain().
         // It fails until the user logs in again: passwords are session-memory
         // only, so there is nothing to reuse.
-        if let Some(pl_path) = config.last_playlist {
+        if let Some(pl_path) = config.last_playlist.clone() {
             let path = PathBuf::from(pl_path);
             if network::is_remote(&path) {
                 app.network.fetch(path.to_string_lossy().into_owned());
@@ -217,15 +207,17 @@ impl TPlayApp {
     /// Write config.json if its content differs from the last write, at most
     /// once per `CONFIG_SAVE_DEBOUNCE_SECS`, and unconditionally when closing.
     ///
+    /// The clock and the close flag are the caller's — the app holds no
+    /// `egui::Context` (see `main.rs`'s `TPlay`), so `TPlayApp::update` takes
+    /// them as arguments.
+    ///
     /// The "did it change" test is a string compare against the previous
     /// snapshot, not a dirty flag raised by each setter: the flag was a manual
     /// obligation with ~20 call sites, and a missed one silently lost a
     /// setting. This is the shape `gui/coordinator.rs` already used for
     /// dock_layout.json. Cost is one ~500-byte serialization per frame.
-    fn flush_config(&mut self, ctx: &egui::Context) {
-        let now = ctx.input(|i| i.time);
-        let closing = ctx.input(|i| i.viewport().close_requested());
-        let config = self.snapshot();
+    pub fn flush_config(&mut self, now: f64, closing: bool, theme_id: &str) {
+        let config = self.snapshot(theme_id);
         let json = serde_json::to_string_pretty(&config).unwrap_or_default();
         if !config::should_flush(json != self.saved_config, now, self.last_config_save, closing) {
             return;
@@ -235,13 +227,15 @@ impl TPlayApp {
         config::save(&config);
     }
 
-    /// Every setting, as the file wants it.
+    /// Every setting, as the file wants it. `theme_id` is passed in because the
+    /// theme belongs to the GUI layer — the app persists which theme is
+    /// selected, it does not own one.
     ///
     /// Every field listed explicitly, no `..Default::default()`: a new
     /// `Config` field must be a compile error here, not a silent reset.
-    fn snapshot(&self) -> Config {
+    fn snapshot(&self, theme_id: &str) -> Config {
         Config {
-            theme: self.theme.current().id.clone(),
+            theme: theme_id.to_owned(),
             eq: EqData {
                 enabled: self.eq.enabled(),
                 gains: self.eq.gains(),
@@ -903,11 +897,12 @@ impl TPlayApp {
     /// Header click: pick a new column (ascending) or flip the active one and
     /// re-sort the current folder in place.
     pub fn set_library_sort(&mut self, key: usize) {
-        if self.library.set_sort(key, &self.tag_cache) {
-            }
+        self.library.set_sort(key, &self.tag_cache);
     }
 
-    /// Ensure the given audio files have tag info in the cache.
+    /// Ensure the given audio files have tag info in the cache. Returns whether
+    /// anything was started, so the caller can ask for a repaint — the app has
+    /// no `Context` to ask with (see `main.rs`'s `TPlay`).
     ///
     /// Which transport a track needs is not this function's business — the
     /// `TagReader` splits the batch and hands each half to the thread or the SMB
@@ -916,20 +911,16 @@ impl TPlayApp {
     ///
     /// Safe to call every frame: the reader skips cached tracks and the network
     /// side keeps its own in-flight set, so a running batch is not re-queued.
-    pub fn ensure_tags(&mut self, paths: Vec<PathBuf>) {
+    pub fn ensure_tags(&mut self, paths: Vec<PathBuf>) -> bool {
         let cache = &self.tag_cache;
-        let started = self.tracks.request(cache, &mut self.network, &paths);
-        if started {
-            self.ctx.request_repaint();
-        }
+        self.tracks.request(cache, &mut self.network, &paths)
     }
 
-    /// Drain finished local tag results into the cache (called every frame).
-    pub fn drain_tag_scan(&mut self) {
+    /// Drain finished local tag results into the cache. Returns whether anything
+    /// arrived or the scan ended, so the caller can ask for a repaint.
+    pub fn drain_tag_scan(&mut self) -> bool {
         let cache = &mut self.tag_cache;
-        if self.tracks.drain_into(cache) {
-            self.ctx.request_repaint();
-        }
+        self.tracks.drain_into(cache)
     }
 
     /// Play a library file directly. `current_index = None` is the "direct
@@ -1033,11 +1024,6 @@ impl TPlayApp {
     pub fn eq(&self) -> &audio::eq::EqSettings { &self.eq }
     pub fn eq_mut(&mut self) -> &mut audio::eq::EqSettings { &mut self.eq }
 
-    /// The active theme, its alternatives and the decoded icon set.
-    /// `ThemeState::set` owns the icon re-decode a switch needs.
-    pub fn theme_state(&self) -> &theme::ThemeState { &self.theme }
-    pub fn theme_state_mut(&mut self) -> &mut theme::ThemeState { &mut self.theme }
-
     /// The whole tag cache, so a caller can sort a list of entries against it
     /// (`library::sort_entries`) rather than sorting entry-by-entry. Keys are
     /// track ids, so a remote one is an `smb://` URI.
@@ -1133,15 +1119,22 @@ impl TPlayApp {
     }
 }
 
-impl eframe::App for TPlayApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        crate::gui::coordinator::update_ui(self, ctx);
+impl TPlayApp {
+    /// Everything one frame needs from the app, in order. The shell draws first
+    /// (`gui::coordinator::update_ui`), then calls this.
+    ///
+    /// Returns whether the GUI should keep repainting: something is in flight
+    /// (a scan, a spool, a tag batch) or audio is playing. The app cannot ask
+    /// for a repaint itself — it has no `egui::Context` — so the three places
+    /// that used to call `request_repaint` return a bool instead and the shell
+    /// ORs them together.
+    pub fn update(&mut self, now: f64, closing: bool, theme_id: &str) -> bool {
         self.advance();
-        self.drain_tag_scan();
+        let scanning = self.drain_tag_scan();
         // Settings persist on a throttle, not on the setter that changed them —
         // see `config::should_flush`. Last in the frame, so a click that both
         // arms a dialog and moves a slider is already recorded.
-        self.flush_config(ctx);
+        self.flush_config(now, closing, theme_id);
         // SMB replies: browse listings are applied inside `Network::drain`; a
         // completed spool promotes playback, a fetched `.tplay` loads, and a
         // save confirms. Drain every event, not just the first — a save reply
@@ -1169,7 +1162,7 @@ impl eframe::App for TPlayApp {
                     Ok(()) => {
                         self.playlist_file = Some(PathBuf::from(uri));
                         self.playlist_dirty = false;
-                                        self.refresh_network_dir();
+                        self.refresh_network_dir();
                     }
                     Err(e) => eprintln!("tplay: could not save playlist to {uri}: {e}"),
                 },
@@ -1185,9 +1178,8 @@ impl eframe::App for TPlayApp {
                 }
             }
         }
-        let waiting = self.network.busy();
-        if waiting || (!self.sink.empty() && !self.sink.is_paused()) {
-            ctx.request_repaint();
-        }
+        scanning
+            || self.network.busy()
+            || (!self.sink.empty() && !self.sink.is_paused())
     }
 }

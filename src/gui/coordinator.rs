@@ -4,6 +4,7 @@ use crate::app::{TPlayApp, Pane};
 use crate::gui::dialogs;
 use crate::gui::panes;
 use crate::gui::theme;
+use crate::gui::theme::ThemeState;
 use eframe::egui;
 use egui_dock::{DockArea, DockState, Node, NodeIndex, Style, TabIndex, TabViewer};
 use serde_json;
@@ -112,24 +113,28 @@ fn remove_pane(tree: &mut DockState<Pane>, pane: Pane) {
 
 struct PaneViewer<'a> {
     app: &'a mut TPlayApp,
+    themes: &'a ThemeState,
 }
 
 impl TabViewer for PaneViewer<'_> {
     type Tab = Pane;
 
     fn title(&mut self, pane: &mut Pane) -> egui::WidgetText {
-        let accent = self.app.theme_state().current().palette.accent;
+        let accent = self.themes.current().palette.accent;
         pane_title(*pane).color(accent)
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, pane: &mut Pane) {
+        // Reborrow rather than move: `self` is `&mut PaneViewer`, so the
+        // destructuring below would otherwise move the `&mut` out of it.
+        let (app, themes) = (&mut *self.app, &*self.themes);
         match pane {
-            Pane::NowPlaying => panes::now_playing::now_playing_pane(self.app, ui),
-            Pane::Playlist => panes::playlist::playlist_pane(self.app, ui),
-            Pane::Equalizer => panes::equalizer::equalizer_pane(self.app, ui),
-            Pane::Library => panes::library::library_pane(self.app, ui),
-            Pane::Visualizer => panes::visualizer::visualizer_pane(self.app, ui),
-            Pane::AlbumCover => panes::album_cover::album_cover_pane(self.app, ui),
+            Pane::NowPlaying => panes::now_playing::now_playing_pane(app, themes, ui),
+            Pane::Playlist => panes::playlist::playlist_pane(app, themes, ui),
+            Pane::Equalizer => panes::equalizer::equalizer_pane(app, themes, ui),
+            Pane::Library => panes::library::library_pane(app, themes, ui),
+            Pane::Visualizer => panes::visualizer::visualizer_pane(app, themes, ui),
+            Pane::AlbumCover => panes::album_cover::album_cover_pane(app, themes, ui),
         }
     }
 
@@ -187,11 +192,13 @@ fn list_layouts(dir: &std::path::Path) -> Vec<PathBuf> {
     files
 }
 
-/// Update the UI for one frame. Called from TPlayApp::update().
-pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
+/// Draw one frame. Called from the `TPlay` shell in `main.rs`, which owns
+/// `themes` — the app deliberately does not, so a theme switch re-decodes
+/// icons with a `Context` the state layer never holds.
+pub fn update_ui(app: &mut TPlayApp, themes: &mut ThemeState, ctx: &egui::Context) {
     // Theme tokens -> egui visuals, every frame so a mid-session switch lands
     // instantly.
-    theme::apply(ctx, app.theme_state().current());
+    theme::apply(ctx, themes.current());
     // egui selects label text on drag by default; the playlist reorders by
     // dragging track titles, so kill text selection app-wide.
     ctx.style_mut(|s| s.interaction.selectable_labels = false);
@@ -230,12 +237,12 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
                 ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
             }
 
-            let logo = app.theme_state().icon(theme::Icon::Logo).cloned();
+            let logo = themes.icon(theme::Icon::Logo).cloned();
             // Window-chrome textures are cloned before the closures below so they
             // don't have to capture `app` (menu_contents already does).
-            let win_close_tex = app.theme_state().icon(theme::Icon::Remove).cloned();
-            let win_max_tex = app.theme_state().icon(theme::Icon::Maximize).cloned();
-            let win_min_tex = app.theme_state().icon(theme::Icon::Minimize).cloned();
+            let win_close_tex = themes.icon(theme::Icon::Remove).cloned();
+            let win_max_tex = themes.icon(theme::Icon::Maximize).cloned();
+            let win_min_tex = themes.icon(theme::Icon::Minimize).cloned();
 
             // Precompute layouts dir and tracked layout once per frame for the menu.
             let layouts_dir = layouts_dir();
@@ -244,16 +251,16 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
 
             let menu_contents = |ui: &mut egui::Ui| {
                 ui.label("Theme");
-                let mut sel = app.theme_state().current().id.clone();
-                for t in app.theme_state().list() {
+                let mut sel = themes.current().id.clone();
+                for t in themes.list() {
                     if ui.selectable_label(t.id == sel, t.name.clone()).clicked() {
                         sel = t.id.clone();
                     }
                 }
-                if sel != app.theme_state().current().id {
+                if sel != themes.current().id {
                     // `set` owns the icon re-decode a switch needs, and the
                     // config compare persists the new id — nothing to flag here.
-                    app.theme_state_mut().set(ctx, &sel);
+                    themes.set(ctx, &sel);
                     ui.close_menu();
                 }
                 ui.separator();
@@ -396,7 +403,7 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
     let border_h = style.tab.tab_body.inner_margin.left
         + style.tab.tab_body.inner_margin.right;
 
-    let mut viewer = PaneViewer { app };
+    let mut viewer = PaneViewer { app, themes: &*themes };
     DockArea::new(&mut tree)
         .show_add_buttons(false)
         .show_add_popup(false)
@@ -428,7 +435,7 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
 
     // Modals last: a dialog is armed by a click anywhere in the frame (a pane,
     // this menu) and drawn + carried out here, above everything.
-    dialogs::show(app, &mut tree, ctx);
+    dialogs::show(app, &*themes, &mut tree, ctx);
 
     // Persist to egui memory (session) + disk (JSON, not RON) — only on change or
     // close.

@@ -3,12 +3,13 @@
 //! view is a new file + a `VizView` variant + one match arm.
 
 use crate::app::{TPlayApp, VizView};
+use crate::gui::theme::ThemeState;
 use eframe::egui;
 
 pub mod views;
 
-pub fn visualizer_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
-    let theme = app.theme_state().current().clone();
+pub fn visualizer_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui) {
+    let theme = themes.current().clone();
     let p = theme.palette;
     let layout = theme.layout.with_defaults();
 

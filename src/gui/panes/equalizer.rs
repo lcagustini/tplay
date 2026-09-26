@@ -1,10 +1,11 @@
 use crate::app::{Pane, TPlayApp};
 use crate::audio::eq::{EQ_FREQUENCIES, EQ_PRESETS};
+use crate::gui::theme::ThemeState;
 use eframe::egui;
 
-pub fn equalizer_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
+pub fn equalizer_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui) {
     // Owned Arc copy — panes take `&mut app` while using theme data.
-    let theme = app.theme_state().current().clone();
+    let theme = themes.current().clone();
     let p = theme.palette;
     let gains = app.eq().gains();
     let layout = theme.layout.with_defaults();

@@ -11,6 +11,7 @@
 
 use crate::app::{Pane, TPlayApp};
 use crate::gui::coordinator;
+use crate::gui::theme::ThemeState;
 use crate::library;
 use crate::network;
 use eframe::egui;
@@ -89,16 +90,21 @@ pub fn ask_save_name(ctx: &egui::Context, target: SaveTarget, dir: String, name:
 
 /// Draw whichever dialog is armed and run its action. Called once per frame
 /// from the coordinator — after the dock area, so a modal always paints on top.
-pub fn show(app: &mut TPlayApp, tree: &mut DockState<Pane>, ctx: &egui::Context) {
-    confirm_modal(app, ctx);
-    save_name_modal(app, tree, ctx);
+pub fn show(
+    app: &mut TPlayApp,
+    themes: &ThemeState,
+    tree: &mut DockState<Pane>,
+    ctx: &egui::Context,
+) {
+    confirm_modal(app, themes, ctx);
+    save_name_modal(app, themes, tree, ctx);
 }
 
-fn confirm_modal(app: &mut TPlayApp, ctx: &egui::Context) {
+fn confirm_modal(app: &mut TPlayApp, themes: &ThemeState, ctx: &egui::Context) {
     let Some(armed) = take_state::<Armed>(ctx, CONFIRM_ID) else {
         return;
     };
-    let p = app.theme_state().current().palette;
+    let p = themes.current().palette;
 
     // None = still open, Some(true) = Yes, Some(false) = dismissed.
     let mut answer: Option<bool> = None;
@@ -161,12 +167,17 @@ fn run(app: &mut TPlayApp, ctx: &egui::Context, action: ConfirmAction) {
 /// The save-name prompt: a filename is needed, so a plain Yes/No is not enough.
 /// No new app-side state machine either — `save_playlist_to` is non-blocking
 /// (a share write goes to the SMB worker).
-fn save_name_modal(app: &mut TPlayApp, tree: &mut DockState<Pane>, ctx: &egui::Context) {
+fn save_name_modal(
+    app: &mut TPlayApp,
+    themes: &ThemeState,
+    tree: &mut DockState<Pane>,
+    ctx: &egui::Context,
+) {
     let Some((target, dir, mut name)) = take_state::<(SaveTarget, String, String)>(ctx, SAVE_NAME_ID) else {
         return;
     };
 
-    let p = app.theme_state().current().palette;
+    let p = themes.current().palette;
     // Some(None) = dismissed, Some(Some(name)) = confirmed.
     let mut action: Option<Option<String>> = None;
     let resp = egui::Modal::new(egui::Id::new(SAVE_NAME_ID)).show(ctx, |ui| {

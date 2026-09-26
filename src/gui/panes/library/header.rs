@@ -7,7 +7,7 @@
 
 use super::dir_name;
 use crate::app::TPlayApp;
-use crate::gui::theme;
+use crate::gui::theme::{self, ThemeState};
 use crate::network;
 use eframe::egui;
 use std::path::{Path, PathBuf};
@@ -149,7 +149,7 @@ fn apply(app: &mut TPlayApp, seg: &Seg) {
 /// The local browser's header: every ancestor of the current folder, then the
 /// ★ that bookmarks it. The star is local-only, which is why it is here and not
 /// in `breadcrumb`.
-pub fn local_header(app: &mut TPlayApp, ui: &mut egui::Ui, theme: &theme::Theme) {
+pub fn local_header(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui, theme: &theme::Theme) {
     let p = theme.palette;
     let dir = app.library().dir().to_path_buf();
     let segs = local_segs(&dir);
@@ -160,9 +160,9 @@ pub fn local_header(app: &mut TPlayApp, ui: &mut egui::Ui, theme: &theme::Theme)
 
     let fav = app.library().is_favorite(&dir);
     let tex = if fav {
-        app.theme_state().icon(theme::Icon::StarOn).cloned()
+        themes.icon(theme::Icon::StarOn).cloned()
     } else {
-        app.theme_state().icon(theme::Icon::StarOff).cloned()
+        themes.icon(theme::Icon::StarOff).cloned()
     };
     let fav_btn = match tex {
         Some(tex) => egui::Button::image(egui::Image::new(&tex).fit_to_exact_size(egui::vec2(14.0, 14.0)))

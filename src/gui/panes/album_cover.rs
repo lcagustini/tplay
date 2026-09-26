@@ -5,7 +5,7 @@
 //! theme's `nocover` placeholder icon.
 
 use crate::app::TPlayApp;
-use crate::gui::theme::Icon;
+use crate::gui::theme::{Icon, ThemeState};
 use crate::tracks;
 use eframe::egui;
 
@@ -18,8 +18,8 @@ fn cover_id() -> egui::Id {
 /// Cache value: the path the texture belongs to, plus the texture.
 type CoverCache = (String, Option<egui::TextureHandle>);
 
-pub fn album_cover_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
-    let theme = app.theme_state().current().clone();
+pub fn album_cover_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui) {
+    let theme = themes.current().clone();
     let p = theme.palette;
 
     let rect = ui.available_rect_before_wrap();
@@ -84,7 +84,7 @@ pub fn album_cover_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
             // No art: themed placeholder, centered at a pane-relative size.
             let size = rect.width().min(rect.height()) * 0.35;
             let center = rect.center();
-            match app.theme_state().icon(Icon::NoCover) {
+            match themes.icon(Icon::NoCover) {
                 Some(icon) => {
                     painter.image(
                         icon.id(),

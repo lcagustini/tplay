@@ -1,5 +1,5 @@
 use crate::app::TPlayApp;
-use crate::gui::theme::{self, Icon, Theme};
+use crate::gui::theme::{self, Icon, Theme, ThemeState};
 use crate::library;
 use eframe::egui;
 
@@ -15,9 +15,9 @@ fn meta(s: impl Into<String>, theme: &Theme, size: f32) -> egui::RichText {
         .font(egui::FontId::new(size, theme.metadata_font.clone()))
 }
 
-pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
+pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui) {
     // Owned Arc copy — panes take `&mut app` while `meta` needs `&Theme`.
-    let theme = app.theme_state().current().clone();
+    let theme = themes.current().clone();
     let layout = theme.layout.with_defaults();
 
     // Fill pane (dock-sized, resizable — the Fixed pin is gone), so pad the top
@@ -143,7 +143,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             // Prev track
             let prev_enabled = app.has_prev_track();
-            if theme::icon_button(ui, app.theme_state().icon(Icon::Prev), Icon::Prev, 18.0, prev_enabled, false).clicked() {
+            if theme::icon_button(ui, themes.icon(Icon::Prev), Icon::Prev, 18.0, prev_enabled, false).clicked() {
                 app.prev_track();
             }
 
@@ -153,36 +153,36 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
             if is_paused || is_empty {
                 // Nothing loaded and an empty playlist: greyed out, since
                 // `play()` would have nothing to start.
-                if theme::icon_button(ui, app.theme_state().icon(Icon::Play), Icon::Play, 18.0, app.can_play(), false).clicked() {
+                if theme::icon_button(ui, themes.icon(Icon::Play), Icon::Play, 18.0, app.can_play(), false).clicked() {
                     app.play();
                 }
-            } else if theme::icon_button(ui, app.theme_state().icon(Icon::Pause), Icon::Pause, 18.0, true, false).clicked() {
+            } else if theme::icon_button(ui, themes.icon(Icon::Pause), Icon::Pause, 18.0, true, false).clicked() {
                 app.pause();
             }
 
-            if theme::icon_button(ui, app.theme_state().icon(Icon::Stop), Icon::Stop, 18.0, true, false).clicked() {
+            if theme::icon_button(ui, themes.icon(Icon::Stop), Icon::Stop, 18.0, true, false).clicked() {
                 app.stop();
             }
 
             // Next track
             let next_enabled = app.has_next_track();
-            if theme::icon_button(ui, app.theme_state().icon(Icon::Next), Icon::Next, 18.0, next_enabled, false).clicked() {
+            if theme::icon_button(ui, themes.icon(Icon::Next), Icon::Next, 18.0, next_enabled, false).clicked() {
                 app.next_track();
             }
 
             // Shuffle / repeat — lit while active.
             ui.separator();
-            if theme::icon_button(ui, app.theme_state().icon(Icon::Shuffle), Icon::Shuffle, 18.0, true, app.shuffle()).clicked() {
+            if theme::icon_button(ui, themes.icon(Icon::Shuffle), Icon::Shuffle, 18.0, true, app.shuffle()).clicked() {
                 app.toggle_shuffle();
             }
-            if theme::icon_button(ui, app.theme_state().icon(Icon::Repeat), Icon::Repeat, 18.0, true, app.repeat()).clicked() {
+            if theme::icon_button(ui, themes.icon(Icon::Repeat), Icon::Repeat, 18.0, true, app.repeat()).clicked() {
                 app.toggle_repeat();
             }
 
             ui.separator();
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                theme::icon(ui, app.theme_state().icon(Icon::Volume), Icon::Volume, 15.0);
+                theme::icon(ui, themes.icon(Icon::Volume), Icon::Volume, 15.0);
                 let mut volume = app.volume();
                 if ui.add(
                     egui::Slider::new(&mut volume, 0.0..=1.0)
@@ -218,7 +218,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                 // Crossfade toggle (icon button, lit while active)
                 if theme::icon_button(
                     ui,
-                    app.theme_state().icon(Icon::Crossfade),
+                    themes.icon(Icon::Crossfade),
                     Icon::Crossfade,
                     18.0,
                     true,
@@ -229,7 +229,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                 // Gapless toggle (icon button, lit while active)
                 if theme::icon_button(
                     ui,
-                    app.theme_state().icon(Icon::Gapless),
+                    themes.icon(Icon::Gapless),
                     Icon::Gapless,
                     18.0,
                     true,
