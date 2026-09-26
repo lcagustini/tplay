@@ -12,12 +12,12 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
-/// The audio extensions this player can play (mirrors the file dialog filter).
+/// The audio extensions this player can play.
 const AUDIO_EXTENSIONS: [&str; 5] = ["mp3", "wav", "ogg", "flac", "m4a"];
 
-/// Cover art filenames to fall back to when a track has no embedded art.
-/// `folder.jpg` is the classic album-folder convention, `cover.jpg` is common
-/// from Linux rippers; PNG variants exist too. Checked in the track's own dir.
+/// Cover art to fall back to when a track has no embedded art: `folder.jpg` is
+/// the classic album-folder convention, `cover.jpg` common from Linux rippers;
+/// PNG variants too. Checked in the track's own dir.
 const COVER_FILES: [&str; 6] = [
     "folder.jpg", "Folder.jpg", "cover.jpg", "Cover.jpg", "folder.png", "cover.png",
 ];
@@ -32,8 +32,8 @@ const PSEUDO_FSTYPES: &[&str] = &[
 /// Boot/ESP mountpoints to exclude — system partitions, not user volumes.
 const BOOT_MOUNTPOINTS: &[&str] = &["/efi", "/boot", "/boot/efi"];
 
-/// Build a device -> label map from /dev/disk/by-label/ symlinks.
-/// Returns a map of device basename (e.g. "sdc1") -> label (e.g. "25-ssd-2").
+/// Device basename (e.g. "sdc1") -> label (e.g. "25-ssd-2"), from
+/// /dev/disk/by-label/ symlinks.
 fn read_disk_labels() -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
     if let Ok(entries) = std::fs::read_dir("/dev/disk/by-label") {
@@ -54,7 +54,6 @@ fn read_disk_labels() -> std::collections::HashMap<String, String> {
 pub struct Volume {
     /// Human-readable label (mountpoint leaf, or device basename for root).
     pub label: String,
-    /// Mountpoint path.
     pub path: PathBuf,
 }
 
@@ -76,14 +75,13 @@ impl Volume {
             let mountpoint = parts[1];
             let fstype = parts[2];
 
-            // Only /dev/* block devices, skip pseudo filesystems
+            // Only /dev/* block devices; skip pseudo filesystems
             if !device.starts_with("/dev/") {
                 continue;
             }
             if PSEUDO_FSTYPES.iter().any(|&p| fstype.starts_with(p)) {
                 continue;
             }
-            // Skip boot/ESP partitions — system partitions, not user volumes.
             if BOOT_MOUNTPOINTS.contains(&mountpoint) {
                 continue;
             }
@@ -106,12 +104,12 @@ impl Volume {
 
             vols.push(Volume { label, path });
         }
-        // Sort by label, case-insensitive
+        // Sort by label, case-insensitively
         vols.sort_by_key(|a| a.label.to_lowercase());
         vols
     }
 
-    /// Read /proc/self/mounts and return mounted local volumes.
+    /// `parse_mounts` over the real /proc/self/mounts.
     pub fn mounted_volumes() -> Vec<Volume> {
         std::fs::read_to_string("/proc/self/mounts")
             .ok()
@@ -136,8 +134,8 @@ pub fn is_playlist(path: &Path) -> bool {
 pub const DEFAULT_PLAYLIST_NAME: &str = "playlist.tplay";
 
 /// The name to carry over when re-saving: the file's stem. `None` when nothing
-/// is usable — no file at all, or a dotfile like `.tplay`, whose "stem" is the
-/// whole name (carrying that over would save `.tplay.tplay`).
+/// is usable — no file, or a dotfile like `.tplay` whose "stem" is the whole
+/// name (carrying that over would save `.tplay.tplay`).
 fn playlist_stem(path: &Path) -> Option<String> {
     let stem = path.file_stem()?.to_str()?;
     if stem.is_empty() || (stem.starts_with('.') && path.extension().is_none()) {
@@ -146,9 +144,8 @@ fn playlist_stem(path: &Path) -> Option<String> {
     Some(stem.to_owned())
 }
 
-/// Suggested filename when saving a playlist: the tracked file's stem, so
-/// saving a loaded playlist somewhere new keeps its name. Falls back to
-/// `DEFAULT_PLAYLIST_NAME` when there is no usable stem.
+/// Suggested save filename: the tracked file's stem, so saving a loaded
+/// playlist elsewhere keeps its name. Falls back to `DEFAULT_PLAYLIST_NAME`.
 pub fn default_playlist_name(playlist_file: Option<&Path>) -> String {
     match playlist_file.and_then(playlist_stem) {
         Some(stem) => format!("{stem}.tplay"),
@@ -194,17 +191,17 @@ pub fn write_playlist(path: &Path, tracks: &[PathBuf]) -> std::io::Result<()> {
     std::fs::write(path, playlist_json(tracks)?)
 }
 
-/// Read a `.tplay` playlist file, resolving relative entries against `base`.
+/// Read a `.tplay` file, resolving relative entries against `base`.
 ///
-/// `base` is explicit rather than `path.parent()` because a remote playlist is
-/// read from its **spool cache copy** — resolving against that would silently
-/// drop every relative track. Local callers pass the file's own directory;
-/// remote callers pass the share directory URI the playlist was browsed at.
+/// `base` is explicit, not `path.parent()`, because a remote playlist is read
+/// from its **spool cache copy** — resolving against that would silently drop
+/// every relative track. Local callers pass the file's own directory; remote
+/// callers pass the share directory URI it was browsed at.
 ///
-/// `smb://` entries are kept verbatim and are NOT resolved against `base`.
-/// They only *look* relative: `Path::is_relative` is true for anything without
-/// a leading `/`, so keying off it would join every remote track onto the base
-/// and turn `smb://nas/m/x.mp3` into `smb://nas/m/smb://nas/m/x.mp3`.
+/// `smb://` entries are kept verbatim, never resolved against `base`. They only
+/// *look* relative: `Path::is_relative` is true for anything without a leading
+/// `/`, so keying off it turns `smb://nas/m/x.mp3` into
+/// `smb://nas/m/smb://nas/m/x.mp3`.
 pub fn read_playlist(path: &Path, base: &Path) -> Option<Vec<PathBuf>> {
     let json = std::fs::read_to_string(path).ok()?;
     let data: PlaylistData = serde_json::from_str(&json).ok()?;
@@ -227,9 +224,9 @@ pub fn read_playlist(path: &Path, base: &Path) -> Option<Vec<PathBuf>> {
 ///
 /// Named because it is no longer the Library's private business — the Playlist
 /// and Now Playing panes read the same map, and `sort_entries` / `LibraryState`
-/// take it as a parameter, so the full `HashMap<PathBuf, TrackInfo>` was spelled
-/// out in four signatures. The **id** is the key, which for a remote track is an
-/// `smb://` URI held in a `PathBuf` (see `tracks.rs`).
+/// take it as a parameter, so the full type was spelled out in four signatures.
+/// The **id** is the key, which for a remote track is an `smb://` URI in a
+/// `PathBuf` (see `tracks.rs`).
 pub type TagCache = HashMap<PathBuf, TrackInfo>;
 
 /// Tags + duration read from one audio file. Missing fields stay blank —
@@ -243,10 +240,10 @@ pub struct TrackInfo {
     pub duration: Option<Duration>,
 }
 
-/// One row of the Library file list: a subfolder or an audio file, in a single
-/// sortable list. Folders have no tags — sorting treats them as untagged
-/// entries whose title is their name (the Title column interleaves them with
-/// files; the tag columns sink them last).
+/// One row of the Library file list: a subfolder or an audio file, in one
+/// sortable list. Folders have no tags, so sorting treats them as untagged
+/// entries titled by name (Title interleaves them with files; tag columns sink
+/// them last).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     pub path: PathBuf,
@@ -283,9 +280,9 @@ pub fn read_info(path: &Path) -> Option<TrackInfo> {
 }
 
 /// Embedded album art for one file, falling back to a cover file beside it
-/// (`folder.jpg`/`cover.jpg`/…, see `COVER_FILES`). Returns raw image bytes;
+/// (`folder.jpg`/`cover.jpg`/…, see `COVER_FILES`). Raw image bytes —
 /// `read_info`'s sibling for the Album Cover pane. `None` when the file has
-/// neither — the caller draws the themed placeholder.
+/// neither, and the caller draws the themed placeholder.
 pub fn read_cover(path: &Path) -> Option<Vec<u8>> {
     if let Ok(tagged) = lofty::read_from_path(path) {
         let tag = tagged.primary_tag().or_else(|| tagged.first_tag());
@@ -301,9 +298,9 @@ pub fn read_cover(path: &Path) -> Option<Vec<u8>> {
         .and_then(|p| std::fs::read(p).ok())
 }
 
-/// Entries in a directory: subfolders first then audio files, each sorted
-/// case-insensitively by file name. Dot-prefixed (hidden) subfolders are
-/// skipped unless `show_hidden`.
+/// Entries in a directory: subfolders first, then audio files. Dot-prefixed
+/// (hidden) subfolders are skipped unless `show_hidden`. Unsorted — the caller
+/// sorts via `sort_entries`.
 pub fn list_dir(dir: &Path, show_hidden: bool) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let mut dirs = Vec::new();
     let mut files = Vec::new();
@@ -323,7 +320,6 @@ pub fn list_dir(dir: &Path, show_hidden: bool) -> (Vec<PathBuf>, Vec<PathBuf>) {
             }
         }
     }
-    // No sorting here - navigate_to will sort via apply_library_sort
     (dirs, files)
 }
 
@@ -339,16 +335,15 @@ pub fn scan_files(files: Vec<PathBuf>, tx: Sender<(PathBuf, TrackInfo)>) {
     }
 }
 
-/// Sortable columns for the Library list, in header display order. Index 0
-/// (Title) is the default order: untagged files fall back to their name and
-/// folders to theirs, so it reads as the classic name sort everything mixes
-/// into.
+/// Sortable columns for the Library list, in header order. Index 0 (Title) is
+/// the default: untagged files fall back to their name and folders to theirs, so
+/// it reads as the classic name sort everything mixes into.
 pub const SORT_OPTIONS: [&str; 4] = ["Title", "Artist", "Album", "Duration"];
 
-/// Sort a file list in place by column `col`, ascending or descending. Shared
-/// by the local folder list and the SMB share list — both are `Vec<Entry>`, and
-/// for a share `path` is an `smb://` URI, which every key here handles like any
-/// other path (its `file_name`/`file_stem` are the remote name).
+/// Sort a file list in place by column `col`. Shared by the local folder list and
+/// the SMB share list — both are `Vec<Entry>`, and for a share `path` is an
+/// `smb://` URI, which every key here handles like any other path (its
+/// `file_name`/`file_stem` are the remote name).
 ///
 /// Descending is a `reverse()` after an ascending sort rather than a reversed
 /// comparator, so equal keys keep their relative order instead of flipping on
@@ -379,7 +374,7 @@ pub fn title_or_stem(path: &Path, info: Option<&TrackInfo>) -> String {
 pub fn sort_key(e: &Entry, info: Option<&TrackInfo>, col: usize) -> String {
     let s: String = match col {
         0 => {
-            // Title: folder name for dirs, tagged title or file stem for files
+            // Title: a folder's name, or a file's tagged title / stem.
             if e.is_dir {
                 e.path.file_name().and_then(|s| s.to_str()).unwrap_or_default().to_string()
             } else {
@@ -398,8 +393,8 @@ pub fn sort_key(e: &Entry, info: Option<&TrackInfo>, col: usize) -> String {
             // ponytail: parse the leading digits if multi-disc ordering matters.
             if e.is_dir { String::new() } else {
                 let album = info.map(|i| i.album.as_str()).unwrap_or_default();
-                // Same \x7f sink as the empty case below, so an untagged file
-                // ties with a folder instead of sorting above every album.
+                // The same \x7f sink as the empty case below, so an untagged
+                // file ties with a folder instead of sorting above every album.
                 let head = if album.is_empty() { "\x7f" } else { album };
                 let track = match info.and_then(|i| i.track_no.as_deref()).and_then(|n| n.trim().parse::<u32>().ok()) {
                     Some(n) => format!("{n:06}"),
@@ -409,7 +404,7 @@ pub fn sort_key(e: &Entry, info: Option<&TrackInfo>, col: usize) -> String {
             }
         }
         3 => {
-            // Duration: zero-padded milliseconds, or ~ for missing (sorts last)
+            // Duration: zero-padded ms, or ~ for missing (sorts last)
             if e.is_dir {
                 "~".to_string()
             } else if let Some(d) = info.and_then(|i| i.duration) {
@@ -420,16 +415,15 @@ pub fn sort_key(e: &Entry, info: Option<&TrackInfo>, col: usize) -> String {
         }
         _ => e.path.file_name().and_then(|s| s.to_str()).unwrap_or_default().to_string(),
     };
-    // Prefix empty strings with \x7f (DEL) so they sort after normal content
+    // \x7f (DEL) prefixes an empty string so it sorts after normal content
     if s.is_empty() { format!("\x7f{}", s) } else { s.to_lowercase() }
 }
 
-/// Fixed user-folder shortcuts (Home + XDG user dirs) shown above the
-/// Favorites list in the Library pane. Missing dirs are skipped; dupes (e.g.
-/// Music == Home) are dropped.
+/// Home + XDG user dirs, shown above Favorites. Missing dirs skipped, dupes
+/// (e.g. Music == Home) dropped.
 ///
-/// Free function, not a `TPlayApp` method: it reads no app state, and it
-/// belongs next to the rest of the folder-listing code.
+/// A free function, not a `TPlayApp` method: it reads no app state and belongs
+/// next to the rest of the folder-listing code.
 pub fn quick_folders() -> Vec<(String, PathBuf)> {
     let mut v: Vec<(String, PathBuf)> = Vec::new();
     if let Some(h) = dirs::home_dir() {
@@ -449,15 +443,15 @@ pub fn quick_folders() -> Vec<(String, PathBuf)> {
     v
 }
 
-/// The Library pane's browsing state: the current folder, its rows, the sort,
-/// the bookmarks and the hidden-folder toggle.
+/// The Library pane's browsing state: current folder, rows, sort, bookmarks,
+/// hidden-folder toggle.
 ///
-/// Six `TPlayApp` fields, and the awkward part was not the fields but that the
-/// list could not be exercised without an app: `navigate_to` also kicks off a
-/// tag scan, so the *state* was welded to the *effect*. Splitting them means
-/// `open` is a pure function of a directory — it lists, sorts, and hands back
-/// the paths that need scanning — and the caller (`TPlayApp::navigate_to`) does
-/// the scanning. That is what makes this testable headless.
+/// Six `TPlayApp` fields, and the awkward part was never the fields but that the
+/// list could not be exercised without an app: `navigate_to` also kicks off a tag
+/// scan, so the *state* was welded to the *effect*. Splitting them makes `open` a
+/// pure function of a directory — it lists, sorts, and hands back the paths that
+/// need scanning — and leaves the scanning to `TPlayApp::navigate_to`. That is
+/// what makes this testable headless.
 ///
 /// The shared `tag_cache` stays in the app: the Playlist and Now Playing panes
 /// read it too, so it is not the Library's to own.
@@ -551,7 +545,7 @@ impl LibraryState {
     }
 
     /// Show or hide dot-prefixed folders, reporting whether it changed. The
-    /// caller re-lists on a change; the rows themselves are not touched here.
+    /// caller re-lists on a change; the rows are not touched here.
     pub fn set_show_hidden(&mut self, show: bool) -> bool {
         if self.show_hidden == show {
             return false;

@@ -67,8 +67,8 @@ fn apply_min_pane_sizes(
 
 fn default_tree() -> DockState<Pane> {
     let mut d = DockState::new(vec![Pane::NowPlaying]);
-    // 0.15 ≈ Now Playing's content height on a default-size window. All panes
-    // are Fill, so this is just the starting split — resizable from there.
+    // 0.15 ≈ Now Playing's content height on a default-size window. All panes are
+    // Fill, so this is just the starting split — resizable from there.
     d.main_surface_mut().split_below(NodeIndex::root(), 0.15, vec![Pane::Playlist]);
     d
 }
@@ -139,7 +139,7 @@ impl TabViewer for PaneViewer<'_> {
 
     // The EQ pane sizes its bands to fit the pane width; hide the tab-level
     // scrollbars (egui_dock wraps tab bodies in a ScrollArea by default).
-    // Visualizer does the same (full-rect painting, no scroll).
+    // Visualizer and Album Cover do the same (full-rect painting, no scroll).
     fn scroll_bars(&self, tab: &Pane) -> [bool; 2] {
         match tab {
             Pane::Equalizer | Pane::Visualizer | Pane::AlbumCover => [false, false],
@@ -189,15 +189,16 @@ fn list_layouts(dir: &std::path::Path) -> Vec<PathBuf> {
 
 /// Update the UI for one frame. Called from TPlayApp::update().
 pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
-    // Theme tokens -> egui visuals, every frame so a mid-session switch lands instantly.
+    // Theme tokens -> egui visuals, every frame so a mid-session switch lands
+    // instantly.
     theme::apply(ctx, app.theme());
     // egui selects label text on drag by default; the playlist reorders by
     // dragging track titles, so kill text selection app-wide.
     ctx.style_mut(|s| s.interaction.selectable_labels = false);
 
-    // Load DockState from egui memory (per-session) or disk (first run).
-    // The tree is the single source of truth: which panes are open, their
-    // splits, and their order all live here and persist via dock_layout.json.
+    // Load DockState from egui memory (per-session) or disk (first run). The
+    // tree is the single source of truth: which panes are open, their splits and
+    // their order live here and persist via dock_layout.json.
     let mut tree = ctx.data_mut(|d| d.get_temp::<DockState<Pane>>(egui::Id::new(DOCK_ID)))
         .or_else(|| {
             layout_path().and_then(|p| std::fs::read_to_string(p).ok())
@@ -230,8 +231,8 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
             }
 
             let logo = app.theme_icon(theme::Icon::Logo).cloned();
-            // Window-chrome textures are cloned before the closures below so
-            // they don't have to capture `app` (menu_contents already does).
+            // Window-chrome textures are cloned before the closures below so they
+            // don't have to capture `app` (menu_contents already does).
             let win_close_tex = app.theme_icon(theme::Icon::Remove).cloned();
             let win_max_tex = app.theme_icon(theme::Icon::Maximize).cloned();
             let win_min_tex = app.theme_icon(theme::Icon::Minimize).cloned();
@@ -311,7 +312,7 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
                                 &format!("Remove saved layout \"{stem}\"?"),
                             );
                             // The modal asks before anything happens, so the menu
-                            // can go now — it would otherwise sit open behind it.
+                            // can close now — it would otherwise sit open behind it.
                             ui.close_menu();
                         }
                     });
@@ -349,12 +350,12 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
                     }
                 }
 
-                // No native title bar (decorations off — see main.rs), so the
-                // window controls live here, right-aligned via a right-to-left
-                // flush layout. Within it the platform convention holds: the
-                // first added (Close) lands rightmost, so reading left-to-right
-                // the order is minimize, maximize/restore, close. Icons are
-                // per-theme PNGs (text_primary chrome, ✕ close art).
+                // No native title bar (decorations off — see main.rs), so the window
+                // controls live here, right-aligned via a right-to-left flush
+                // layout. Within it the platform convention holds: the first added
+                // (Close) lands rightmost, so left-to-right the order is minimize,
+                // maximize/restore, close. Icons are per-theme PNGs
+                // (text_primary chrome, ✕ close art).
                 let maximized = ui
                     .ctx()
                     .input(|i| i.viewport().maximized)
@@ -382,8 +383,8 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
             });
         });
 
-    // Each leaf holds exactly one pane, so its tab (a draggable full-width
-    // header strip) doubles as the pane's title bar. No tabbing ever occurs.
+    // Each leaf holds exactly one pane, so its tab (a draggable full-width header
+    // strip) doubles as the pane's title bar. No tabbing ever occurs.
     let mut style = Style::from_egui(ctx.style().as_ref());
     style.tab_bar.fill_tab_bar = true;
 
@@ -403,7 +404,8 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
         .style(style)
         .show(ctx, &mut viewer);
 
-    // Enforce minimum pane sizes after layout (corrects splitter drag / floating window shrink).
+    // Enforce minimum pane sizes after layout: the splitter drag and floating
+    // window resize happen inside `show()` and ignore the pre-show pass.
     let mut corrected = apply_min_pane_sizes(&mut tree, ctx, border_v, border_h);
     // EQ pane minimum width: 10 bands at their minimum width.
     let eq_min_w = ctx.data(|d| d.get_temp::<f32>(egui::Id::new(PANE_CONTENT_W).with(Pane::Equalizer))).unwrap_or(0.0);
@@ -426,7 +428,8 @@ pub fn update_ui(app: &mut TPlayApp, ctx: &egui::Context) {
     // this menu) and drawn + carried out here, above everything.
     dialogs::show(app, &mut tree, ctx);
 
-    // Persist to egui memory (session) + disk (JSON, not RON) — only on change or close.
+    // Persist to egui memory (session) + disk (JSON, not RON) — only on change or
+    // close.
     ctx.data_mut(|d| d.insert_temp(egui::Id::new(DOCK_ID), tree.clone()));
     if let Some(path) = layout_path() {
         let json = serde_json::to_string(&tree).unwrap_or_default();

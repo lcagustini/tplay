@@ -1,11 +1,10 @@
 //! The app's one settings file — `~/.config/tplay/config.json`.
 //!
-//! This module owns the on-disk shape and nothing else: the structs, their
-//! serde defaults, and the read/write. It has no idea what a "theme" or a
-//! "shuffle" *does* — `TPlayApp` builds a `Config` from its own state and
-//! hands it here. That one-way dependency is the point: the fields are
-//! `pub` because they document the format the tests pin, not because the app
-//! reads them back through this module.
+//! Owns the on-disk shape and nothing else: the structs, their serde defaults,
+//! and the read/write. It has no idea what a "theme" or a "shuffle" *does* —
+//! `TPlayApp` builds a `Config` from its own state and hands it over. That
+//! one-way dependency is the point: the fields are `pub` because they document
+//! the format the tests pin, not because the app reads them back through here.
 
 use crate::network;
 use serde::{Deserialize, Serialize};
@@ -14,8 +13,8 @@ use std::sync::{Arc, RwLock};
 
 const FILE: &str = "config.json";
 
-/// Visualizer views (serde'd into config.json `viz_view`). The pane matches
-/// on this; the app just stores/serializes it — same shape as `Pane`.
+/// Visualizer views (serde'd into config.json `viz_view`). The pane matches on
+/// this; the app only stores/serializes it — same shape as `Pane`.
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug, Default)]
 pub enum VizView {
     #[default]
@@ -52,10 +51,9 @@ pub struct Config {
     /// Output buffer size in frames — larger = more underrun slack, more latency.
     #[serde(default = "default_buffer_size")]
     pub buffer_size: u32,
-    /// Ceiling in megabytes for the SMB spool cache. Tagging a share downloads
-    /// whole files, so without a bound the cache (which has no other eviction)
-    /// would grow without limit. Only files playback has never used are
-    /// evicted; a played track is never a candidate.
+    /// Spool cache ceiling in MB. Tagging a share downloads whole files and the
+    /// cache has no other eviction, so without a bound it grows without limit.
+    /// Only never-played files are evicted; a played track is never a candidate.
     #[serde(default = "default_spool_cache_mb")]
     pub spool_cache_mb: u32,
     #[serde(default)]
@@ -85,7 +83,7 @@ pub struct Config {
 fn default_volume() -> f32 { 1.0 }
 fn default_crossfade_secs() -> f32 { 3.0 }
 fn default_buffer_size() -> u32 { 8192 }
-/// 2 GiB of never-played spool. Sized for a laptop with room to spare; raise
+/// 2 GiB of never-played spool, sized for a laptop with room to spare. Raise
 /// `spool_cache_mb` in config.json to keep more of a browsed share on disk.
 fn default_spool_cache_mb() -> u32 { 2048 }
 
@@ -117,21 +115,21 @@ pub const MAX_CROSSFADE_SECS: f32 = 10.0;
 
 /// The user-tunable playback settings, as one owned group.
 ///
-/// This is the live counterpart of the matching `Config` fields: `from_config`
-/// reads them at startup, `write_into` fills them at save time. It exists
-/// because `TPlayApp` had **12** near-identical setters — six of them the same
-/// "if unchanged, return; set; mark dirty" shape — and the clamping lived in
-/// each one separately. Setters here clamp and report whether anything actually
-/// changed, so a caller can skip the dirty-marking entirely when nothing moved.
+/// The live counterpart of the matching `Config` fields: `from_config` reads them
+/// at startup, `TPlayApp::save_config` reads them back at save time. It exists
+/// because `TPlayApp` had **12** near-identical setters — six the same "if
+/// unchanged, return; set; mark dirty" shape — with the clamping duplicated in
+/// each. Setters here clamp and report whether anything changed, so a caller
+/// skips the dirty-marking entirely when nothing moved.
 pub struct Prefs {
     pub viz_view: VizView,
     pub remaining: bool,
     pub gapless: bool,
     pub crossfade: bool,
     pub crossfade_secs: f32,
-    /// Balance (L/R). An `Arc` because `BalanceSource` reads it on every audio
-    /// frame from the audio thread while the GUI writes it — the same live-shared
-    /// shape as `EqShared`. Not a plain `f32` for exactly that reason.
+    /// Balance (L/R). An `Arc` because `BalanceSource` reads it per audio frame on
+    /// the audio thread while the GUI writes it — the same live-shared shape as
+    /// `EqShared`. Not a plain `f32` for exactly that reason.
     balance: Arc<RwLock<f32>>,
 }
 
@@ -142,8 +140,8 @@ impl Prefs {
             remaining: c.remaining,
             gapless: c.gapless,
             crossfade: c.crossfade,
-            // Clamp on load: a hand-edited config.json must not be able to put
-            // a 900-second crossfade (or a negative one) into the fade math.
+            // Clamp on load, so a hand-edited config.json cannot put a
+            // 900-second (or negative) crossfade into the fade math.
             crossfade_secs: c.crossfade_secs.clamp(0.0, MAX_CROSSFADE_SECS),
             balance: Arc::new(RwLock::new(c.balance)),
         }
@@ -222,19 +220,19 @@ pub const CONFIG_SAVE_DEBOUNCE_SECS: f64 = 0.5;
 
 /// Whether config.json should be written right now.
 ///
-/// The debounce exists because every settings setter used to write
-/// immediately, and the widgets that call them — the EQ band's 10 vertical
-/// sliders, volume, balance — fire `resp.changed()` on **every frame of a
-/// drag**. So dragging one band serialized and `fs::write`d the whole file
-/// ~60 times a second, synchronously, on the UI thread.
+/// The debounce exists because every settings setter used to write immediately,
+/// and the widgets that call them — the EQ pane's 10 vertical sliders, volume,
+/// balance — fire `resp.changed()` on **every frame of a drag**. Dragging one
+/// band serialized and `fs::write`d the whole file ~60×/sec, synchronously, on
+/// the UI thread.
 ///
-/// Pure and time-injected so the policy is testable without an eframe
-/// `Context`: `now` and `last_save` are both seconds on the same clock
+/// Pure and time-injected so the policy is testable without an eframe `Context`:
+/// `now` and `last_save` are both seconds on the same clock
 /// (`ctx.input(|i| i.time)`), and `closing` is `close_requested()`.
 ///
-/// The `closing` branch is the counterpart to the debounce — it costs at most
-/// `debounce` seconds of settings on a hard kill, which the close flush buys
-/// back. This is the same shape `gui/coordinator.rs` uses for dock_layout.json.
+/// `closing` is the counterpart to the debounce: it costs at most one debounce
+/// window of settings on a hard kill, which the close flush buys back. Same
+/// shape `gui/coordinator.rs` uses for dock_layout.json.
 pub fn should_flush(dirty: bool, now: f64, last_save: f64, closing: bool) -> bool {
     if !dirty {
         return false;

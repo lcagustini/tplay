@@ -1,14 +1,13 @@
 //! Built-in SMB browsing client — pure Rust (smb2 crate), no system mount.
-//! Remote tracks are modelled as `smb://host/share/rel/path` URIs carried in
-//! the playlist as PathBufs. Playback is **spool-then-play** ("materialize"):
-//! the file is downloaded to the spool cache dir before playback, so the
-//! audio pipeline (rodio) never touches the network.
+//! Remote tracks are `smb://host/share/rel/path` URIs carried in the playlist
+//! as PathBufs. Playback is **spool-then-play**: the file is downloaded to the
+//! spool cache first, so rodio never touches the network.
 //!
-//! A single background worker thread owns a tokio current-thread runtime and
-//! processes `SmbCmd`s sequentially (shares list / dir list / spool / save /
-//! tag headers). Replies come back over a std mpsc channel the app drains every
-//! frame — the same pattern as the library tag scan. Passwords live only
-//! inside a command and are dropped after use; nothing is persisted.
+//! One background worker thread owns a tokio current-thread runtime and
+//! processes `SmbCmd`s sequentially (shares/dir list, spool, save, tags).
+//! Replies come back over a std mpsc the app drains every frame — the same
+//! pattern as the library tag scan. Passwords live only inside a command and
+//! are dropped after use; nothing is persisted.
 
 use crate::library::TrackInfo;
 use serde::{Deserialize, Serialize};
@@ -20,16 +19,15 @@ use std::thread;
 /// SMB default port (protocol constant, like HTTP's 80).
 pub const SMB_PORT: u16 = 445;
 
-/// How many times a remote track's tag fetch may be attempted before the app
-/// gives up on it for the session. Failures (server down, expired credentials,
-/// a permissions problem) are retried because they are usually transient, but
-/// not forever: the browser asks for every uncached track each frame, so an
-/// unbounded retry would re-queue a dead server 60 times a second. Three
-/// attempts spans a momentary blip without becoming a spin.
+/// Tag-fetch attempts before the app gives up on a track for the session.
+/// Failures (server down, expired credentials, permissions) are usually
+/// transient so they are retried — but not forever: the browser re-asks for
+/// every uncached track each frame, so an unbounded retry would re-queue a dead
+/// server 60×/sec. Three spans a momentary blip without becoming a spin.
 pub const TAG_ATTEMPTS_MAX: u8 = 3;
 
-/// One cached spool file, for eviction bookkeeping. `played` is set once
-/// playback has consumed the file; only unmarked entries are ever evicted.
+/// One cached spool file, for eviction bookkeeping. Only unmarked entries are
+/// ever evicted.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CacheEntry {
     /// Spool key — the file's stem in the cache dir, no extension.
@@ -38,13 +36,12 @@ pub struct CacheEntry {
     pub played: bool,
 }
 
-/// Choose which cached files to delete to bring the cache under `budget`.
+/// Which cached files to delete to bring the cache under `budget`.
 ///
-/// Largest-unmarked-first, and **never a played file**: playback is the one
-/// thing that must not be undone by housekeeping, so the worst outcome of a
-/// wrong decision here is a re-download, not a broken play. `entries` may be in
-/// any order; the result is a set of keys to remove. Pure, so the rule is
-/// testable without a cache dir or a network.
+/// Largest-unmarked-first, and **never a played file**: housekeeping must not
+/// undo playback, so the worst outcome of a wrong call is a re-download, not a
+/// broken play. `entries` may be in any order; the result is keys to remove.
+/// Pure, so the rule is testable without a cache dir or network.
 pub fn select_evictions(entries: &[CacheEntry], budget: u64) -> Vec<String> {
     let mut total: u64 = entries.iter().map(|e| e.size).sum();
     if total <= budget {
@@ -71,8 +68,8 @@ pub struct RemoteEntry {
     pub is_dir: bool,
 }
 
-/// Credentials for one SMB connection. Empty username/password = guest.
-/// There is deliberately no `Default`: passwords must be explicit.
+/// Credentials for one SMB connection. Empty username/password = guest. No
+/// `Default` on purpose: passwords must be explicit.
 #[derive(Clone, Debug)]
 pub struct SmbCreds {
     pub username: String,
@@ -137,53 +134,49 @@ pub enum Event {
 /// open, the last listing, and its in-flight/error status.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct NetworkBrowse {
-    /// Bare hostname/IP of the selected server.
+    /// Bare hostname/IP, not a URI.
     pub host: String,
-    /// Current share (None = browsing the server's shares).
+    /// Current share (None = at the shares stage).
     pub share: Option<String>,
     /// Share-relative directory path ("" = share root).
     pub rel: String,
-    /// Last listing for the current share/dir.
     pub entries: Vec<RemoteEntry>,
-    /// True while a listing request is in flight.
     pub busy: bool,
-    /// Last listing error, if any.
     pub error: Option<String>,
 }
 
-/// All SMB network state + worker channels, owned by the app as one object.
-/// Pure state — persistence (`config.json` servers) and playback are the app's
-/// job; the GUI reaches in through `TPlayApp::network()`/`network_mut()`.
+/// All SMB network state + worker channels, as one object. Pure state —
+/// persistence and playback are the app's job; the GUI reaches in through
+/// `TPlayApp::network()`/`network_mut()`.
 pub struct Network {
     servers: Vec<ServerCfg>,
     /// Session-memory passwords keyed by host — never persisted.
     passwords: HashMap<String, String>,
     browse: Option<NetworkBrowse>,
     /// A remote track waiting on its spool (its `smb://` URI). The app set
-    /// `current_index` before requesting, so the spooled file plays into it.
+    /// `current_index` first, so the spooled file plays into it.
     pending: Option<PathBuf>,
     /// A remote `.tplay` waiting on its download. Separate from `pending` so
-    /// reading a playlist can never displace a track that is still spooling
-    /// (and vice versa) — one slot each, one request each.
+    /// reading a playlist can never displace a track still spooling, or vice
+    /// versa.
     fetch_req: Option<String>,
-    /// A playlist write to a share is in flight. No stale-check needed (the
-    /// app acts on every reply), but it must keep frames coming so the reply
-    /// is drained and the share listing refreshes.
+    /// A playlist write to a share is in flight. No stale check needed (the app
+    /// acts on every reply), but it must keep frames coming so the reply is
+    /// drained and the listing refreshes.
     saving: bool,
-    /// Remote URIs with a tag request **in flight**. The app asks every frame
-    /// for whatever is missing from its cache, so without this the same
+    /// Remote URIs with a tag request **in flight**. Without this the same
     /// directory's uncached files would be re-queued continuously while the
-    /// first batch runs. Also what `busy()` and the progress count read — kept
-    /// strictly separate from `tag_attempts` because a *retained* failure must
-    /// not make the app repaint forever.
+    /// first batch runs, since the app asks every frame for whatever is
+    /// missing. Also what `busy()` and the progress count read — kept strictly
+    /// separate from `tag_attempts` so a *retained* failure cannot pin `busy()`
+    /// true and spin the repaint forever.
     tagging: HashSet<String>,
-    /// How many times each failing track has been asked for. Cleared on
-    /// success; a track that reaches `TAG_ATTEMPTS_MAX` is not asked again this
-    /// session. Without a bound, the per-frame ask would re-queue a dead server
-    /// or a wrong password 60 times a second, indefinitely.
+    /// How many times each failing track has been asked for. Cleared on success;
+    /// at `TAG_ATTEMPTS_MAX` the track is not asked again this session. The
+    /// bound is what stops the per-frame ask re-queueing a dead server or a
+    /// wrong password 60×/sec, indefinitely.
     tag_attempts: HashMap<String, u8>,
-    /// Spool keys that playback has consumed. Only unmarked cache files are
-    /// eviction candidates, so a played track is never deleted by housekeeping.
+    /// Spool keys playback has consumed — the eviction exemption.
     played: HashSet<String>,
     cmd_tx: Sender<SmbCmd>,
     /// Cloned into every command so replies flow back to `reply_rx`.
@@ -254,11 +247,11 @@ impl Network {
         self.pending.as_deref()
     }
 
-    /// True while the worker owes us something (a spool, a playlist fetch or
-    /// save, a tag batch, or a listing). Drives `request_repaint`, so anything
-    /// in flight must show up here or its reply sits undrained. Reads only
-    /// *in-flight* state — never `tag_attempts`, whose retained failures would
-    /// otherwise pin this true and spin the event loop forever.
+    /// True while the worker owes us something (spool, playlist fetch/save, tag
+    /// batch, listing). Drives `request_repaint`, so anything in flight must
+    /// show up here or its reply sits undrained. Reads only *in-flight* state —
+    /// never `tag_attempts`, whose retained failures would pin this true and
+    /// spin the event loop forever.
     pub fn busy(&self) -> bool {
         self.pending.is_some()
             || self.fetch_req.is_some()
@@ -282,11 +275,11 @@ impl Network {
 
     /// Delete never-played cache files until the spool dir fits `budget` bytes.
     ///
-    /// Tagging downloads a whole share's worth of files, so without a ceiling
-    /// the cache (which has no other eviction) would grow without bound. Played
-    /// files are never candidates: losing one costs a re-download, and that is
-    /// the only acceptable failure mode here. Called after a tag batch lands,
-    /// not per frame — it walks the directory.
+    /// Tagging downloads a whole share's worth of files and the cache has no
+    /// other eviction, so without a ceiling it grows without bound. Played
+    /// files are never candidates: losing one costs a re-download, the only
+    /// acceptable failure mode here. Per tag batch, not per frame — it walks
+    /// the directory.
     pub fn evict_unplayed(&mut self, budget: u64) {
         let dir = spool_dir();
         let entries: Vec<CacheEntry> = match std::fs::read_dir(&dir) {
@@ -306,8 +299,8 @@ impl Network {
             Err(_) => return,
         };
         for key in select_evictions(&entries, budget) {
-            // `key` is the cache file's stem; it was written with its extension
-            // so match on the stem rather than assuming a name.
+            // `key` is the file's stem: it was written with an extension, so
+            // match on the stem rather than assuming a name.
             if let Some(path) = std::fs::read_dir(&dir)
                 .into_iter()
                 .flatten()
@@ -385,11 +378,11 @@ impl Network {
         self.pending = Some(uri.clone());
         let uri_str = uri.to_string_lossy().into_owned();
         // A spool requested here is one the user asked to *hear*, so its cache
-        // file is exempt from eviction for the rest of the session — including
-        // while the download is still in flight, so a large track is never
-        // evicted out from under the play request that asked for it. Tag-driven
-        // spools go through `fetch_tags` instead, which is what leaves those
-        // files evictable. The failure mode is a re-download, never a broken play.
+        // file is exempt for the rest of the session — including mid-download,
+        // so a large track is never evicted out from under the play request
+        // that asked for it. Tag-driven spools go via `fetch_tags` instead,
+        // which is what leaves those files evictable. Failure mode: a
+        // re-download, never a broken play.
         self.mark_played(&uri_str);
         let host = split_uri(&uri_str).map(|(h, _, _)| h).unwrap_or_default();
         self.send(SmbCmd::Spool {
@@ -405,10 +398,10 @@ impl Network {
         self.pending = None;
     }
 
-    /// Download a remote `.tplay` so the app can read it. Deliberately does
-    /// NOT touch `pending`: that slot belongs to playback, and reading a
-    /// playlist must not cancel (or be cancelled by) a track download.
-    /// Re-requesting the same or another playlist supersedes the first.
+    /// Download a remote `.tplay` so the app can read it. Deliberately does NOT
+    /// touch `pending`: that slot belongs to playback, so reading a playlist
+    /// must not cancel — or be cancelled by — a track download. Re-requesting
+    /// supersedes the first.
     pub fn fetch(&mut self, uri: String) {
         self.fetch_req = Some(uri.clone());
         let host = split_uri(&uri).map(|(h, _, _)| h).unwrap_or_default();
@@ -434,16 +427,14 @@ impl Network {
 
     /// Ask for the tags of remote tracks. Three filters, in order:
     ///
-    /// 1. Already outstanding — the caller re-asks for everything uncached
-    ///    every frame, so without this a running batch would be re-queued
-    ///    continuously.
-    /// 2. Already succeeded `TAG_ATTEMPTS_MAX` times — a track that cannot be
-    ///    read (dead server, wrong credentials) is given up on for the session
-    ///    rather than retried 60 times a second.
+    /// 1. Already outstanding — the caller re-asks for everything uncached every
+    ///    frame, so without this a running batch would be re-queued forever.
+    /// 2. Already attempted `TAG_ATTEMPTS_MAX` times — an unreadable track
+    ///    (dead server, wrong credentials) is given up on for the session rather
+    ///    than retried 60×/sec.
     /// 3. Grouped by host, because credentials are per-command: a playlist
     ///    mixing two NAS boxes must not send one box's password to the second.
-    ///    The usual case (one directory listing, or one share's playlist) is a
-    ///    single group and so a single command.
+    ///    The usual case (one listing, one share's playlist) is a single command.
     pub fn fetch_tags(&mut self, uris: Vec<String>) {
         let mut by_host: HashMap<String, Vec<String>> = HashMap::new();
         for uri in uris {
@@ -468,10 +459,10 @@ impl Network {
         }
     }
 
-    /// Drain worker replies into the browse state. Returns the one event the
-    /// app must act on (a spool completing for the still-pending track);
-    /// browse listings are applied internally and stale replies are dropped
-    /// by host/uri match, so nothing else leaks out.
+    /// Drain worker replies into the browse state, returning the one event the
+    /// app must act on (a spool completing for the still-pending track). Browse
+    /// listings apply internally; stale replies drop by host/uri match, so
+    /// nothing else leaks out.
     pub fn drain(&mut self) -> Option<Event> {
         while let Ok(reply) = self.reply_rx.try_recv() {
             match reply {
@@ -501,8 +492,8 @@ impl Network {
                     }
                 }
                 SmbReply::Spooled { uri, result } => {
-                    // Playback wins: a track download is promoted to the sink
-                    // the moment it lands, so it must not wait behind a fetch.
+                    // Playback wins: a track is promoted to the sink the moment
+                    // it lands, so it must not wait behind a fetch.
                     let is_pending = self
                         .pending
                         .as_ref()
@@ -511,9 +502,8 @@ impl Network {
                         self.pending = None;
                         return Some(Event::Spooled { uri, result });
                     }
-                    // Otherwise it may be a playlist download. A stale reply —
-                    // the user clicked another `.tplay` in the meantime — is
-                    // dropped against the slot.
+                    // Otherwise a playlist download. A stale reply (the user
+                    // clicked another `.tplay` meanwhile) drops against the slot.
                     if self.fetch_req.as_deref() == Some(uri.as_str()) {
                         self.fetch_req = None;
                         return Some(Event::Fetched { uri, result });
@@ -526,11 +516,10 @@ impl Network {
                 SmbReply::Tags { results } => {
                     for (uri, res) in &results {
                         self.tagging.remove(uri);
-                        // Success clears the strike count so a later cache
-                        // eviction can re-fetch it fresh. A failure keeps it —
-                        // that count is what eventually gives up, and the
-                        // track's absence from the tag cache is what makes it
-                        // retryable in the first place.
+                        // Success clears the strike count, so a later cache
+                        // eviction re-fetches fresh. A failure keeps it: that
+                        // count is what eventually gives up, and the track's
+                        // absence from the tag cache is what makes it retryable.
                         if res.is_ok() {
                             self.tag_attempts.remove(uri);
                         }
@@ -568,12 +557,10 @@ pub fn split_uri(uri: &str) -> Option<(String, Option<String>, String)> {
 }
 
 /// Parse what the add-server field accepts: a bare `host`, `host/share`, or a
-/// full `smb://host/share[/dir]` URI (the scheme is optional). Returns the host
-/// to save, plus the share/relative path to open directly when the input named
-/// one — jumping straight into a share skips share enumeration entirely, which
-/// is what GNOME Files does and is the only way in on servers that need it.
-///
-/// `None` for empty input.
+/// full `smb://host/share[/dir]` URI (scheme optional). Returns the host to
+/// save plus the share/rel to open directly when the input named one — jumping
+/// straight into a share skips share enumeration entirely, which is what GNOME
+/// Files does and the only way in on servers that require it. `None` if empty.
 pub fn parse_server_input(input: &str) -> Option<(String, Option<String>, String)> {
     let raw = input.trim().trim_start_matches("smb://").trim();
     if raw.is_empty() {
@@ -602,10 +589,10 @@ pub fn child_uri(parent: &str, name: &str) -> String {
 /// `smb://h/share/dir`. Inverse of `child_uri`; the base a remote playlist's
 /// relative entries resolve against.
 ///
-/// Returns the input unchanged when there is no directory part to take. The
-/// guard is that the result is still a host-bearing URI, not merely non-empty:
-/// a bare `smb://host` splits at its last slash into `"smb:/"`, which is
-/// non-empty but would resolve relative entries onto garbage.
+/// Returns the input unchanged when there is no directory part. The guard tests
+/// that the result is still a host-bearing URI, not merely non-empty: a bare
+/// `smb://host` splits at its last slash into `"smb:/"`, non-empty but garbage
+/// to resolve against.
 pub fn uri_parent(uri: &str) -> &str {
     match uri.rsplit_once('/') {
         Some((parent, _)) if parent.strip_prefix("smb://").is_some_and(|r| !r.is_empty()) => {
@@ -619,8 +606,8 @@ pub fn uri_parent(uri: &str) -> &str {
 // ── Spool cache ──────────────────────────────────────────────────────────────
 
 /// FNV-1a 64-bit — hand-rolled because `DefaultHasher`'s algorithm is
-/// unspecified across Rust releases (a cache filename must be stable). Same
-/// "no dependency for a tiny hash" convention as app.rs's XorShift64 RNG.
+/// unspecified across Rust releases, and a cache filename must be stable. Same
+/// "no dep for a tiny hash" convention as app.rs's XorShift64 RNG.
 pub fn fnv1a64(s: &str) -> u64 {
     let mut h = 0xcbf2_9ce4_8422_2325u64;
     for b in s.as_bytes() {
@@ -643,8 +630,8 @@ pub fn spool_dir() -> PathBuf {
         .join("smb")
 }
 
-/// Pure: cache path for `uri` inside a given spool dir (tests inject the dir).
-/// Extension is kept from the URI so rodio's decoder can sniff the format.
+/// Cache path for `uri` in a given spool dir (tests inject it). The extension
+/// is kept from the URI so rodio can sniff the format.
 pub fn cache_path_in(uri: &str, dir: &Path) -> PathBuf {
     let key = spool_key(uri);
     match Path::new(uri).extension().and_then(|e| e.to_str()).filter(|e| !e.is_empty()) {
@@ -672,8 +659,8 @@ fn spawn_worker(rx: Receiver<SmbCmd>) -> thread::JoinHandle<()> {
             }
         };
         rt.block_on(async move {
-            // Sequential processing: browse clicks are paced by the user and a
-            // spool is the one long op, so a per-command connection is fine.
+            // Sequential: browse clicks are user-paced and a spool is the one
+            // long op, so a per-command connection is fine.
             while let Ok(cmd) = rx.recv() {
                 match cmd {
                     SmbCmd::ListShares { host, creds, reply } => {
@@ -718,8 +705,8 @@ async fn connect(host: &str, creds: &SmbCreds) -> CmdResult<smb2::SmbClient> {
 async fn run_list_shares(host: &str, creds: &SmbCreds) -> CmdResult<Vec<RemoteEntry>> {
     let mut client = connect(host, creds).await?;
     let shares = client.list_shares().await.map_err(|e| e.to_string())?;
-    // Disk shares (STYPE_DISKTREE) only — skip IPC$, print queues, and the
-    // hidden ADMIN$/C$ special shares a server can expose.
+    // Disk shares (STYPE_DISKTREE) only — skips IPC$, print queues and the
+    // hidden ADMIN$/C$ a server can expose.
     Ok(shares
         .into_iter()
         .filter(|s| s.share_type & 0x0000_FFFF == 0)
@@ -735,29 +722,27 @@ async fn run_list_dir(uri: &str, creds: &SmbCreds) -> CmdResult<Vec<RemoteEntry>
     let entries = client.list_directory(&mut tree, &rel).await.map_err(|e| e.to_string())?;
     Ok(entries
         .into_iter()
-        // Servers commonly include `.` and `..` in a directory listing. They are
-        // navigation artifacts, not content: they pass the `is_dir` filter and
-        // become real folder rows, and browsing one produces a URI with a `.`
-        // segment the server then rejects. Dropped here, at the source, so no
-        // consumer has to know — including the folder count in the header.
+        // Servers commonly include `.` and `..`. They are navigation artifacts,
+        // not content: they pass the `is_dir` filter, become real folder rows
+        // and inflate the folder count, and browsing one produces a URI with a
+        // `.` segment the server rejects. Dropped at the source so no consumer
+        // has to know.
         .filter(|e| !is_self_or_parent(&e.name))
         .map(|e| RemoteEntry { name: e.name, size: e.size, is_dir: e.is_directory })
         .collect())
 }
 
-/// Is this listing entry the `.` / `..` navigation artifact? Not a general
-/// "is hidden" test: a real folder named `.config` is content and is left
-/// alone (the share browser has no "show hidden" toggle, so hiding dot-names
-/// wholesale would make such folders unreachable).
+/// Is this listing entry the `.` / `..` artifact? **Not** a general "is hidden"
+/// test: a real `.config` folder is content and stays reachable, because the
+/// share browser has no "show hidden" toggle to reveal it with.
 pub fn is_self_or_parent(name: &str) -> bool {
     name == "." || name == ".."
 }
 
 /// Download `uri` to its spool cache path. Already cached → return immediately.
 /// Full-file pipelined read, then one write.
-/// ponytail: whole file is buffered in RAM — fine for tracks (≤ a few hundred
-/// MB); switch to the streaming `FileDownload`/write-behind path if ever
-/// spooling multi-GB files.
+/// ponytail: whole file buffered in RAM — fine for tracks (≤ a few hundred MB);
+/// switch to streaming `FileDownload`/write-behind if ever spooling multi-GB.
 async fn run_spool(uri: &str, creds: &SmbCreds) -> CmdResult<PathBuf> {
     let dest = cache_path(uri);
     if dest.is_file() {
@@ -795,18 +780,17 @@ async fn run_save(uri: &str, data: &[u8], creds: &SmbCreds) -> CmdResult<()> {
 
 /// Spool a batch of tracks and read their tags from the spooled copies.
 ///
-/// This downloads the **whole file** rather than a header prefix, and that is
-/// deliberate: it is the only way a remote row can match a local one. A prefix
-/// cannot serve every format — WAV needs its complete `data` chunk, M4A's
-/// `moov` atom usually sits at the end, and FLAC/MP3 tag blocks vary in size —
-/// so header reads left rows as filenames unpredictably. A prefix also cannot
-/// give a true *duration*: lofty derives that from the bytes it is handed, so it
-/// returns a value proportional to the prefix (measured: 64 KB of a 7.8 s track
-/// reported 4.1 s), which is worse than none.
+/// **Whole file**, not a header prefix — deliberate, because it is the only way
+/// a remote row can match a local one. A prefix cannot serve every format (WAV
+/// needs its complete `data` chunk, M4A's `moov` usually sits at the end, FLAC
+/// and MP3 tag blocks vary in size), so header reads left rows as filenames
+/// unpredictably. Nor can a prefix give a true *duration*: lofty derives it
+/// from the bytes it is handed, so it returned a value proportional to the
+/// prefix (measured: 64 KB of a 7.8 s track reported 4.1 s) — worse than none.
 ///
-/// The download is not wasted: `run_spool` writes into the same spool cache
-/// playback reads, so playing the track afterwards is a cache hit rather than a
-/// second transfer, and an already-cached file skips the network entirely.
+/// Not wasted: `run_spool` writes into the cache playback reads, so playing
+/// the track afterwards is a cache hit, and an already-cached file skips the
+/// network entirely.
 ///
 /// Never fails as a batch: one unreadable track returns its `Err` and the rest
 /// still get their tags.

@@ -2,8 +2,8 @@
 //!
 //! The local folder browser and the SMB browser navigate differently but look
 //! the same, so the *only* thing shared is the widget: `breadcrumb` renders
-//! whatever `Seg`s it is handed, and the two builders below differ solely in
-//! which segments they produce and what a click means.
+//! whatever `Seg`s it is handed, and the two builders differ solely in which
+//! segments they produce and what a click means.
 
 use super::dir_name;
 use crate::app::TPlayApp;
@@ -15,9 +15,9 @@ use std::path::{Path, PathBuf};
 /// Cap on one segment's width, so a long name truncates instead of shoving the
 /// ★ toggle (or Add All) off the pane edge.
 const SEG_MAX_W: f32 = 70.0;
-/// Approx. width of one character in a segment label, plus its padding. The
-/// label has a fixed size rather than being measured, which is what the
-/// truncation cap depends on.
+/// Approx. width of one character in a segment label, plus its padding. The label
+/// has a fixed size rather than being measured, which is what the truncation cap
+/// depends on.
 const SEG_CHAR_W: f32 = 8.0;
 const SEG_PAD_W: f32 = 6.0;
 /// Height of one segment — the row the whole header sits on.
@@ -61,17 +61,17 @@ pub enum Step {
 
 /// Which segments a breadcrumb of `n` draws, in order.
 ///
-/// Pure, and the whole of the `…` rule, so it is testable without an
-/// `egui::Ui`: the three real cases — a deep local path, the share-list stage, a
-/// deep share path — differ only in `n` and `always`.
+/// Pure, and the whole of the `…` rule, so it is testable without an `egui::Ui`:
+/// the three real cases — a deep local path, the share-list stage, a deep share
+/// path — differ only in `n` and `always`.
 ///
 /// `always` is how many leading segments are exempt from collapsing, and it is
 /// the one thing that differs per source: 1 locally (just the filesystem root)
-/// and 3 on a share (`Local` / host / share), because those three are the way
-/// back out to a bigger scope. With `always = 1` for both, a deep share path
-/// loses its route to the share root — a dead end, with no `..` row to fall back
-/// on. The share-list stage is only 2 segments, so it sits under `always`
-/// entirely and the "Local" exit can never collapse away.
+/// and 3 on a share (`Local` / host / share), because those three are the way back
+/// out to a bigger scope. With `always = 1` for both, a deep share path loses its
+/// route to the share root — a dead end, with no `..` row to fall back on. The
+/// share-list stage is only 2 segments, so it sits under `always` entirely and the
+/// "Local" exit can never collapse away.
 pub fn plan(n: usize, always: usize) -> Vec<Step> {
     let mut steps = Vec::with_capacity(n);
     for i in 0..n {
@@ -89,7 +89,7 @@ pub fn plan(n: usize, always: usize) -> Vec<Step> {
 /// Draws the breadcrumb and returns the segment that was clicked, if any.
 ///
 /// Source-agnostic: no branch here knows about local paths or SMB URIs — the
-/// collapsing is `plan`'s, and the segments themselves come from `local_segs` or
+/// collapsing is `plan`'s, and the segments come from `local_segs` or
 /// `remote_segs`. The `…` is a plain label, so the segments it hides are not
 /// reachable from it.
 fn breadcrumb<'a>(ui: &mut egui::Ui, p: theme::Palette, segs: &'a [Seg], always: usize) -> Option<&'a Seg> {
@@ -178,8 +178,8 @@ pub fn local_header(app: &mut TPlayApp, ui: &mut egui::Ui, theme: &theme::Theme)
 pub fn remote_header(app: &mut TPlayApp, ui: &mut egui::Ui, theme: &theme::Theme, browse: &network::NetworkBrowse) {
     let segs = remote_segs(browse);
     // 3 = Local / host / share, so a deep directory still has a way back to the
-    // share root. At the share-list stage there are only 2 segments, which is
-    // under `always` and therefore always shown — the exit never disappears.
+    // share root. The share-list stage is only 2 segments, under `always` and so
+    // always shown — the exit never disappears.
     if let Some(seg) = breadcrumb(ui, theme.palette, &segs, 3) {
         apply(app, seg);
     }
@@ -208,8 +208,8 @@ pub fn local_segs(dir: &Path) -> Vec<Seg> {
 
 pub fn remote_segs(browse: &network::NetworkBrowse) -> Vec<Seg> {
     let seg = |label: String, action: Action| Seg { label, action, hover: None };
-    // "Local" is the exit back to the folder browser; at the share-list stage
-    // it is the only way out, so it is segment 0 and never collapsed away.
+    // "Local" is the exit back to the folder browser; at the share-list stage it
+    // is the only way out, so it is segment 0 and never collapsed away.
     let mut segs = vec![seg(String::from("Local"), Action::LeaveNetwork)];
     segs.push(seg(browse.host.clone(), Action::BrowseServer(browse.host.clone())));
     let Some(share) = &browse.share else { return segs };

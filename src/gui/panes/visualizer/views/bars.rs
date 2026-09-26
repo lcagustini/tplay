@@ -5,8 +5,8 @@ use crate::audio::viz::{compute_bands, VizBuf, VIZ_BANDS};
 use crate::gui::theme::Palette;
 use eframe::egui;
 
-/// egui memory id for the previous (smoothed) band values — per-view frame
-/// state, private to this view.
+/// egui memory id for the previous (smoothed) band values — this view's private
+/// per-frame state.
 fn prev_id() -> egui::Id {
     egui::Id::new("tplay.viz.prev.bars")
 }
@@ -38,7 +38,7 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &P
         let w = (bar_w * 0.8).max(1.0);
         let gap = bar_w - w;
 
-        // Mirrored: draw up and down from center
+        // Mirrored: up and down from center
         let top = mid_y - h;
         let bottom = mid_y + h;
 

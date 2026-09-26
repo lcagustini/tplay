@@ -1,21 +1,21 @@
-//! Album Cover pane — the currently playing track's art (embedded tag picture,
-//! else `folder.jpg`/`cover.jpg` beside the file), letterboxed into the pane.
-//! The decoded texture is cached in egui memory keyed by the track's path, so
-//! a track without art reads nothing until the track changes. No art at all →
-//! the theme's `nocover` placeholder icon.
+//! Album Cover pane — the playing track's art (embedded tag picture, else
+//! `folder.jpg`/`cover.jpg` beside the file), letterboxed into the pane. The
+//! decoded texture is cached in egui memory keyed by the track's path, so an
+//! artless track reads nothing until the track changes. No art at all → the
+//! theme's `nocover` placeholder icon.
 
 use crate::app::TPlayApp;
 use crate::gui::theme::Icon;
 use crate::tracks;
 use eframe::egui;
 
-/// egui Id for the decoded cover cache: `(path, Option<TextureHandle>)` —
-/// the `None` half caches "checked, no art" so artless tracks don't re-scan.
+/// egui Id for the decoded cover cache: `(path, Option<TextureHandle>)` — the
+/// `None` half caches "checked, no art" so artless tracks don't re-scan.
 fn cover_id() -> egui::Id {
     egui::Id::new("tplay.cover")
 }
 
-/// Cache value: path the texture belongs to, plus the decoded texture.
+/// Cache value: the path the texture belongs to, plus the texture.
 type CoverCache = (String, Option<egui::TextureHandle>);
 
 pub fn album_cover_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
@@ -46,8 +46,8 @@ pub fn album_cover_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
         // Only the embedded picture is available this way. `read_cover`'s
         // sibling-file fallback (`folder.jpg`/`cover.jpg` beside the track) looks
         // beside the *cache* copy, where nothing lives, so folder art on a share
-        // is not picked up — fetching it would mean a second SMB transfer with
-        // its own event plumbing, for a rarer case than embedded art.
+        // is missed — fetching it would mean a second SMB transfer with its own
+        // event plumbing, for a rarer case than embedded art.
         let art = cur.as_deref().and_then(tracks::cover);
         let tex = art.and_then(|bytes| {
             image::load_from_memory(&bytes).ok().map(|img| {
@@ -67,7 +67,7 @@ pub fn album_cover_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
 
     match tex {
         Some(tex) => {
-            // Letterbox: keep aspect ratio, centered, full pane otherwise.
+            // Letterbox: aspect kept, centered, full pane otherwise.
             let size = tex.size_vec2();
             if size.x > 0.0 && size.y > 0.0 {
                 let scale = (rect.width() / size.x).min(rect.height() / size.y);
@@ -81,7 +81,7 @@ pub fn album_cover_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
             }
         }
         None => {
-            // No art: themed placeholder icon, centered at a pane-relative size.
+            // No art: themed placeholder, centered at a pane-relative size.
             let size = rect.width().min(rect.height()) * 0.35;
             let center = rect.center();
             match app.theme_icon(Icon::NoCover) {

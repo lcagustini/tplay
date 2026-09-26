@@ -7,13 +7,13 @@
 //!   3. `./themes/`                 — dev convenience (`cargo run` from repo root)
 //!
 //! Each `theme.json` carries the 14-token palette, `base` (dark/light), and an
-//! optional `metadata_font`. Icons are PNGs under `<theme>/icons/`, per theme,
-//! falling back to the default theme's PNGs, then to unicode glyphs. Selection
-//! persists to `~/.config/tplay/theme.json` (`{"theme":"<id>"}`).
+//! optional `metadata_font`. Icons are per-theme PNGs under `<theme>/icons/`,
+//! falling back to the default theme's, then to unicode glyphs. Selection
+//! persists in the `theme` field of `~/.config/tplay/config.json`.
 //!
-//! `palette()` exposes the tokens for custom painting (playlist rows, metadata
-//! text); `apply()` maps them onto egui `Visuals` each frame so a mid-session
-//! switch lands instantly.
+//! `palette` exposes the tokens for custom painting (playlist rows, metadata);
+//! `apply` maps them onto egui `Visuals` each frame so a mid-session switch
+//! lands instantly.
 
 use eframe::egui::{self, Color32, FontFamily, Stroke, TextureHandle, Vec2};
 use std::path::{Path, PathBuf};
@@ -203,9 +203,8 @@ impl Themes {
         Self::load_from(&theme_dirs())
     }
 
-    /// Scan the given directories (in priority order) and merge by theme id.
-    /// Load all themes found across the given dirs (first dir wins on id
-    /// clash) plus the hardcoded dark fallback.
+    /// Load every theme found across the given dirs (first dir wins an id
+    /// clash), plus the hardcoded dark fallback.
     pub fn load_from(dirs: &[PathBuf]) -> Themes {
         let mut list: Vec<Arc<Theme>> = Vec::new();
         for dir in dirs {
@@ -267,10 +266,10 @@ impl Themes {
     }
 }
 
-/// Decode a theme's icons (own PNG → default theme's PNG) into GPU textures,
-/// one per `Icon::ALL` slot. Missing/undecodable icons are `None` → the panes
-/// render a unicode glyph instead. Synchronous at startup/theme-switch: no
-/// async loader, no pending-placeholder, buttons get exact sizes.
+/// Decode a theme's icons (own PNG → default theme's) into GPU textures, one per
+/// `Icon::ALL` slot. Missing/undecodable → `None`, and the pane draws a glyph.
+/// Synchronous at startup/theme-switch: the async loader path showed
+/// pending/error placeholders and stretched buttons.
 pub fn load_icons(
     ctx: &egui::Context,
     themes: &Themes,
@@ -296,11 +295,11 @@ pub fn load_icons(
 
 /// The selected theme, the list, and the loaded icon textures — one group.
 ///
-/// These were three `TPlayApp` fields, and the awkward part was not the fields:
-/// it was `set_theme`, which had to know that switching a theme means
-/// re-decoding every icon texture, and did it inline. That coupling belongs
-/// next to `load_icons`, not in the app. `set` reports whether anything
-/// actually changed, so the caller can skip marking the config dirty.
+/// These were three `TPlayApp` fields, and the awkward part was never the fields:
+/// it was `set_theme`, which had to know that switching a theme means re-decoding
+/// every icon texture and did it inline. That coupling belongs next to
+/// `load_icons`. `set` reports whether anything changed, so the caller can skip
+/// marking the config dirty.
 pub struct ThemeState {
     current: Arc<Theme>,
     themes: Themes,
@@ -479,10 +478,10 @@ pub fn icon(
     }
 }
 
-/// Map the token palette onto egui's `Visuals`. (egui has no 1:1 token
-/// slots, so nearby fields stand in; the ones that can't be expressed here —
-/// row banding, text-secondary, disabled text — are used directly from
-/// `theme.palette` by the panes.)
+/// Map the token palette onto egui's `Visuals`. (egui has no 1:1 token slots, so
+/// nearby fields stand in; the ones that can't be expressed here — row banding,
+/// text-secondary, disabled text — are read straight from `theme.palette` by the
+/// panes.)
 ///
 ///   --bg              panel_fill / window_fill / extreme_bg_color
 ///   --panel-bg        faint_bg_color / noninteractive.bg_fill
@@ -527,9 +526,9 @@ pub fn apply(ctx: &egui::Context, theme: &Theme) {
 
     ctx.set_visuals(v);
 
-    // Kill widget color cross-fades so a mid-session theme switch lands on the
-    // very next frame (this app's aesthetic is instant, Winamp-style; the
-    // default ~0.08s animation smears token colors across every widget).
+    // Kill widget color cross-fades so a mid-session switch lands on the very
+    // next frame: the aesthetic is instant, Winamp-style, and the default
+    // ~0.08s animation smears token colors across every widget.
     ctx.style_mut(|s| s.animation_time = 0.0);
 }
 
@@ -575,11 +574,11 @@ pub fn install_fallback_fonts(ctx: &egui::Context, candidates: &[&str]) -> bool 
     false
 }
 
-/// Returns (row_rect, child_ui) with banding, accent tint, 3px stripe, and 6px inset.
-/// `i` is the row index for even/odd banding. `is_current` highlights the playing
-/// track: a translucent `row_tint_alpha` accent overlay over the banded bg (keeps
-/// text readable, unlike a gamma-multiplied fill which darkens past the bg) plus
-/// a 3px accent stripe.
+/// `(row_rect, child_ui)` with banding, accent tint, a 3px stripe and 6px inset.
+/// `i` is the row index for even/odd banding. `is_current` marks the playing
+/// track with a translucent `row_tint_alpha` accent overlay over the banded bg —
+/// which keeps text readable, unlike a gamma-multiplied fill that darkens past
+/// the bg — plus the 3px stripe.
 pub fn row(ui: &mut egui::Ui, i: usize, is_current: bool, row_h: f32, theme: &Theme) -> (egui::Rect, egui::Ui) {
     let p = theme.palette;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h), egui::Sense::hover());

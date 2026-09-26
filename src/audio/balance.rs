@@ -1,16 +1,15 @@
 //! Balance (L/R) Source — wraps a rodio Source (f32 samples) and applies
-//! per-channel gain for stereo balance. The balance value lives in an
-//! `Arc<RwLock<f32>>` shared with the GUI thread: dragging the slider updates
-//! the shared value and the running source applies it in `next()` — no sink
-//! rebuild, no audio restart.
+//! per-channel gain. The value lives in an `Arc<RwLock<f32>>` shared with the GUI
+//! thread: dragging the slider updates it and the running source applies it in
+//! `next()` — no sink rebuild, no audio restart.
 
 use rodio::Source;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-/// Convert a balance value (-1.0 = full left, 0.0 = center, 1.0 = full right)
-/// into per-channel gains for a stereo output.
-/// Linear balance law: b ≤ 0 → (left=1.0, right=1.0+b), b ≥ 0 → (left=1.0-b, right=1.0).
+/// Per-channel gains for a stereo output from a balance value (-1.0 = full
+/// left, 0.0 = center, 1.0 = full right).
+/// Linear law: b ≤ 0 → (left=1.0, right=1.0+b), b ≥ 0 → (left=1.0-b, right=1.0).
 /// Center (0) = (1.0, 1.0) exact passthrough.
 pub fn balance_gains(balance: f32) -> (f32, f32) {
     if balance <= 0.0 {
@@ -20,9 +19,9 @@ pub fn balance_gains(balance: f32) -> (f32, f32) {
     }
 }
 
-/// Live-controllable balance source wrapper for f32 samples.
-/// Reads balance from `Arc<RwLock<f32>>` per audio frame and scales channels.
-/// Preserves channel count: mono → stereo (both channels scaled), stereo → first two channels scaled.
+/// Live-controllable balance wrapper for f32 samples: reads the
+/// `Arc<RwLock<f32>>` per audio frame and scales channels. Channel count is
+/// preserved: mono → stereo (both scaled), stereo → first two channels scaled.
 pub struct BalanceSource<S>
 where
     S: Source<Item = f32>,
@@ -52,8 +51,8 @@ where
         let b = *self.balance.read().unwrap();
         if b != self.cached_balance {
             self.cached_balance = b;
-            // Clear any buffered half-frame on balance change to avoid a momentary
-            // channel mismatch (mono→stereo or L/R swap mid-frame).
+            // Drop any buffered half-frame on a balance change, or it mismatches
+            // the channel (mono→stereo, or an L/R swap) mid-frame.
             self.half_frame = None;
         }
     }
@@ -66,14 +65,14 @@ where
     type Item = f32;
 
     fn next(&mut self) -> Option<Self::Item> {
-        // Read balance periodically (per sample is cheap, RwLock read is fast).
+        // Read balance per sample (cheap — RwLock read is fast).
         self.refresh();
 
         let (left_gain, right_gain) = balance_gains(self.cached_balance);
 
-        // Handle stereo (2 channels) or mono (1 channel) input.
-        // Output is always stereo: mono input → both channels get the same sample
-        // scaled by the respective gain; stereo input → first two channels scaled.
+        // Stereo (2 channels) or mono (1) input; output is always stereo — mono
+        // emits the same sample scaled by each gain, stereo scales its first two
+        // channels.
         match self.inner.channels() {
             1 => {
                 // Mono input: emit left then right.
@@ -127,8 +126,8 @@ where
         self.inner.total_duration()
     }
 
-    /// Forward the seek to the decoder; on success drop the half-frame —
-    /// stale buffered sample from before the jump point would click at the seek.
+    /// Forward the seek to the decoder; on success drop the half-frame — a stale
+    /// buffered sample from before the jump point would click at the seek.
     fn try_seek(&mut self, pos: Duration) -> Result<(), rodio::source::SeekError> {
         let res = self.inner.try_seek(pos);
         if res.is_ok() {

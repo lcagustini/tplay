@@ -3,12 +3,12 @@ use crate::gui::theme::{self, Icon, Theme};
 use crate::library;
 use eframe::egui;
 
-/// egui Id for storing the seek slider position in memory
+/// egui memory Id for the seek slider position
 fn seek_id() -> egui::Id {
     egui::Id::new("tplay.seek")
 }
 
-/// Small label with the theme's metadata color + font (monospace in retro).
+/// Label in the theme's metadata color + font (monospace in retro).
 fn meta(s: impl Into<String>, theme: &Theme, size: f32) -> egui::RichText {
     egui::RichText::new(s.into())
         .color(theme.palette.text_secondary)
@@ -16,16 +16,14 @@ fn meta(s: impl Into<String>, theme: &Theme, size: f32) -> egui::RichText {
 }
 
 pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
-    // Owned Arc copy (refcount bump) — lets panes call &mut app while keeping
-    // the theme data; `meta` takes &Theme via deref.
+    // Owned Arc copy — panes take `&mut app` while `meta` needs `&Theme`.
     let theme = app.theme().clone();
     let layout = theme.layout.with_defaults();
 
-    // Now Playing is a Fill pane (dock-sized, resizable — the Fixed pin is
-    // gone), so pad the top to vertically center the controls in the pane.
-    // The pad comes from this pane's measured content height last frame (the
-    // same value the coordinator floors the split at), so it converges one
-    // frame after any pane resize.
+    // Fill pane (dock-sized, resizable — the Fixed pin is gone), so pad the top
+    // to center the controls. The pad comes from last frame's measured content
+    // height (the value the coordinator floors the split at), so it converges
+    // one frame after a resize.
     let content_h_id = egui::Id::new("tplay.pane_content_h").with(crate::app::Pane::NowPlaying);
     let avail_h = ui.available_height();
     let last_h = ui.ctx().data(|d| d.get_temp::<f32>(content_h_id)).unwrap_or(avail_h);
@@ -33,9 +31,9 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
 
     let body = ui.scope(|ui| {
         ui.vertical(|ui| {
-            // Track info: title, then artist · album — its own line on top of the
-            // time seeker. Tagged; the filename stands in until the tag scan lands
-            // (`start_track` reads the playing track up front, so this is already
+            // Track info: title, then artist · album, on their own lines above
+            // the seeker. Tagged, with the filename standing in until the scan
+            // lands (`start_track` reads the playing track up front, so this is
             // filled the moment a track starts).
             let cur = app.current_path().map(|p| p.to_path_buf());
             let info = cur.as_deref().and_then(|p| app.track_info(p));
@@ -54,8 +52,8 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                     ui.label(meta(sub, &theme, layout.text_meta));
                 }
             } else if app.network().pending().is_some() {
-                // A remote track is being spooled from the server; current_path
-                // is still None until the download lands.
+                // Remote track spooling from the server; current_path stays
+                // None until the download lands.
                 let name = app
                     .network()
                     .pending()
@@ -85,9 +83,9 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
 
             let mut seek_normalized = ui.ctx().memory_mut(|m| m.data.get_temp::<f32>(seek_id()).unwrap_or(0.0));
 
-            // Measure both time labels so the bar between them takes exactly
-            // the leftover width. (available_width() read from nested
-            // right-to-left scopes under-sizes inside the dock's ScrollArea.)
+            // Measure both labels so the bar between them takes exactly the
+            // leftover width. (available_width() read from a nested
+            // right-to-left scope under-sizes inside the dock's ScrollArea.)
             let font = egui::FontId::new(layout.text_time, theme.metadata_font.clone());
             let label_w = |s: &str| {
                 ui.fonts(|f| f.layout_no_wrap(s.to_owned(), font.clone(), theme.palette.text_secondary).size().x)
@@ -103,8 +101,9 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
             pos_label.on_hover_text(if app.remaining() { "Click to show elapsed" } else { "Click to show remaining" });
 
             let bar = ui.add_enabled_ui(total_secs.is_some(), |ui| {
-                // A Slider ignores add_sized — it requests spacing().slider_width
-                // itself — so set that to span the leftover width.
+                // A Slider ignores add_sized and requests
+                // spacing().slider_width itself, so set that to span the
+                // leftover width.
                 ui.spacing_mut().slider_width = bar_w;
                 ui.add(
                     egui::Slider::new(&mut seek_normalized, 0.0..=1.0)
@@ -120,17 +119,17 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
             } else if bar.drag_stopped() || bar.clicked() {
                 app.seek(seek_normalized);
             } else if let Some(target) = app.seek_target() {
-                // A seek briefly holds the bar at the target; follow once the
-                // sink's position catches up. (seek_target stays set after a
-                // seek by design — catch-up is monotonic, so past this point
-                // we track playback forever.)
+                // A seek holds the bar at the target until the sink's position
+                // catches up. (seek_target stays set after a seek by design —
+                // catch-up is monotonic, so past this point we track playback
+                // forever.)
                 if total_secs.is_some() && app.playback_position() >= target - 0.02 {
                     seek_normalized = actual_ratio;
                 }
             } else {
-                // Resting state: track the real playback position. This is
-                // also what resets the bar to 0:00 on a track change, since
-                // loading clears seek_target and the new track starts at 0.
+                // Resting: track the real position — also what resets the bar to
+                // 0:00 on a track change, since loading clears seek_target and
+                // the new track starts at 0.
                 seek_normalized = actual_ratio;
             }
 
@@ -170,7 +169,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
                 app.next_track();
             }
 
-            // Playlist controls: shuffle / repeat — lit while active.
+            // Shuffle / repeat — lit while active.
             ui.separator();
             if theme::icon_button(ui, app.theme_icon(Icon::Shuffle), Icon::Shuffle, 18.0, true, app.shuffle()).clicked() {
                 app.toggle_shuffle();
@@ -182,7 +181,6 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
             ui.separator();
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Volume
                 theme::icon(ui, app.theme_icon(Icon::Volume), Icon::Volume, 15.0);
                 let mut volume = app.volume();
                 if ui.add(
@@ -198,7 +196,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
 
         // Second row: Balance (L/R) + Gapless/Crossfade toggles
         ui.horizontal(|ui| {
-            // Balance slider (left) — double-click to reset to center
+            // Balance slider (left); double-click resets to center
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.label(meta("Balance", &theme, layout.text_meta));
                 let mut balance = app.balance();
@@ -243,8 +241,8 @@ pub fn now_playing_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
     });
 
     // Record the natural content height (excluding the centering pad): the
-    // coordinator floors this pane's split at it and we read it next frame
-    // to compute the centering pad.
+    // coordinator floors this pane's split at it, and we read it next frame to
+    // compute that pad.
     ui.ctx().data_mut(|d| {
         d.insert_temp(content_h_id, body.response.rect.height());
     });

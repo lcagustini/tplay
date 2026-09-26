@@ -1,6 +1,6 @@
 //! Visualizer pane — header (view selector) + dispatch to the selected
-//! `VizView`. Each view is one file under `views/` exposing a `draw` fn;
-//! adding a view means a new file + a `VizView` variant + one match arm.
+//! `VizView`. Each view is one file under `views/` exposing a `draw` fn; a new
+//! view is a new file + a `VizView` variant + one match arm.
 
 use crate::app::{TPlayApp, VizView};
 use eframe::egui;

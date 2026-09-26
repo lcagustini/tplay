@@ -39,7 +39,7 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
     let network_mode = browse.is_some();
 
     // Network mode swaps the main column for the remote browser, and with it the
-    // header: the local breadcrumb + ★ only applies to the folder browser (the
+    // header: the local breadcrumb + ★ applies only to the folder browser (the
     // sidebar below stays in both modes). Everything under the header — search,
     // sort header, rows, counts, Add All — is the shared `listing`, so both
     // browsers get it.
@@ -54,11 +54,11 @@ pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
 
     ui.add_space(4.0);
 
-    // Add-server form state (just the host) in egui memory — carried across
+    // Add-server form state (just the host) lives in egui memory, carried across
     // frames. Credentials are prompted for in the main pane instead, so a saved
-    // address can be reused without retyping it. Read here and written back at
-    // the end because the sidebar's "+" button and the form's own Add/Cancel
-    // both move it, and the value has to outlive the closure either way.
+    // address is reusable without retyping. Read here and written back at the end
+    // because the sidebar's "+" and the form's own Add/Cancel both move it, and
+    // the value has to outlive the closure either way.
     let mut form = ui
         .ctx()
         .memory_mut(|m| m.data.get_temp::<Option<String>>(egui::Id::new(NET_FORM)).unwrap_or(None));

@@ -1,10 +1,10 @@
 //! Audio visualization — tap source, ring buffer, FFT, and smoothing.
 //!
-//! Pure logic, no UI, no audio device. The tap wraps the EQ source so it
-//! visualizes exactly what the user hears (post-EQ). The ring buffer is
-//! capped at ~100 ms (4096 samples at 44.1 kHz). FFT is a hand-rolled
-//! radix-2 1024-point transform with Hann window. Smoothing applies classic
-//! attack/release per bin for the "WMP bars" feel.
+//! Pure logic: no UI, no audio device. The tap wraps the EQ source so it
+//! visualizes exactly what is heard (post-EQ). The ring buffer is capped at
+//! ~100 ms (4096 samples at 44.1 kHz). The FFT is a hand-rolled radix-2
+//! 1024-point transform with a Hann window; smoothing is classic per-bin
+//! attack/release for the "WMP bars" feel.
 
 use rodio::Source;
 use std::sync::{Arc, Mutex};
@@ -44,8 +44,7 @@ impl VizBuf {
         guard.push_back(sample);
     }
 
-    /// Snapshot the most recent `n` samples (GUI thread).
-    /// Returns `Vec<f32>` of length up to `n`, oldest first.
+    /// The most recent `n` samples (GUI thread), oldest first, up to `n` long.
     pub fn snapshot_tail(&self, n: usize) -> Vec<f32> {
         let guard = self.buf.lock().unwrap();
         let len = guard.len().min(n);
@@ -58,8 +57,8 @@ impl VizBuf {
     }
 }
 
-/// Tap source — wraps an f32 source, mono-downmixes, pushes into the buffer,
-/// forwards every sample untouched. Used after `EqSource` so the viz reflects
+/// Tap source — wraps an f32 source, mono-downmixes, pushes into the buffer, and
+/// forwards every sample untouched. Sits after `EqSource` so the viz reflects
 /// exactly what is heard (post-EQ, post-volume if volume is applied upstream).
 pub struct TapSource<S>
 where
@@ -233,13 +232,11 @@ pub fn compute_bands(viz: &VizBuf, prev: &mut [f32; VIZ_BANDS], attack: f32, rel
         return;
     }
 
-    // Hann window
     let window = hann_window();
     for i in 0..FFT_SIZE {
         samples[i] *= window[i];
     }
 
-    // FFT
     let mut fft_input = vec![0.0f32; FFT_SIZE * 2];
     for i in 0..FFT_SIZE {
         fft_input[i * 2] = samples[i];
@@ -247,8 +244,8 @@ pub fn compute_bands(viz: &VizBuf, prev: &mut [f32; VIZ_BANDS], attack: f32, rel
     }
     let mag = fft_magnitude(&mut fft_input);
 
-    // Hann window coherent gain = 0.5, so full-scale sine peak magnitude = FFT_SIZE/4
-    // Normalize so that 1.0 input amplitude → 1.0 magnitude (0 dB)
+    // The Hann window's coherent gain is 0.5, so a full-scale sine peaks at
+    // FFT_SIZE/4: normalize so 1.0 input amplitude → 1.0 magnitude (0 dB).
     let norm = 4.0 / FFT_SIZE as f32;
 
     // Log-spaced band averaging (skip DC, start at bin 1)

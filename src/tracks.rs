@@ -1,23 +1,23 @@
 //! Track identity — the one place that knows a track can be local or remote.
 //!
 //! A local track and an `smb://` track differ in exactly one way: **timing**. A
-//! local track's bytes are on disk now; a remote track's may be sitting in the
-//! spool cache, or may need a fetch first. Everything else — its id, its tags,
-//! "does it exist", "give me the file to decode" — is the same operation over a
-//! different transport. So the operations live here, uniform, and the transport
-//! stays behind them.
+//! local track's bytes are on disk now; a remote track's may be in the spool
+//! cache, or may need a fetch first. Everything else — id, tags, "does it
+//! exist", "give me the file to decode" — is the same operation over a different
+//! transport, so the operations live here, uniform, with the transport behind
+//! them.
 //!
-//! A `smb://` URI is stored as a `PathBuf` holding the URI, and a URI's last
-//! segment is the filename, so it behaves as an id without any help: the
-//! `tag_cache` is keyed by it and every reader treats a cached empty
-//! `TrackInfo` as "no tags", exactly as it does for a local file.
+//! An `smb://` URI is stored as a `PathBuf` holding the URI, and a URI's last
+//! segment is the filename, so it behaves as an id unaided: the `tag_cache` is
+//! keyed by it, and every reader treats a cached empty `TrackInfo` as "no tags"
+//! exactly as it does for a local file.
 //!
-//! One trap, and it is the reason this module exists: `Path::is_relative` is
-//! **true** for an `smb://` URI (anything without a leading `/` counts as
-//! relative on Unix), so any code keying off it will join a remote track onto
-//! whatever base it is given. `library::read_playlist` is the one place that
-//! still branches on `is_remote` itself, because there the question really is
-//! about path semantics.
+//! One trap, and the reason this module exists: `Path::is_relative` is **true**
+//! for an `smb://` URI (anything without a leading `/` counts as relative on
+//! Unix), so code keying off it joins a remote track onto whatever base it is
+//! given. `library::read_playlist` is the one place still branching on
+//! `is_remote` itself, because there the question really is about path
+//! semantics.
 //!
 //! ## The rule this module exists to enforce
 //!
@@ -30,15 +30,14 @@
 //! (`load_file_as(local, display)`), which satisfied a weaker, greppable rule
 //! ("no `is_remote` in `app.rs`") while actually being the bug's shape: two
 //! paths for one track, correct only if the caller does not swap them. It did
-//! get swapped — `TPlayApp::play()` handed an `smb://` URI to
-//! `File::open`, and the crossfade arm did the same through a builder that
-//! `.expect()`ed. Passing a pair is not agnostic; it is the source distinction
-//! wearing a disguise. So the resolution lives here and the pair is gone.
+//! get swapped — `TPlayApp::play()` handed an `smb://` URI to `File::open`, and
+//! the crossfade arm did the same through a builder that `.expect()`ed. Passing
+//! a pair is not agnostic; it is the source distinction wearing a disguise. So
+//! the resolution lives here and the pair is gone.
 //!
-//! The greppable form of the rule: `app.rs` and `src/gui/` never call
-//! `File::open` / `read_info` / `probe_duration` / `read_cover` on a track id,
-//! and never bind a resolved path. They use `open` / `info` / `probe` /
-//! `cover` / `is_ready` below.
+//! Greppable form: `app.rs` and `src/gui/` never call `File::open` /
+//! `read_info` / `probe_duration` / `read_cover` on a track id, and never bind a
+//! resolved path. They use `open` / `info` / `probe` / `cover` / `is_ready`.
 
 use crate::audio;
 use crate::library::{self, TrackInfo};
@@ -65,8 +64,8 @@ pub fn open_in(track: &Path, dir: &Path) -> Option<File> {
 }
 
 /// `track`'s tags and duration, read from its file. `None` if it has no bytes
-/// on hand; a file with no tags is `Some` with blank fields, which is a final
-/// answer and not a missing one (see `TagReader::absorb`).
+/// on hand; a file with no tags is `Some` with blank fields — a final answer,
+/// not a missing one (see `TagReader::absorb`).
 pub fn info(track: &Path) -> Option<TrackInfo> {
     info_in(track, &network::spool_dir())
 }
@@ -100,9 +99,9 @@ pub fn cover_in(track: &Path, dir: &Path) -> Option<Vec<u8>> {
 
 /// Can `track`'s bytes be opened synchronously — the pre-buffer question.
 ///
-/// A predicate rather than a path, so a caller asking it has no way to keep the
+/// A predicate, not a path, so a caller asking it has no way to keep the
 /// resolved path and pass it somewhere it should not go. See `local_file_now`
-/// for why this is not simply `open(...).is_some()`.
+/// for why this is not just `open(...).is_some()`.
 pub fn is_ready(track: &Path) -> bool {
     local_file_now(track).is_some()
 }
@@ -110,14 +109,13 @@ pub fn is_ready(track: &Path) -> bool {
 // ── Resolving a track to bytes on disk ───────────────────────────────────────
 
 /// The local file behind `track`: a remote track's spool-cache copy, or `None`
-/// when it has not been spooled yet. A local path comes back unchanged
-/// **whether or not it exists**, so a track that is mid-load still resolves and
-/// the reader reports its own failure rather than being silently skipped.
+/// if it has not been spooled yet. A local path comes back unchanged **whether
+/// or not it exists**, so a mid-load track still resolves and the reader reports
+/// its own failure rather than being silently skipped.
 ///
-/// This is the primitive every reader in this module is built on, and it is
-/// `pub` only so tests can inject a spool dir (`local_file_in`). Callers outside
-/// this module should use `open`/`info`/`probe`/`cover`/`is_ready` and never see
-/// a resolved path at all.
+/// The primitive every reader here is built on, `pub` only so tests can inject a
+/// spool dir. Callers outside this module use
+/// `open`/`info`/`probe`/`cover`/`is_ready` and never see a resolved path.
 pub fn local_file_in(track: &Path, dir: &Path) -> Option<PathBuf> {
     if !network::is_remote(track) {
         return Some(track.to_path_buf());
@@ -130,16 +128,15 @@ pub fn local_file_in(track: &Path, dir: &Path) -> Option<PathBuf> {
 /// question, i.e. can this track be opened synchronously.
 ///
 /// Deliberately separate from `local_file_in`, which answers a different
-/// question. For a *local* track that has no file yet (mid-load, or deleted off
-/// disk) the two disagree: art and tags should still be attempted, because the
-/// track's identity is known and the reader reports the failure in its own
-/// terms, whereas pre-buffering has nothing to open and must wait. Collapsing
-/// them would blank the art and tags of every track that fails to open, and turn
+/// question. For a *local* track with no file yet (mid-load, or deleted off
+/// disk) the two disagree: art and tags should still be attempted — the track's
+/// identity is known and the reader reports the failure in its own terms —
+/// whereas pre-buffering has nothing to open and must wait. Collapsing them
+/// would blank the art and tags of every track that fails to open, and turn
 /// "there is no file to pre-buffer" into "this is a remote track".
 ///
-/// Private because `is_ready` is its public form: a caller asking the
-/// pre-buffer question wants a yes/no, not a path it could pass somewhere it
-/// should not.
+/// Private because `is_ready` is its public form: a caller asking the pre-buffer
+/// question wants a yes/no, not a path it could pass somewhere it should not.
 fn local_file_now(track: &Path) -> Option<PathBuf> {
     local_file_now_in(track, &network::spool_dir())
 }
@@ -154,10 +151,9 @@ pub fn local_file_now_in(track: &Path, dir: &Path) -> Option<PathBuf> {
 /// Resolve a playlist entry to the id the rest of the app stores.
 ///
 /// A local path is canonicalized, and dropped if it no longer exists — a
-/// playlist should not resurrect a file the user deleted. A remote URI is kept
+/// playlist must not resurrect a deleted file. A remote URI is kept
 /// **verbatim**: it cannot be canonicalized (there is no such file), and
-/// rewriting it would break the spool-cache key that playback and tagging both
-/// look it up by.
+/// rewriting it would break the spool-cache key playback and tagging both use.
 pub fn normalize(track: PathBuf) -> Option<PathBuf> {
     if network::is_remote(&track) {
         Some(track)
@@ -168,12 +164,12 @@ pub fn normalize(track: PathBuf) -> Option<PathBuf> {
 
 // ── Splitting a batch across the two tag transports ──────────────────────────
 
-/// Split a batch of wanted tracks into the local half and the remote half.
+/// Split a batch of wanted tracks into its local and remote halves.
 ///
-/// Pure, so it is the tested unit and the tag reader's `request` stays a thin
-/// wrapper. The two halves are genuinely different machines — a background
-/// thread with an mpsc, and an SMB worker command with a reply `Event` — so this
-/// split is real; it just does not belong to the caller.
+/// Pure, so it is the tested unit and `TagReader::request` stays a thin wrapper.
+/// The halves are genuinely different machines — a thread with an mpsc, an SMB
+/// worker command with a reply `Event` — so the split is real; it just does not
+/// belong to the caller.
 pub fn split_for_tags(paths: Vec<PathBuf>) -> (Vec<PathBuf>, Vec<String>) {
     let mut local = Vec::new();
     let mut remote = Vec::new();
@@ -189,25 +185,23 @@ pub fn split_for_tags(paths: Vec<PathBuf>) -> (Vec<PathBuf>, Vec<String>) {
 
 // ── Reading tags ─────────────────────────────────────────────────────────────
 
-/// Cap on how many per-track tag failures one batch prints before switching to a
-/// count. Browsing a share with bad credentials fails hundreds of rows, and one
-/// line each buries the actual problem under the retries.
+/// Per-batch cap on printed tag failures before switching to a count. Bad
+/// credentials fail hundreds of rows, and one line each buries the problem.
 const MAX_TAG_FAILURES_LOGGED: usize = 3;
 
 /// Reads tags into the one shared cache, whatever transport each track needs.
 ///
-/// The two transports are genuinely different machines — a background thread
-/// with an mpsc, and an SMB worker command with a reply `Event` — and this type
-/// does not pretend otherwise. What it removes is the *caller's* need to know
-/// which is which: the app asks for tracks and drains results, and the split
-/// between the two lives here.
+/// The two transports are genuinely different machines — a thread with an mpsc,
+/// an SMB worker command with a reply `Event` — and this type does not pretend
+/// otherwise. What it removes is the *caller's* need to know which is which: the
+/// app asks for tracks and drains results, and the split lives here.
 ///
-/// One local scan runs at a time. A new request replaces the in-flight one, and
-/// that is safe because the cache is per-track: a dropped scan costs a rescan of
-/// its own files, nothing more.
+/// One local scan at a time. A new request replaces the in-flight one, safe
+/// because the cache is per-track: a dropped scan costs a rescan of its own
+/// files, nothing more.
 pub struct TagReader {
-    /// Receiver for the in-flight local `scan_files` thread. `None` when no
-    /// local scan is running, which is also what "Scanning…" reads as done.
+    /// Receiver for the in-flight `scan_files` thread. `None` = no local scan
+    /// running, which is also what "Scanning…" reads as done.
     local_rx: Option<Receiver<(PathBuf, TrackInfo)>>,
 }
 
@@ -222,12 +216,12 @@ impl TagReader {
         Self { local_rx: None }
     }
 
-    /// Ask for tags for any of `wanted` the cache doesn't have yet.
+    /// Ask for tags for any of `wanted` the cache lacks.
     ///
-    /// Returns whether a local scan was started, so the caller knows to ask for
-    /// a repaint and start draining. Safe to call every frame: cached tracks are
-    /// skipped, and the network side keeps its own in-flight set, so a batch
-    /// that is still running is not re-queued.
+    /// Returns whether a local scan started, so the caller can request a repaint
+    /// and start draining. Safe every frame: cached tracks are skipped and the
+    /// network side keeps its own in-flight set, so a running batch is not
+    /// re-queued.
     pub fn request(
         &mut self,
         cache: &HashMap<PathBuf, TrackInfo>,
@@ -254,8 +248,8 @@ impl TagReader {
     }
 
     /// Drain finished local results into `cache`. Returns whether anything
-    /// arrived or the scan ended, so the caller can request a repaint. Drops the
-    /// receiver once the thread finishes, which is what clears "Scanning…".
+    /// arrived or the scan ended, so the caller can request a repaint. Dropping
+    /// the receiver when the thread finishes is what clears "Scanning…".
     pub fn drain_into(&mut self, cache: &mut HashMap<PathBuf, TrackInfo>) -> bool {
         let (mut ended, mut new) = (false, false);
         if let Some(rx) = &self.local_rx {
@@ -265,10 +259,10 @@ impl TagReader {
                         cache.insert(path, info);
                         new = true;
                     }
-                    // The thread is still working — leave the receiver in place.
+                    // The thread is still working — keep the receiver.
                     Err(TryRecvError::Empty) => break,
-                    // The thread is done. The scan is finished whether or not
-                    // its last result was queued, so drop the receiver.
+                    // The thread is done: the scan is finished whether or not its
+                    // last result was queued, so drop the receiver.
                     Err(TryRecvError::Disconnected) => {
                         ended = true;
                         break;
@@ -285,17 +279,16 @@ impl TagReader {
     /// Apply a batch of remote tag results to `cache`, keyed by URI.
     ///
     /// The two outcomes are deliberately **not** symmetric, and the asymmetry is
-    /// the whole point:
+    /// the point:
     ///
-    /// * `Ok` is cached even when every field is blank. That is the definitive
-    ///   "read it, it has no tags" answer, `title_or_stem` falls back to the
-    ///   stem on an empty title so it displays exactly like no cache entry, and
-    ///   it is what stops a folder of untagged files from re-requesting forever.
-    /// * `Err` is **not** cached. A failed transfer says nothing about the
-    ///   file's tags — it may be a blip, or expired credentials — so caching it
-    ///   as untagged would blank the row for the rest of the session. Leaving it
-    ///   out is what makes it retryable; `Network`'s attempt count is what stops
-    ///   that retrying forever.
+    /// * `Ok` is cached even when every field is blank: the definitive "read it,
+    ///   it has no tags" answer. `title_or_stem` falls back to the stem on an
+    ///   empty title so it displays exactly like no cache entry, and it is what
+    ///   stops a folder of untagged files re-requesting forever.
+    /// * `Err` is **not** cached. A failed transfer says nothing about the tags
+    ///   — a blip, expired credentials — so caching it as untagged would blank
+    ///   the row for the rest of the session. Leaving it out is what makes it
+    ///   retryable; `Network`'s attempt count stops that retrying forever.
     pub fn absorb(
         &self,
         cache: &mut HashMap<PathBuf, TrackInfo>,

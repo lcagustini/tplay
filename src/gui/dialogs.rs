@@ -4,10 +4,10 @@
 //! (the Library's current folder, a share directory on screen, the layouts dir).
 //!
 //! Both follow one shape: a call site hands over plain data with [`ask`] /
-//! [`ask_save_name`] (egui memory, so `TPlayApp` stays UI-state-free and the
-//! state survives across frames), and [`show`] draws the modal at the end of the
-//! frame and carries the action out once the user answers. Actions are enums,
-//! not closures — a closure cannot be stored in egui memory.
+//! [`ask_save_name`] (egui memory, so `TPlayApp` stays UI-state-free and the state
+//! survives across frames), and [`show`] draws the modal at the end of the frame
+//! and carries the action out once the user answers. Actions are enums, not
+//! closures — a closure cannot be stored in egui memory.
 
 use crate::app::{Pane, TPlayApp};
 use crate::gui::coordinator;
@@ -224,8 +224,8 @@ fn write(
     typed: &str,
 ) {
     match target {
-        // `.tplay` is implied and separators are stripped, not sent to the
-        // server as a bogus path.
+        // `.tplay` is implied and separators are stripped, not sent to the server
+        // as a bogus path.
         SaveTarget::PlaylistShare => {
             if let Some(file) = library::playlist_file_name(typed) {
                 app.save_playlist_to(PathBuf::from(network::child_uri(dir, &file)));

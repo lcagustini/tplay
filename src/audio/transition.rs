@@ -1,13 +1,13 @@
 //! Crossfade fade curve, the arm decision, and the gapless source builder —
 //! pure, headless-testable free functions.
 //!
-//! The arm used to be a 50-line block inside `TPlayApp::advance`, which put it
-//! out of reach of every test: `TPlayApp::new` needs an audio device and an
-//! eframe `CreationContext`, so the most delicate branch in the app had zero
-//! coverage and its failure modes are silent (a skipped arm is a gap, a wrong
-//! arm is a skipped track). `arm_plan` is that block, moved out whole: it reads
-//! a struct of values and returns what to apply, so every guard below is
-//! reachable from a plain `#[test]`.
+//! The arm used to be a 50-line block inside `TPlayApp::advance`, putting it out
+//! of reach of every test: `TPlayApp::new` needs an audio device and an eframe
+//! `CreationContext`, so the app's most delicate branch had zero coverage — and
+//! its failure modes are silent (a skipped arm is a gap, a wrong arm is a
+//! skipped track). `arm_plan` is that block moved out whole: it reads a struct
+//! of values and returns what to apply, so every guard below is reachable from
+//! a plain `#[test]`.
 
 use crate::audio::eq::{EqSource, EqShared};
 use crate::audio::viz::{TapSource, VizBuf};
@@ -24,11 +24,11 @@ pub const PREROLL_SECS: f32 = 2.0;
 
 /// Everything the arm decision reads, grouped so a test can build one literal
 /// and vary a single field per case. `advance` fills this in; nothing here
-/// reads app state, so the whole decision is reachable headless.
+/// reads app state, so the decision is reachable headless.
 ///
-/// The sink-shape preconditions (`!is_paused`, exactly one source queued, a
-/// current track) stay in `advance` — they are `Sink` facts with no data
-/// equivalent, and they are the cheap outer gate.
+/// The sink-shape preconditions (`!is_paused`, one source queued, a current
+/// track) stay in `advance` — `Sink` facts with no data equivalent, and the
+/// cheap outer gate.
 pub struct ArmInput<'a> {
     pub crossfade: bool,
     pub gapless: bool,
@@ -39,10 +39,11 @@ pub struct ArmInput<'a> {
     pub total: Option<Duration>,
     /// How far into the outgoing track playback already is.
     pub pos: Duration,
-    /// The candidate next track — index into the playlist plus its id — already
-    /// chosen by the caller. It is passed in rather than picked here because
-    /// choosing it *mutates* shuffle's `played` history, and a skipped arm must
-    /// still leave that history marked (see `advance`).
+    /// The candidate next track — playlist index plus its id — already chosen by
+    /// the caller. Passed in rather than picked here because choosing *mutates*
+    /// shuffle's `played` history, and this runs per frame, so picking here
+    /// would rewrite the shuffle order 60×/sec. The caller peeks, then commits
+    /// only if the arm lands (see `advance` and `peek_next_index`).
     pub next: Option<(usize, &'a Path)>,
     /// `tracks::is_ready(next)` — are the incoming bytes on hand right now?
     /// Free for a local track (no filesystem check), one stat for a remote one.
@@ -62,10 +63,10 @@ pub struct Armed {
 
 /// Decide whether to pre-buffer the next track, and for which one.
 ///
-/// Every guard here is load-bearing and every one of them costs a *gap*, never
-/// a crash, so each returns `None` rather than aborting:
+/// Every guard is load-bearing and each costs a *gap*, never a crash, so all of
+/// them return `None` rather than aborting:
 /// - no mode on, or the outgoing track's length unknown → never arm
-/// - outside the window (crossfade within `crossfade_secs` of the end and only
+/// - outside the window (crossfade within `crossfade_secs` of the end, and only
 ///   for a track longer than the window itself; gapless within `PREROLL_SECS`)
 /// - no candidate next track
 /// - the incoming bytes aren't on hand — a local file that isn't there, or a
@@ -104,16 +105,15 @@ pub fn arm_plan(input: &ArmInput) -> Option<Armed> {
     Some(Armed { index, track: track.to_path_buf(), out_total: total })
 }
 
-/// Try to seek a `Decoder<BufReader<File>>` to `target`; if the inner source reports
-/// NotSupported, fall back to `skip_duration` (eager decode).
-/// Returns the (possibly wrapped) source positioned at `target`.
+/// Seek a `Decoder<BufReader<File>>` to `target`, falling back to `skip_duration`
+/// (eager decode) if the source reports NotSupported. Returns the (possibly
+/// wrapped) source positioned at `target`.
 pub fn seek_or_skip(mut decoder: Decoder<BufReader<File>>, target: Duration) -> Box<dyn Source<Item = f32> + Send + 'static> {
-    // We attempt the fast path first; on NotSupported we drop back to skip_duration.
     match decoder.try_seek(target) {
         Ok(()) => Box::new(decoder),
         Err(rodio::source::SeekError::NotSupported { .. }) => Box::new(decoder.skip_duration(target)),
         Err(e) => {
-            // Any other error: best-effort fallback to skip
+            // Any other error: best-effort fallback to skip.
             eprintln!("tplay: seek error {e:?}, falling back to skip");
             Box::new(decoder.skip_duration(target))
         }
@@ -129,24 +129,23 @@ pub fn fade_gains(p: f32) -> (f32, f32) {
 }
 
 /// Sink gains for a live gapless/crossfade overlap, from how much of the
-/// **outgoing** track is left. The second half of the arm, and pure for the same
+/// **outgoing** track is left. The second half of the arm, pure for the same
 /// reason `arm_plan` is: the curve was tested, but *when* it is called with
-/// which `p` was not, and that is the part that decides whether a track is
-/// audible or dropped.
+/// which `p` was not — and that is the half deciding whether a track is audible
+/// or dropped.
 ///
-/// Progress runs from 0 (a full `crossfade_secs` still to go) to 1 (the outgoing
-/// track has ended), linearly in remaining time — not a wall clock, so it is
-/// pause- and seek-safe. Duration-probe drift can push `remaining` past the
-/// window, which makes `p` overshoot [0, 1]; `fade_gains` clamps it there, so
-/// this does not repeat the clamp. (`f32::FRAC_PI_2` also rounds up, so
-/// `fade_gains(1.0)` is `(-4.37e-8, 1.0)` rather than exactly `(0.0, 1.0)` —
-/// the outgoing sink is set to that on the last frame before the swap, which is
-/// −4e-8 of full volume and inaudible.)
+/// Progress runs 0 (a full `crossfade_secs` still to go) → 1 (the outgoing track
+/// has ended), linearly in remaining time — not a wall clock, so pause- and
+/// seek-safe. Duration-probe drift can push `remaining` past the window, making
+/// `p` overshoot [0, 1]; `fade_gains` clamps there, so this does not repeat it.
+/// (`f32::FRAC_PI_2` also rounds up, so `fade_gains(1.0)` is `(-4.37e-8, 1.0)`
+/// rather than exactly `(0.0, 1.0)` — the outgoing sink is set to that on the
+/// last frame before the swap, i.e. −4e-8 of full volume, inaudible.)
 ///
 /// Gapless has no fade to run: the incoming track is held at zero and the swap
-/// is instant, so this returns `(1.0, 0.0)` — full volume out, silence in — for
-/// any `remaining`. Returning a pair rather than an `Option` keeps the caller's
-/// per-frame block to three lines with no branch.
+/// is instant, so this returns `(1.0, 0.0)` — full out, silence in — for any
+/// `remaining`. A pair rather than an `Option` keeps the caller's per-frame block
+/// to three lines with no branch.
 pub fn xf_gains(remaining: Duration, crossfade: bool, crossfade_secs: f32) -> (f32, f32) {
     if !crossfade {
         return (1.0, 0.0);
@@ -155,19 +154,18 @@ pub fn xf_gains(remaining: Duration, crossfade: bool, crossfade_secs: f32) -> (f
     fade_gains(p)
 }
 
-/// Open a track's file and return a fully-wrapped decoder (EQ → Tap → Balance),
-/// *buffered* so decode happens off the audio thread.
-/// Used for the crossfade incoming track and gapless next track.
+/// A track's file as a fully-wrapped decoder (EQ → Tap → Balance), *buffered* so
+/// decode happens off the audio thread. Used for the crossfade incoming track
+/// and the gapless next track.
 ///
 /// `track` is a track **id**, not a file path — for a remote track that is an
-/// `smb://` URI, and there is no file on disk by that name. Resolution goes
-/// through `tracks::open`, so this cannot be handed a URI and panic on it.
+/// `smb://` URI, and no file on disk has that name. Resolution goes through
+/// `tracks::open`, so this cannot be handed a URI and panic on it.
 ///
-/// Returns `None` if the track has no bytes on hand, or they cannot be decoded.
-/// This is called from `advance()` every frame, and a crossfade is a nicety:
-/// failing to pre-buffer must cost a gap, not the whole app. It previously
-/// `.expect()`ed, which meant an unreadable file aborted the process from inside
-/// a per-frame path.
+/// `None` if the track has no bytes on hand or they will not decode. Called from
+/// `advance()` every frame, and a crossfade is a nicety: failing to pre-buffer
+/// must cost a gap, not the app. This used to `.expect()`, so an unreadable file
+/// aborted the process from inside a per-frame path.
 pub fn build_gapless_next(
     track: &std::path::Path,
     eq_shared: Arc<RwLock<EqShared>>,

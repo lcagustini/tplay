@@ -3,7 +3,7 @@ use crate::audio::eq::{EQ_FREQUENCIES, EQ_PRESETS};
 use eframe::egui;
 
 pub fn equalizer_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
-    // Owned Arc copy — panes call &mut app while using theme data.
+    // Owned Arc copy — panes take `&mut app` while using theme data.
     let theme = app.theme().clone();
     let p = theme.palette;
     let gains = app.eq_gains();
@@ -41,10 +41,10 @@ pub fn equalizer_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
         .rect
         .height();
 
-    // This pane has no scrollbars (see `scroll_bars` in coordinator), so its
-    // content must always fit. Record the smallest height at which nothing
-    // clips — header + gaps + sliders at their floor + a band label — and the
-    // coordinator keeps the dock split at least this tall.
+    // No scrollbars (see `scroll_bars` in coordinator), so the content must
+    // always fit. Record the smallest height at which nothing clips — header +
+    // gaps + sliders at their floor + a band label — and the coordinator keeps
+    // the dock split at least this tall.
     let label_h = ui.fonts(|f| {
         f.layout_no_wrap(
             TPlayApp::format_freq(EQ_FREQUENCIES[0]),
@@ -59,7 +59,7 @@ pub fn equalizer_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
             egui::Id::new("tplay.pane_content_h").with(Pane::Equalizer),
             header_h + layout.eq_header_gap + layout.eq_slider_min_h + layout.eq_band_gap + label_h,
         );
-        // Horizontal floor: the 10 bands at their min width. The same
+        // Horizontal floor: the 10 bands at min width. The same
         // `layout.eq_band_w_min` drives both the shrink logic and this floor.
         d.insert_temp(
             egui::Id::new("tplay.pane_content_w").with(Pane::Equalizer),
@@ -69,9 +69,9 @@ pub fn equalizer_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
 
     ui.add_space(layout.eq_header_gap);
 
-    // 10 bands with fixed inter-band spacing, centered in the pane.
-    // The gap between sliders is constant; the margins to the pane edges
-    // absorb all leftover width equally (dynamic centering).
+    // 10 bands with fixed inter-band spacing, centered in the pane: the gap
+    // between sliders is constant, and the margins to the pane edges absorb all
+    // leftover width equally (dynamic centering).
     let slider_h = (ui.available_height() - 30.0).clamp(layout.eq_slider_min_h, layout.eq_slider_max_h);
     // Fixed band width and spacing normally; shrink to fit narrow panes.
     let min_spacing = ui.spacing().item_spacing.x;

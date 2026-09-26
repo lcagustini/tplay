@@ -1,13 +1,13 @@
 //! The Library pane's main column: search, the sortable column header, the rows,
 //! the composition counts + Add All, and the remote browser.
 //!
-//! `file_list_ui` is drawn once and used twice. The local folder browser passes
+//! `file_list_ui` is drawn once and used twice. The local browser passes
 //! `library::Entry` values whose `path` is a path; the SMB browser passes entries
 //! whose `path` is an `smb://` URI. A URI's last segment is the filename, so
 //! every key here — `file_name`, `file_stem`, `title_or_stem`, `sort_key`, the
-//! playlist-file check, the search haystack — treats it like any other path
-//! without a special case. That is what gives a share real tag columns, sorting
-//! and search instead of the name+size list it started with.
+//! playlist-file check, the search haystack — treats it like any other path with
+//! no special case. That is what gives a share real tag columns, sorting and
+//! search instead of the name+size list it started with.
 
 use super::dir_name;
 use crate::app::TPlayApp;
@@ -29,10 +29,9 @@ const CELL_WIDTHS: [f32; 4] = [0.0, 90.0, 100.0, 44.0]; // Title is flexible
 /// inter-cell spacing, leaving the title column the flexible remainder.
 const ROW_FIXED_W: f32 = CELL_WIDTHS[1] + CELL_WIDTHS[2] + CELL_WIDTHS[3] + 40.0;
 
-/// One clickable column header. Returns true when clicked; the caller picks
-/// the sort key. The active column is accent-colored with a theme icon
-/// (`arrow`) showing the sort direction; clicking it again flips the
-/// direction in `TPlayApp::set_library_sort`.
+/// One clickable column header; true when clicked, and the caller picks the sort
+/// key. The active column is accent-colored with a theme icon (`arrow`) for the
+/// direction; clicking it again flips it in `TPlayApp::set_library_sort`.
 fn header_cell(
     ui: &mut egui::Ui,
     p: theme::Palette,
@@ -94,9 +93,9 @@ fn draw_dir_row(
     resp.clicked()
 }
 
-/// A saved playlist file row: full filename (extension visible) + a
-/// right-aligned "Playlist" tag — no tag cells, no `+`. Click loads it into
-/// the playlist pane (the caller adds the replace-confirm).
+/// A saved playlist row: full filename (extension visible) + a right-aligned
+/// "Playlist" tag — no tag cells, no `+`. Click loads it (the caller adds the
+/// replace-confirm).
 fn draw_playlist_row(ui: &mut egui::Ui, theme: &theme::Theme, row_h: f32, i: usize, path: &Path) -> bool {
     let p = theme.palette;
     let (rect, mut row) = theme::row(ui, i, false, row_h, theme);
@@ -134,11 +133,10 @@ enum FileAct {
 
 /// What the user asked for by clicking a file-list row.
 ///
-/// The local folder browser and the SMB share browser render identical rows, so
-/// they share one list widget and differ only in how they carry the action
-/// out: `Nav` is `navigate_to` locally and `browse_open` on a share,
-/// `LoadPlaylist` is `load_playlist_from` locally and `fetch_remote_playlist`
-/// (spool, then load) on one.
+/// The local and SMB browsers render identical rows, so they share one list
+/// widget and differ only in carrying the action out: `Nav` is `navigate_to`
+/// locally and `browse_open` on a share; `LoadPlaylist` is `load_playlist_from`
+/// locally and `fetch_remote_playlist` (spool, then load) on one.
 enum Act {
     /// Enter a subdirectory — a local path, or an `smb://` share directory URI.
     Nav(PathBuf),
@@ -223,25 +221,24 @@ fn draw_file_row(
 /// the search box, the sortable 4-column header, the folder/track/playlist rows
 /// and the "Scanning…" note.
 ///
-/// There is deliberately **no `..` row**: the breadcrumb is the only way up.
-/// It walks every ancestor and makes each non-last segment a jump target, so
-/// "one level up" is the second-to-last segment — a dedicated row duplicated
-/// navigation, consumed a banded row, and counted toward the folder total in
-/// the composition counts ("3 folders" when only 2 are). A share's breadcrumb
-/// works the same way (Local / host / share / dir), which is why that view
-/// never had one either.
+/// There is deliberately **no `..` row**: the breadcrumb is the only way up. It
+/// walks every ancestor and makes each non-last segment a jump target, so "one
+/// level up" is the second-to-last segment — a dedicated row duplicated
+/// navigation, consumed a banded row, and counted toward the folder total in the
+/// composition counts ("3 folders" when only 2 are). A share's breadcrumb works
+/// the same way (Local / host / share / dir), which is why that view never had
+/// one either.
 ///
-/// `scan_note` is the status line shown under the list while it fills in, and
-/// each caller words it for its own source: the local browser says
-/// "Scanning…", the share browser counts down the tracks it is still
-/// downloading (see `Network::pending_tags`) because a share browse is a real
-/// transfer, not a local read, and a bare "Scanning…" on a 300-file directory
-/// looks like a hung pane.
+/// `scan_note` is the status line under the list while it fills in, each caller
+/// wording it for its own source: the local browser says "Scanning…", the share
+/// browser counts down the tracks it is still downloading (`Network::pending_tags`),
+/// because a share browse is a real transfer — a bare "Scanning…" on a 300-file
+/// directory reads as a hung pane.
 ///
-/// Returns the row the user clicked, if any; the caller carries it out, since
-/// only it knows whether a `Nav` means `navigate_to` or `browse_open`. `remote`
-/// says which browser this is — the share list's paths are `smb://` URIs, so
-/// arming a playlist load needs to know which transport to run it through.
+/// Returns the row the user clicked, if any; the caller carries it out, since only
+/// it knows whether a `Nav` means `navigate_to` or `browse_open`. `remote` says
+/// which browser this is — the share list's paths are `smb://` URIs, so arming a
+/// playlist load needs to know which transport to run it through.
 fn file_list_ui(
     app: &mut TPlayApp,
     ui: &mut egui::Ui,
@@ -417,27 +414,26 @@ pub fn local_list_ui(app: &mut TPlayApp, ui: &mut egui::Ui, theme: &theme::Theme
 }
 
 /// The right-hand end of a file-list header: composition counts and Add All.
-/// Shared because both browsers now work from `&[library::Entry]` — a share's
+/// Shared because both browsers work from `&[library::Entry]` — a share's
 /// entries carry `smb://` URIs, which go into the playlist unchanged.
 ///
 /// **`Align::Min` is load-bearing, not cosmetic.** A horizontal `with_layout`
 /// whose cross-axis align is `Center` or `Max` gives its child a `min_rect`
-/// spanning the parent's *whole remaining height*, not the height actually used
-/// — `scope_dyn` ends with `advance_cursor_after_rect(child.min_rect())`, so
-/// the parent cursor jumps by that entire span. Measured in a 460px window with
-/// this pane's real shape: `right_to_left(Center)` consumed **430px** of a
-/// 444px column (leaving `available_height() == 0`), while `right_to_left(Min)`
-/// consumed the **21px** it used. With `Center` the file list's ScrollArea was
-/// positioned at y≈497 — below the pane — and only the Add All row was visible
-/// beside the sidebar.
+/// spanning the parent's *whole remaining height*, not the height used —
+/// `scope_dyn` ends with `advance_cursor_after_rect(child.min_rect())`, so the
+/// parent cursor jumps by that entire span. Measured in a 460px window with this
+/// pane's real shape: `right_to_left(Center)` consumed **430px** of a 444px
+/// column (leaving `available_height() == 0`), while `right_to_left(Min)`
+/// consumed the **21px** it used. With `Center` the list's ScrollArea sat at
+/// y≈497 — below the pane — and only the Add All row showed beside the sidebar.
 ///
-/// The damage scales with the parent's available height, which is why this went
+/// The damage scales with the parent's available height, which is why it went
 /// unnoticed elsewhere: every other `with_layout` in the app sits under a
 /// *horizontal* parent (`coordinator.rs` top bar, `now_playing.rs` balance row,
-/// `playlist.rs` rows, `visualizer.rs` header), where the child's available
-/// height is one row tall. The one other vertical-parent site is
-/// `now_playing.rs`'s transport block, whose pane is ~15% of the window, so the
-/// over-consumption is bounded by an already-short height.
+/// `playlist.rs` rows, `visualizer.rs` header), where the child's available height
+/// is one row. The one other vertical-parent site is `now_playing.rs`'s transport
+/// block, whose pane is ~15% of the window, so the over-consumption is bounded by
+/// an already-short height.
 /// Regression test: `right_to_left_center_does_not_swallow_the_column` in
 /// `tests/gui_tests.rs`.
 fn list_header_right(
@@ -446,8 +442,8 @@ fn list_header_right(
     p: theme::Palette,
     entries: &[library::Entry],
 ) {
-    // `Align::Min`, NOT `Center` — see the note below. It looks like a cosmetic
-    // choice (top-align vs vertically centre a ~21px row) and is anything but.
+    // `Align::Min`, NOT `Center` — see the doc above. It looks cosmetic (top-align
+    // vs centre a ~21px row) and is anything but.
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
         if ui
             .button("Add All")
@@ -497,9 +493,9 @@ pub fn remote_list_ui(
     let p = theme.palette;
     let folder_tex = app.theme_icon(theme::Icon::Folder).cloned();
 
-    // Busy / error states replace the list entirely — there is nothing to show
-    // while a listing is in flight, and on a logon failure the main pane owes
-    // the user a credential prompt rather than a file list.
+    // Busy / error states replace the list entirely: nothing to show while a
+    // listing is in flight, and on a logon failure the main pane owes the user a
+    // credential prompt rather than a file list.
     if browse.busy {
         ui.horizontal(|ui| {
             ui.spinner();
@@ -509,8 +505,8 @@ pub fn remote_list_ui(
     }
     if let Some(err) = &browse.error {
         // SessionSetup is where a server rejects the *identity*, so a bare
-        // NTSTATUS is not actionable — ask for the credentials here
-        // instead, with the saved address already filled in.
+        // NTSTATUS is not actionable — ask for credentials here, with the saved
+        // address already filled in.
         if err.contains("LOGON_FAILURE") || err.contains("ACCESS_DENIED") {
             login_form_ui(app, ui, theme, browse);
         } else {
@@ -525,8 +521,8 @@ pub fn remote_list_ui(
     }
 
     // At the share-list stage there is no directory, so the shared list has
-    // nothing to show — shares are a flat list of names, and the breadcrumb's
-    // "Local" is the way back out.
+    // nothing to show: shares are a flat name list, and the breadcrumb's "Local"
+    // is the way back out.
     if browse.share.is_none() {
         let mut i = 0usize;
         // A share name, NOT a URI — unlike every other row in this pane, the
@@ -558,10 +554,9 @@ pub fn remote_list_ui(
     let dir = network::dir_uri(&browse.host, &share, &browse.rel);
 
     // Share rows become ordinary `library::Entry` values whose `path` is the
-    // file's URI, which is what lets the shared list treat a share exactly like
-    // a folder: same tag columns, same sort keys, same playlist-file rows.
-    // Anything that is neither audio nor a `.tplay` is not listed, same as a
-    // local folder.
+    // file's URI, which is what lets the shared list treat a share exactly like a
+    // folder: same tag columns, same sort keys, same playlist-file rows. Anything
+    // neither audio nor a `.tplay` is not listed, same as a local folder.
     let mut entries: Vec<library::Entry> = browse
         .entries
         .iter()
@@ -587,10 +582,10 @@ pub fn remote_list_ui(
     app.ensure_tags(audio);
 
     // Show the outstanding transfer count, not just a bool: a share browse
-    // downloads whole files, so this is a real wait and a bare "Scanning…"
-    // reads as a hang. Count only what is actually in flight — a track that
-    // gave up after its retries is not coming, so counting it would pin a
-    // number on screen forever.
+    // downloads whole files, so this is a real wait and a bare "Scanning…" reads
+    // as a hang. Count only what is actually in flight — a track that gave up
+    // after its retries is not coming, so counting it would pin a number on
+    // screen forever.
     let note = (untagged > 0).then(|| {
         let in_flight = app.network().pending_tags();
         if in_flight > 0 {
@@ -606,14 +601,14 @@ pub fn remote_list_ui(
 
     match act {
         Some(Act::Nav(path)) => {
-            // The shared list hands back `entry.path()`, which for a share is
-            // the FULL child URI the entry was built from — not a bare folder
-            // name. Re-joining it with `child_browse` appended the whole URI as
-            // a name segment, giving a `rel` of
-            // "music/smb://nas/media/music/Rock" and a PATH_NOT_FOUND from the
-            // server. Split it instead: for a URI already in child form that is
-            // a no-op round trip. (See `nav_uri_round_trips_but_renaming_one_does_not`
-            // in `tests/smb_helpers.rs`.)
+            // The shared list hands back `entry.path()`, which for a share is the
+            // FULL child URI the entry was built from — not a bare folder name.
+            // Re-joining it with `child_browse` appended the whole URI as a name
+            // segment, giving a `rel` of "music/smb://nas/media/music/Rock" and a
+            // PATH_NOT_FOUND from the server. Split it instead: for a URI already
+            // in child form that is a no-op round trip. (See
+            // `nav_uri_round_trips_but_renaming_one_does_not` in
+            // `tests/smb_helpers.rs`.)
             let uri = path.to_string_lossy().into_owned();
             if let Some((_host, share, rel)) = network::split_uri(&uri) {
                 app.network_mut().browse_open(uri, share, rel);

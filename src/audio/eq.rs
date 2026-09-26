@@ -1,7 +1,7 @@
 //! Equalizer Source — wraps a rodio Source (f32 samples) and applies 10-band graphic EQ.
-//! Gains live in `Arc<RwLock<EqShared>>`, shared with the GUI thread: dragging a slider
-//! updates the shared gains and the running source swaps filter coefficients in `next()`
-//! — no sink rebuild, no audio restart.
+//! Gains live in `Arc<RwLock<EqShared>>`, shared with the GUI thread: a slider drag
+//! updates the shared gains and the running source swaps filter coefficients in
+//! `next()` — no sink rebuild, no audio restart.
 
 use rodio::Source;
 use std::sync::{Arc, RwLock};
@@ -28,7 +28,7 @@ pub const EQ_PRESETS: [(&str, [f32; 10]); 7] = [
 ];
 
 /// The preset a gain set matches, or `None` for Custom. Derived, never stored:
-/// `gains` is the single source of truth, so a hand-tweaked curve can't drift
+/// `gains` is the single source of truth, so a hand-tweaked curve cannot drift
 /// out of sync with the name shown beside it.
 pub fn preset_for(gains: [f32; 10]) -> Option<&'static str> {
     EQ_PRESETS
@@ -43,16 +43,15 @@ pub const EQ_GAIN_MAX_DB: f32 = 12.0;
 
 /// The app's equalizer settings, owning the handle the audio source reads.
 ///
-/// `EqSource` is constructed on the *GUI* thread during a track change and
-/// then read on the *audio* thread every frame, while the GUI writes gains as
-/// sliders move — so the state has to be an `Arc<RwLock<EqShared>>`. Holding
-/// that handle here rather than in `TPlayApp` keeps the presets, the clamping
-/// and the name derivation next to the filters they describe, and gives the
-/// seven `TPlayApp` accessors something to delegate to instead of each one
-/// reaching for the lock.
+/// `EqSource` is built on the *GUI* thread during a track change and read on the
+/// *audio* thread every frame while the GUI writes gains as sliders move — so the
+/// state has to be an `Arc<RwLock<EqShared>>`. Holding the handle here rather
+/// than in `TPlayApp` keeps the presets, clamping and name derivation beside the
+/// filters they describe, and gives the seven `TPlayApp` accessors something to
+/// delegate to instead of each reaching for the lock.
 ///
-/// Setters report whether the value actually changed, so the caller can skip
-/// marking the config dirty when a drag re-sets the same number.
+/// Setters report whether the value changed, so the caller can skip marking the
+/// config dirty when a drag re-sets the same number.
 pub struct EqSettings {
     shared: Arc<RwLock<EqShared>>,
 }
@@ -178,8 +177,8 @@ impl Biquad {
     }
 }
 
-/// 10-band graphic equalizer Source wrapper for f32 samples.
-/// Chains 10 biquad filters in series, one per band.
+/// 10-band graphic EQ Source wrapper for f32 samples: 10 biquad filters in
+/// series, one per band.
 pub struct EqSource<S>
 where
     S: Source<Item = f32>,
@@ -215,9 +214,9 @@ where
         }
     }
 
-    /// Pull the latest gains from the GUI thread. Bands whose gain changed get
-    /// fresh coefficients *and* fresh filter state (no click from stale history).
-    /// Returns whether the EQ is currently enabled.
+    /// Pull the latest gains from the GUI thread. A band whose gain changed gets
+    /// fresh coefficients *and* fresh filter state (no click from stale
+    /// history). Returns whether the EQ is currently enabled.
     fn refresh(&mut self) -> bool {
         let state = self.shared.read().unwrap();
         if state.enabled != self.cached_enabled {
@@ -229,10 +228,10 @@ where
         } else {
             // An index loop on purpose: this walks four parallel arrays at once
             // (`state.gains`, `cached_gains`, `bands`, `EQ_FREQUENCIES`), two of
-            // which are mutated. Clippy's `needless_range_loop` suggests
+            // them mutated. Clippy's `needless_range_loop` suggests
             // `EQ_FREQUENCIES.iter().enumerate()`, which still needs the index
-            // for the other three, so it is not shorter — and a 4-way `zip`
-            // would read worse than the parallel-array form it replaces.
+            // for the other three, so it is no shorter — and a 4-way `zip` reads
+            // worse than the parallel-array form it replaces.
             #[allow(clippy::needless_range_loop)]
             for i in 0..10 {
                 if state.gains[i] != self.cached_gains[i] {

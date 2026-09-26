@@ -21,9 +21,9 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &P
         palette.accent.b(),
         80,
     );
-    // Iterate the vector, not `0..n`: `compute_wave` returns exactly `n`
-    // buckets today, and if that ever changed, indexing would panic where
-    // iterating just draws fewer columns.
+    // Iterate the vector, not `0..n`: `compute_wave` returns exactly `n` buckets
+    // today; if that changed, indexing would panic where iterating just draws
+    // fewer columns.
     for (i, &w) in wave.iter().enumerate() {
         let x = rect.left() + i as f32 * bar_w;
         let y = w * amp;
@@ -37,9 +37,9 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &P
         );
     }
 
-    // Outline along the upper and lower envelope curves. `windows(2)` rather
-    // than `0..n-1` for the same reason as the fill loop: walk what `wave`
-    // actually holds instead of trusting its length.
+    // Outline the upper and lower envelope curves. `windows(2)` not `0..n-1` for
+    // the same reason as the fill loop: walk what `wave` holds rather than trust
+    // its length.
     let stroke = egui::Stroke::new(1.5_f32, palette.progress_fill);
     for (i, pair) in wave.windows(2).enumerate() {
         let x0 = rect.left() + i as f32 * bar_w;
