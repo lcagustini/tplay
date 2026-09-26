@@ -6,7 +6,7 @@
 use std::path::Path;
 use tplay::network::{
     cache_path_in, child_uri, dir_uri, fnv1a64, is_remote, parse_server_input,
-    server_uri, share_uri, spool_key, split_uri,
+    share_uri, spool_key, split_uri,
 };
 
 #[test]
@@ -112,7 +112,6 @@ fn uri_builders_round_trip_against_splitter() {
     // Share root (empty rel) has no trailing slash.
     assert_eq!(dir_uri(host, share, ""), "smb://nas/music");
     assert_eq!(share_uri(host, share), "smb://nas/music");
-    assert_eq!(server_uri(host), "smb://nas");
 
     // Descending appends exactly one slash regardless of parent form.
     assert_eq!(child_uri("smb://nas/music", "Album"), "smb://nas/music/Album");

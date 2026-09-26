@@ -1,10 +1,15 @@
-//! Library pane — file browser + favorite folders + tag-scanning track list.
+//! The Library pane's main column: search, the sortable column header, the rows,
+//! the composition counts + Add All, and the remote browser.
 //!
-//! Left: favorite folders. Right: the current folder's subfolders and audio
-//! files, each row showing title + artist/album + duration from
-//! the tag scan (cached in `TPlayApp`, so revisits are instant). Click a row
-//! to play it directly; the `+` button adds it to the playlist.
+//! `file_list_ui` is drawn once and used twice. The local folder browser passes
+//! `library::Entry` values whose `path` is a path; the SMB browser passes entries
+//! whose `path` is an `smb://` URI. A URI's last segment is the filename, so
+//! every key here — `file_name`, `file_stem`, `title_or_stem`, `sort_key`, the
+//! playlist-file check, the search haystack — treats it like any other path
+//! without a special case. That is what gives a share real tag columns, sorting
+//! and search instead of the name+size list it started with.
 
+use super::dir_name;
 use crate::app::TPlayApp;
 use crate::gui::dialogs;
 use crate::gui::theme;
@@ -13,34 +18,10 @@ use crate::network;
 use eframe::egui;
 use std::path::{Path, PathBuf};
 
-/// egui memory: has the pane listed `library_dir` at least once this session.
-const LIB_INIT: &str = "tplay.library.init";
 /// egui memory: the active search filter text.
 const LIB_QUERY: &str = "tplay.library.query";
-/// egui memory: the SMB add-server form state (host, username, password).
-/// `None` = closed; `Some` = open with the fields being edited.
-const NET_FORM: &str = "tplay.network.form";
 /// egui memory: the main-pane login prompt, keyed per host (`(NET_LOGIN, host)`).
 const NET_LOGIN: &str = "tplay.network.login";
-
-/// Fixed width of the Places/Favorites sidebar column. Allocated as an exact
-/// rect (not `set_min_width`) so no child can resize it — see the comment at
-/// the `new_child` call in the sidebar body.
-const SIDEBAR_W: f32 = 120.0;
-/// Width of the add-server form's text fields, inside the fixed-width sidebar.
-const FORM_W: f32 = 100.0;
-/// Height of one add-server form text field.
-const FORM_FIELD_H: f32 = 18.0;
-
-/// Leaf name of a dir (`/` at the filesystem root).
-fn dir_name(dir: &Path) -> String {
-    dir.file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| dir.to_string_lossy().into_owned())
-}
-
-
 
 /// Column widths shared by the sortable header and the file rows (matches SORT_OPTIONS).
 const CELL_WIDTHS: [f32; 4] = [0.0, 90.0, 100.0, 44.0]; // Title is flexible
@@ -158,7 +139,7 @@ enum FileAct {
 /// out: `Nav` is `navigate_to` locally and `browse_open` on a share,
 /// `LoadPlaylist` is `load_playlist_from` locally and `fetch_remote_playlist`
 /// (spool, then load) on one.
-pub enum Act {
+enum Act {
     /// Enter a subdirectory — a local path, or an `smb://` share directory URI.
     Nav(PathBuf),
     /// Play a track (local path or `smb://` URI; `play_file` routes both).
@@ -241,13 +222,6 @@ fn draw_file_row(
 /// The file list shared by the local folder browser and the SMB share browser:
 /// the search box, the sortable 4-column header, the folder/track/playlist rows
 /// and the "Scanning…" note.
-///
-/// Both sources are `&[library::Entry]`. For a share, `path` is the `smb://`
-/// URI, which every key here treats like any other path — `file_name` and
-/// `file_stem` return the remote name, so `title_or_stem`/`sort_key` and the
-/// playlist-file check all work without a special case. That is what lets the
-/// share browser have real tag columns, sorting and search instead of the
-/// name+size list it started with.
 ///
 /// There is deliberately **no `..` row**: the breadcrumb is the only way up.
 /// It walks every ancestor and makes each non-last segment a jump target, so
@@ -418,6 +392,30 @@ fn file_list_ui(
     out
 }
 
+/// The local folder browser's main column: composition counts + Add All, then
+/// the shared file list. `remote_list_ui` is the same two steps with
+/// `browse_open` behind `Nav`, which is why both end in `file_list_ui`.
+pub fn local_list_ui(app: &mut TPlayApp, ui: &mut egui::Ui, theme: &theme::Theme) {
+    let entries = app.library_entries().to_vec();
+    list_header_right(app, ui, theme.palette, &entries);
+    ui.add_space(4.0);
+    let act = file_list_ui(
+        app,
+        ui,
+        theme,
+        &entries,
+        app.library_scanning().then(|| "Scanning…".to_string()),
+        false,
+    );
+    match act {
+        Some(Act::Nav(dir)) => app.navigate_to(dir),
+        Some(Act::Play(path)) => app.play_file(path),
+        Some(Act::Add(path)) => app.add_files(vec![path]),
+        Some(Act::LoadPlaylist(path)) => app.load_playlist_from(path),
+        None => {}
+    }
+}
+
 /// The right-hand end of a file-list header: composition counts and Add All.
 /// Shared because both browsers now work from `&[library::Entry]` — a share's
 /// entries carry `smb://` URIs, which go into the playlist unchanged.
@@ -488,80 +486,16 @@ fn list_header_right(
     });
 }
 
-/// The remote browser: swaps the main column when a server is selected.
-/// Breadcrumb (Local / host / share / dir) + the shared file list, with
-/// `browse_open` standing in for `navigate_to`.
-fn remote_list_ui(app: &mut TPlayApp, ui: &mut egui::Ui) {
-    let Some(browse) = app.network().browse().cloned() else { return };
-    let theme = app.theme().clone();
+/// The remote browser's main column: the shared file list, with `browse_open`
+/// standing in for `navigate_to`. The breadcrumb above it is `header`'s.
+pub fn remote_list_ui(
+    app: &mut TPlayApp,
+    ui: &mut egui::Ui,
+    theme: &theme::Theme,
+    browse: &network::NetworkBrowse,
+) {
     let p = theme.palette;
     let folder_tex = app.theme_icon(theme::Icon::Folder).cloned();
-
-    // Breadcrumb segments: (label, uri, share, rel). "Local" is the exit.
-    let mut segs: Vec<(String, String, Option<String>, String)> =
-        vec![(String::from("Local"), String::new(), None, String::new())];
-    segs.push((
-        browse.host.clone(),
-        network::server_uri(&browse.host),
-        None,
-        String::new(),
-    ));
-    if let Some(share) = &browse.share {
-        segs.push((
-            share.clone(),
-            network::share_uri(&browse.host, share),
-            Some(share.clone()),
-            String::new(),
-        ));
-        if !browse.rel.is_empty() {
-            let mut walk = String::new();
-            for part in browse.rel.split('/') {
-                if !walk.is_empty() {
-                    walk.push('/');
-                }
-                walk.push_str(part);
-                segs.push((
-                    part.to_string(),
-                    network::dir_uri(&browse.host, share, &walk),
-                    Some(share.clone()),
-                    walk.clone(),
-                ));
-            }
-        }
-    }
-
-    ui.horizontal(|ui| {
-        for (i, (label, uri, share, rel)) in segs.iter().enumerate() {
-            let last = i + 1 == segs.len();
-            if last {
-                ui.label(egui::RichText::new(label).strong().color(p.text_primary));
-                continue;
-            }
-            let w = (label.chars().count() as f32 * 8.0 + 6.0).min(70.0);
-            let clicked = ui
-                .add_sized(
-                    egui::vec2(w, 18.0),
-                    egui::Label::new(
-                        egui::RichText::new(label).small().color(p.text_secondary),
-                    )
-                    .truncate()
-                    .sense(egui::Sense::click()),
-                )
-                .clicked();
-            ui.label(egui::RichText::new("/").small().color(p.text_secondary));
-            if clicked {
-                if i == 0 {
-                    app.network_mut().leave_network();
-                } else if share.is_none() {
-                    app.network_mut().browse_server(browse.host.clone());
-                } else {
-                    app.network_mut().browse_open(uri.clone(), share.clone(), rel.clone());
-                }
-            }
-        }
-    });
-
-    ui.add_space(4.0);
 
     // Busy / error states replace the list entirely — there is nothing to show
     // while a listing is in flight, and on a logon failure the main pane owes
@@ -578,7 +512,7 @@ fn remote_list_ui(app: &mut TPlayApp, ui: &mut egui::Ui) {
         // NTSTATUS is not actionable — ask for the credentials here
         // instead, with the saved address already filled in.
         if err.contains("LOGON_FAILURE") || err.contains("ACCESS_DENIED") {
-            login_form_ui(app, ui, &browse);
+            login_form_ui(app, ui, theme, browse);
         } else {
             ui.label(egui::RichText::new(err).small().color(p.text_secondary));
             ui.label(
@@ -602,7 +536,7 @@ fn remote_list_ui(app: &mut TPlayApp, ui: &mut egui::Ui) {
         let mut names: Vec<&network::RemoteEntry> = browse.entries.iter().collect();
         names.sort_by_key(|e| e.name.to_lowercase());
         for e in names {
-            if draw_dir_row(ui, &theme, 24.0, i, &e.name, folder_tex.as_ref()) {
+            if draw_dir_row(ui, theme, 24.0, i, &e.name, folder_tex.as_ref()) {
                 share_name = Some(e.name.clone());
             }
             i += 1;
@@ -628,7 +562,7 @@ fn remote_list_ui(app: &mut TPlayApp, ui: &mut egui::Ui) {
     // a folder: same tag columns, same sort keys, same playlist-file rows.
     // Anything that is neither audio nor a `.tplay` is not listed, same as a
     // local folder.
-    let entries: Vec<library::Entry> = browse
+    let mut entries: Vec<library::Entry> = browse
         .entries
         .iter()
         .filter(|e| e.is_dir || library::is_audio(Path::new(&e.name)) || library::is_playlist(Path::new(&e.name)))
@@ -637,7 +571,6 @@ fn remote_list_ui(app: &mut TPlayApp, ui: &mut egui::Ui) {
             is_dir: e.is_dir,
         })
         .collect();
-    let mut entries = entries;
     library::sort_entries(&mut entries, app.tag_cache(), app.library_sort(), app.library_sort_asc());
 
     // Ask for the tags of everything on screen that isn't cached yet. Safe to
@@ -669,7 +602,7 @@ fn remote_list_ui(app: &mut TPlayApp, ui: &mut egui::Ui) {
 
     list_header_right(app, ui, p, &entries);
     ui.add_space(4.0);
-    let act = file_list_ui(app, ui, &theme, &entries, note, true);
+    let act = file_list_ui(app, ui, theme, &entries, note, true);
 
     match act {
         Some(Act::Nav(path)) => {
@@ -698,9 +631,8 @@ fn remote_list_ui(app: &mut TPlayApp, ui: &mut egui::Ui) {
 /// Deliberately in the **main** pane, not the sidebar: the address is already
 /// known and saved, so only the login should ever need retyping. The username is
 /// persisted with the server; the password stays in the session map only.
-fn login_form_ui(app: &mut TPlayApp, ui: &mut egui::Ui, browse: &network::NetworkBrowse) {
+fn login_form_ui(app: &mut TPlayApp, ui: &mut egui::Ui, theme: &theme::Theme, browse: &network::NetworkBrowse) {
     let host = browse.host.clone();
-    let theme = app.theme().clone();
     let p = theme.palette;
     // Keyed per host, so each saved server keeps the username it was given and
     // a revisit prefills it instead of starting blank.
@@ -791,387 +723,4 @@ fn login_form_ui(app: &mut TPlayApp, ui: &mut egui::Ui, browse: &network::Networ
         }
     }
     ui.ctx().memory_mut(|m| m.data.insert_temp(id, creds));
-}
-
-pub fn library_pane(app: &mut TPlayApp, ui: &mut egui::Ui) {
-    let theme = app.theme().clone();
-    let p = theme.palette;
-    let layout = theme.layout.with_defaults();
-
-    // Network mode swaps the main column for the remote browser; the local
-    // header (breadcrumb + favorite) only applies to the local folder browser
-    // (the Places column below stays in both modes). Everything below the
-    // header — search, sort header, rows, counts, Add All — is the shared
-    // `file_list_ui`, so both browsers get it.
-    let network_mode = app.network().browse().is_some();
-    if !network_mode {
-    // First frame this session: list the saved/current dir and start the scan.
-    if !ui.ctx().memory_mut(|m| m.data.get_temp::<bool>(egui::Id::new(LIB_INIT)).unwrap_or(false)) {
-        ui.ctx().memory_mut(|m| m.data.insert_temp(egui::Id::new(LIB_INIT), true));
-        app.navigate_to(app.library_dir().to_path_buf());
-    }
-
-    // Header: breadcrumb to the current dir (clickable ancestors) + favorite
-    // toggle. The composition counts and Add All live in `list_header_right`,
-    // drawn just above the list so the share browser gets them too.
-    ui.horizontal(|ui| {
-        // Breadcrumb: root → current, every ancestor clickable; middle
-        // segments collapse to "…" beyond depth 3 so deep paths fit narrow
-        // panes. The trailing segment is the current dir (strong, inactive).
-        let dir = app.library_dir().to_path_buf();
-        let mut segs: Vec<PathBuf> = Vec::new();
-        let mut cur = Some(dir.clone());
-        while let Some(d) = cur {
-            segs.push(d.clone());
-            cur = d.parent().map(Path::to_path_buf);
-        }
-        segs.reverse();
-        let mut jump: Option<PathBuf> = None;
-        for (i, seg) in segs.iter().enumerate() {
-            // Root + last two always show; anything in between → one "…".
-            if i != 0 && i + 2 < segs.len() {
-                if i == 1 {
-                    ui.label(egui::RichText::new("…").small().color(p.text_secondary));
-                }
-                continue;
-            }
-            let name = dir_name(seg);
-            if i + 1 == segs.len() {
-                ui.label(egui::RichText::new(name).strong().color(p.text_primary))
-                    .on_hover_text(seg.display().to_string());
-            } else {
-                // Cap each ancestor's width so long names truncate instead of
-                // shoving the ★ toggle / Add All off the pane edge.
-                let w = (name.chars().count() as f32 * 8.0 + 6.0).min(70.0);
-                if ui
-                    .add_sized(
-                        egui::vec2(w, 18.0),
-                        egui::Label::new(
-                            egui::RichText::new(name).small().color(p.text_secondary),
-                        )
-                        .truncate()
-                        .sense(egui::Sense::click()),
-                    )
-                    .on_hover_text(seg.display().to_string())
-                    .clicked()
-                {
-                    jump = Some(seg.clone());
-                }
-                ui.label(egui::RichText::new("/").small().color(p.text_secondary));
-            }
-        }
-        if let Some(seg) = jump {
-            app.navigate_to(seg);
-        }
-        let fav = app.is_favorite(&dir);
-        let tex = if fav {
-            app.theme_icon(theme::Icon::StarOn).cloned()
-        } else {
-            app.theme_icon(theme::Icon::StarOff).cloned()
-        };
-        let fav_btn = match tex {
-            Some(tex) => egui::Button::image(
-                egui::Image::new(&tex).fit_to_exact_size(egui::vec2(14.0, 14.0)),
-            )
-            .selected(fav),
-            None => egui::Button::new(if fav { "★" } else { "☆" }).selected(fav),
-        };
-        if ui.add(fav_btn).on_hover_text("Favorite folder").clicked() {
-            app.toggle_favorite(dir);
-        }
-    });
-
-    // The counts + Add All that used to sit at the end of the header now live
-    // in `list_header_right`, drawn by both browsers just above their list.
-    }
-
-    ui.add_space(4.0);
-
-    // Add-server form state (just the host) in egui memory — carried across
-    // frames. Credentials are prompted for in the main pane instead, so a saved
-    // address can be reused without retyping it.
-    let mut form = ui.ctx().memory_mut(|m| {
-        m.data.get_temp::<Option<String>>(egui::Id::new(NET_FORM)).unwrap_or(None)
-    });
-
-    // Places + Favorites column, file browser column.
-    ui.horizontal_top(|ui| {
-        // The Places/Favorites column is a FIXED 120px sidebar. Two egui facts
-        // force this exact shape:
-        //
-        // 1. Not `ui.vertical` + `set_min_width`: a `ui.vertical` child is sized
-        //    by its own `min_rect`, and `TextEdit` deliberately grows that by
-        //    the text overflow ("allocate additional space … so a ScrollArea can
-        //    scroll to the cursor"). This ScrollArea is vertical-only, so its
-        //    width *is* the content width and the overflow propagated up —
-        //    typing a long address widened the whole sidebar. `set_max_width`
-        //    and `clip_text` cannot stop it: caps bound painting, but the
-        //    overflow grows `min_rect`, and `min_rect` wins the layout.
-        // 2. `ui.new_child` alone does NOT advance this horizontal cursor (only
-        //    `allocate_new_ui` does), so the file-list sibling was laid out at
-        //    the same x and drew on top of the sidebar. `allocate_space`
-        //    reserves the rect *and* moves the cursor — both halves needed.
-        let (_, sidebar_rect) = ui.allocate_space(egui::vec2(SIDEBAR_W, ui.available_height()));
-        let mut sidebar = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(sidebar_rect)
-                .layout(egui::Layout::top_down(egui::Align::Min)),
-        );
-        sidebar.vertical(|ui| {
-            let scroll_h = (ui.available_height() - 8.0).max(40.0);
-            // id_salt: without it this would share the default "scroll_area"
-            // persistent id with the file list's ScrollArea (sibling column
-            // uis resolve to the same ui.id) → egui ID-clash debug overlay.
-            egui::ScrollArea::vertical()
-                .id_salt("places_favorites")
-                // auto_shrink x=true: a vertical scroll area must not claim the
-                // whole row width (auto_shrink=false expands it to fill) — that
-                // starves the file-list column next to it.
-                .auto_shrink([true, false])
-                .max_height(scroll_h)
-                .show(ui, |ui| {
-                    let mut jump: Option<PathBuf> = None;
-
-                    // The local row the sidebar should highlight — and `None`
-                    // while a share is open. Entering network mode does NOT
-                    // change `library_dir`, so comparing against it directly
-                    // kept the last local folder lit *alongside* the server
-                    // row. Exactly one row is active at a time: the server when
-                    // browsing, otherwise the local folder. (The other
-                    // direction already worked: clicking a local folder calls
-                    // `leave_network`, so the server row un-highlights.)
-                    let current_local = (!network_mode).then(|| app.library_dir().to_path_buf());
-
-                    // Places: fixed user-folder shortcuts (Home + XDG dirs) —
-                    // same row style as favorites, no ✕ (not removable).
-                    let places = app.quick_folders();
-                    if !places.is_empty() {
-                        ui.label(egui::RichText::new("Places").small().strong().color(p.text_secondary));
-                        ui.add_space(4.0);
-                        for (label, path) in places {
-                            let active = current_local.as_deref() == Some(path.as_path());
-                            if ui
-                                .add_sized(
-                                    egui::vec2(100.0, 18.0),
-                                    egui::Label::new(
-                                        egui::RichText::new(label)
-                                            .color(if active { p.accent } else { p.text_secondary })
-                                            .font(egui::FontId::new(layout.text_meta, theme.metadata_font.clone())),
-                                    )
-                                    .truncate()
-                                    .sense(egui::Sense::click()),
-                                )
-                                .on_hover_text_at_pointer(path.display().to_string())
-                                .clicked()
-                            {
-                                jump = Some(path.clone());
-                            }
-                        }
-                        ui.add_space(8.0);
-                    }
-
-                    // Volumes: local block partitions from /proc/self/mounts.
-                    let volumes = library::Volume::mounted_volumes();
-                    if !volumes.is_empty() {
-                        ui.label(egui::RichText::new("Volumes").small().strong().color(p.text_secondary));
-                        ui.add_space(4.0);
-                        for vol in volumes {
-                            let active = current_local.as_deref() == Some(vol.path.as_path());
-                            if ui
-                                .add_sized(
-                                    egui::vec2(100.0, 18.0),
-                                    egui::Label::new(
-                                        egui::RichText::new(&vol.label)
-                                            .color(if active { p.accent } else { p.text_secondary })
-                                            .font(egui::FontId::new(layout.text_meta, theme.metadata_font.clone())),
-                                    )
-                                    .truncate()
-                                    .sense(egui::Sense::click()),
-                                )
-                                .on_hover_text_at_pointer(vol.path.display().to_string())
-                                .clicked()
-                            {
-                                jump = Some(vol.path.clone());
-                            }
-                        }
-                        ui.add_space(8.0);
-                    }
-
-                    // Network: built-in SMB browsing (no mount required).
-                        {
-                            let servers = app.network().servers().to_vec();
-                            let active_host = app.network().browse().map(|b| b.host.clone());
-                            // Same LTR row style as the section labels above — a
-                            // right_to_left header would fill the scroll area's
-                            // (unbounded) content width and push the + past the
-                            // 120px sidebar.
-                            ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new("Network").small().strong().color(p.text_secondary));
-                                if ui.add(egui::Button::new("+").small()).on_hover_text("Add server").clicked() {
-                                    // is_none + assign: `Option::or` would move `form` out of this scope.
-                                    if form.is_none() {
-                                        form = Some(String::new());
-                                    }
-                                }
-                            });
-                        if let Some(host) = form.as_mut() {
-                            // Enter submits (singleline TextEdit surrenders focus
-                            // on Enter — the standard pattern).
-                            let mut enter = false;
-                            let mut submit: Option<bool> = None; // Some(true) = Add, Some(false) = Cancel
-                            // The form lives in a FIXED-RECT child so egui's TextEdit
-                            // overflow allocation ("allocate additional space … so a
-                            // ScrollArea can properly scroll to the cursor") cannot
-                            // widen the scroll content — that growth is what kept
-                            // dragging the sidebar's scrollbar around while typing.
-                            //
-                            // Both halves are load-bearing and they are *different*
-                            // halves: `allocate_space` reserves the rect AND advances
-                            // the layout cursor (a bare `new_child` would leave the
-                            // next row drawn on top of the form), while the raw
-                            // `new_child` does NOT propagate its own min_rect to the
-                            // scroll content, which is what contains the overflow.
-                            // `clip_text` alone is not enough — it pins the field rect
-                            // but the overflow allocation still grows the parent.
-                            let gap = ui.spacing().item_spacing.y;
-                            let form_h = FORM_FIELD_H + gap + ui.spacing().interact_size.y;
-                            let (_, form_rect) = ui.allocate_space(egui::vec2(FORM_W, form_h));
-                            let mut form_ui = ui.new_child(
-                                egui::UiBuilder::new()
-                                    .max_rect(form_rect)
-                                    .layout(egui::Layout::top_down(egui::Align::Min)),
-                            );
-                            form_ui.vertical(|ui| {
-                                let field = ui.add_sized(egui::vec2(FORM_W, FORM_FIELD_H), egui::TextEdit::singleline(host).hint_text("host or smb://host/share").clip_text(true))
-                                    .on_hover_text("like 192.168.1.50 — ask for the login in the main pane");
-                                if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                                    enter = true;
-                                }
-                                ui.horizontal(|ui| {
-                                    if ui.add(egui::Button::new("Add").small()).clicked() {
-                                        submit = Some(true);
-                                    }
-                                    if ui.add(egui::Button::new("Cancel").small()).clicked() {
-                                        submit = Some(false);
-                                    }
-                                });
-                            });
-                            if submit.is_none() && enter {
-                                submit = Some(true);
-                            }
-                            match submit {
-                                Some(true) => {
-                                    // The field accepts a bare host OR a full
-                                    // `smb://host/share[/dir]` URI. Parsing it
-                                    // keeps the full URI out of the saved-server
-                                    // list and drops us straight into the share
-                                    // when one is named — the GNOME-Files path,
-                                    // which never enumerates shares first.
-                                    // Only the host is stored; credentials are asked
-                                    // for in the main pane, so a saved server can be
-                                    // reused without retyping its address.
-                                    if let Some((h, share, rel)) = network::parse_server_input(host) {
-                                        app.add_network_server(h.clone(), String::new());
-                                        form = None;
-                                        if let Some(share) = share.filter(|s| !s.is_empty()) {
-                                            app.network_mut().browse_open(
-                                                network::dir_uri(&h, &share, &rel),
-                                                Some(share),
-                                                rel,
-                                            );
-                                        }
-                                    }
-                                }
-                                Some(false) => form = None,
-                                None => {}
-                            }
-                            ui.add_space(4.0);
-                        }
-                        for s in servers {
-                            ui.horizontal(|ui| {
-                                let active = active_host.as_ref() == Some(&s.host);
-                                if ui
-                                    .add_sized(
-                                        egui::vec2(88.0, 18.0),
-                                        egui::Label::new(
-                                            egui::RichText::new(&s.host)
-                                                .color(if active { p.accent } else { p.text_secondary })
-                                                .font(egui::FontId::new(layout.text_meta, theme.metadata_font.clone())),
-                                        )
-                                        .truncate()
-                                        .sense(egui::Sense::click()),
-                                    )
-                                    .on_hover_text_at_pointer("Browse shares")
-                                    .clicked()
-                                {
-                                    app.network_mut().browse_server(s.host.clone());
-                                }
-                                if theme::icon_button(ui, app.theme_icon(theme::Icon::Remove), theme::Icon::Remove, 13.0, true, false).clicked() {
-                                    app.remove_network_server(&s.host);
-                                }
-                            });
-                        }
-                        ui.add_space(8.0);
-                    }
-
-                    ui.label(egui::RichText::new("Favorites").small().strong().color(p.text_secondary));
-                    ui.add_space(4.0);
-                    for dir in app.favorite_dirs().to_vec() {
-                        ui.horizontal(|ui| {
-                            let name = dir_name(&dir);
-                            let active = current_local.as_deref() == Some(dir.as_path());
-                            if ui
-                                .add_sized(
-                                    egui::vec2(100.0, 18.0),
-                                    egui::Label::new(
-                                        egui::RichText::new(&name)
-                                            .color(if active { p.accent } else { p.text_secondary })
-                                            .font(egui::FontId::new(layout.text_meta, theme.metadata_font.clone())),
-                                    )
-                                    .truncate()
-                                    .sense(egui::Sense::click()),
-                                )
-                                .clicked()
-                            {
-                                jump = Some(dir.clone());
-                            }
-                            if theme::icon_button(ui, app.theme_icon(theme::Icon::Remove), theme::Icon::Remove, 13.0, true, false).clicked() {
-                                app.toggle_favorite(dir.clone());
-                            }
-                        });
-                    }
-                    if let Some(dir) = jump {
-                        // Entering a local folder exits network browse mode.
-                        app.network_mut().leave_network();
-                        app.navigate_to(dir);
-                    }
-                });
-        });
-        ui.separator();
-        ui.vertical(|ui| {
-            if network_mode {
-                remote_list_ui(app, ui);
-            } else {
-            let entries = app.library_entries().to_vec();
-            list_header_right(app, ui, p, &entries);
-            ui.add_space(4.0);
-            let act = file_list_ui(
-                app,
-                ui,
-                &theme,
-                &entries,
-                app.library_scanning().then(|| "Scanning…".to_string()),
-                false,
-            );
-            match act {
-                Some(Act::Nav(dir)) => app.navigate_to(dir),
-                Some(Act::Play(path)) => app.play_file(path),
-                Some(Act::Add(path)) => app.add_files(vec![path]),
-                Some(Act::LoadPlaylist(path)) => app.load_playlist_from(path),
-                None => {}
-            }
-            }
-        });
-    });
-    ui.ctx().memory_mut(|m| m.data.insert_temp(egui::Id::new(NET_FORM), form));
 }

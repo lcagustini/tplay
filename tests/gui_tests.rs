@@ -451,3 +451,116 @@ fn right_to_left_center_does_not_swallow_the_column() {
         "Align::Min must consume strictly less than Center ({min_h:.1} vs {center_h:.1})"
     );
 }
+
+/// The Library pane draws one breadcrumb for both sources, so the two segment
+/// builders plus `plan` (the `…` rule) are the only source-specific logic in
+/// it. Both are pure, so none of this needs an `egui::Ui`.
+mod breadcrumb {
+    use super::Path;
+    use tplay::gui::panes::library::header::{local_segs, plan, remote_segs, Action, Step};
+    use tplay::network::NetworkBrowse;
+
+    /// The two `always` values the pane passes, named.
+    const LOCAL: usize = 1;
+    const SHARE: usize = 3;
+
+    fn browse(share: Option<&str>, rel: &str) -> NetworkBrowse {
+        NetworkBrowse {
+            host: "nas".into(),
+            share: share.map(str::to_string),
+            rel: rel.into(),
+            ..Default::default()
+        }
+    }
+
+    fn labels(segs: &[tplay::gui::panes::library::header::Seg]) -> Vec<&str> {
+        segs.iter().map(|s| s.label.as_str()).collect()
+    }
+
+    #[test]
+    fn plan_collapses_the_middle_and_keeps_the_way_home() {
+        // Local: only the filesystem root is exempt, so a 6-deep path shows the
+        // root, one "…", and the last two levels.
+        assert_eq!(
+            plan(6, LOCAL),
+            vec![Step::Seg(0), Step::Ellipsis, Step::Seg(4), Step::Seg(5)]
+        );
+        // A shallow path is never collapsed — every level is one click away.
+        assert_eq!(plan(3, LOCAL), vec![Step::Seg(0), Step::Seg(1), Step::Seg(2)]);
+        // Premise for the share case below: the local rule really would strand
+        // a user, because it collapses the host and the share.
+        assert_eq!(
+            plan(7, LOCAL),
+            vec![
+                Step::Seg(0),
+                Step::Ellipsis,
+                Step::Seg(5),
+                Step::Seg(6)
+            ],
+            "local rule over a 7-segment share path"
+        );
+        // A share exempts Local / host / share, so a deep directory still has a
+        // route to the share root — with no `..` row, that is the only way out.
+        assert_eq!(
+            plan(7, SHARE),
+            vec![
+                Step::Seg(0),
+                Step::Seg(1),
+                Step::Seg(2),
+                Step::Ellipsis,
+                Step::Seg(5),
+                Step::Seg(6)
+            ]
+        );
+        // The share-list stage is 2 segments — under `always`, so the "Local"
+        // exit can never collapse away, and no "…" appears.
+        assert_eq!(plan(2, SHARE), vec![Step::Seg(0), Step::Seg(1)]);
+        // Degenerate: nothing to draw, and never a "…" for an empty list.
+        assert!(plan(0, LOCAL).is_empty());
+    }
+
+    #[test]
+    fn local_segs_walk_root_to_current() {
+        let segs = local_segs(Path::new("/home/u/Music/Rock"));
+        // Root's label is "/" rather than blank, so the first segment is never
+        // an empty clickable box.
+        assert_eq!(labels(&segs), ["/", "home", "u", "Music", "Rock"]);
+        assert!(matches!(segs[0].action, Action::GoTo(_)));
+        // Every segment hovers its full path: a capped segment can truncate to
+        // nothing, so the tooltip is the only way to see where it points.
+        assert_eq!(segs[3].hover.as_deref(), Some("/home/u/Music"));
+        // The last segment is where we already are — drawn strong, not clicked.
+        assert!(matches!(&segs[4].action, Action::GoTo(p) if p == Path::new("/home/u/Music/Rock")));
+    }
+
+    #[test]
+    fn remote_segs_carry_a_full_uri_not_a_bare_name() {
+        let segs = remote_segs(&browse(Some("music"), "Rock/Album"));
+        assert_eq!(labels(&segs), ["Local", "nas", "music", "Rock", "Album"]);
+        // The first three are the way *out* of the share, not into it.
+        assert!(matches!(segs[0].action, Action::LeaveNetwork));
+        assert!(matches!(&segs[1].action, Action::BrowseServer(h) if h == "nas"));
+        // Every share/dir segment carries the walk *to* itself (cumulative, not
+        // the segment's own name) and the share root carries an empty one.
+        // Re-joining these instead of splitting is what produced a
+        // PATH_NOT_FOUND (see `nav_uri_round_trips_but_renaming_one_does_not`).
+        for (i, expect_rel) in ["", "Rock", "Rock/Album"].iter().enumerate() {
+            match &segs[2 + i].action {
+                Action::BrowseOpen { uri, share, rel } => {
+                    assert_eq!(share, "music");
+                    assert_eq!(rel, expect_rel);
+                    assert!(
+                        uri.starts_with("smb://nas/music"),
+                        "segment {i} uri must be a full child URI, got {uri}"
+                    );
+                }
+                other => panic!("segment {i} should be BrowseOpen, got {other:?}"),
+            }
+        }
+        // At the share-list stage there is no share yet: Local + host, and the
+        // host goes back to the share listing rather than into a share.
+        let listing = remote_segs(&browse(None, ""));
+        assert_eq!(labels(&listing), ["Local", "nas"]);
+        assert!(matches!(listing[1].action, Action::BrowseServer(_)));
+    }
+}

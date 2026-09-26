@@ -582,11 +582,6 @@ pub fn parse_server_input(input: &str) -> Option<(String, Option<String>, String
     split_uri(&format!("smb://{raw}"))
 }
 
-/// `smb://host`
-pub fn server_uri(host: &str) -> String {
-    format!("smb://{host}")
-}
-
 /// `smb://host/share` — share root.
 pub fn share_uri(host: &str, share: &str) -> String {
     format!("smb://{host}/{share}")
