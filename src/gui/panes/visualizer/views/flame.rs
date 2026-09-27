@@ -26,13 +26,11 @@ const BASE_FRAC: f32 = 0.12;
 /// step, so `levels.len() - 1` of them.
 ///
 /// The whole ridgeline plus a baseline edge is a wiggly mass, so it is **not**
-/// convex, and egui triangulates every closed path as a fan from its first
-/// point (`epaint::tessellator::fill_closed_path`) — which fills a mass as a
-/// wedge of triangles shot from the leftmost peak rather than as the
-/// silhouette. Each trapezoid is convex because `x` only ever increases and the
-/// top edge interpolates between two heights at or above the baseline; a
-/// floor-level step degenerates to zero area, which the same fan emits as
-/// nothing.
+/// convex, and the mesh `draw` builds fans each piece from its first corner, so
+/// a reflex corner spills outside it. Each trapezoid is convex because `x` only
+/// ever increases and the top edge interpolates between two heights at or above
+/// the baseline; a floor-level step degenerates to zero area, which a triangle
+/// fan emits as nothing.
 ///
 /// Pure and `Ui`-free so the convexity is testable without a window; `draw` is
 /// the only caller. The top edge of each quad *is* the contour, so the caller
@@ -84,14 +82,24 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &P
         .collect();
     let quads = fill_quads(rect, &levels);
 
-    // Fill down to the baseline so it reads as a mass, not a wire.
+    // One mesh, not one `Shape` per trapezoid. epaint insets a closed path's
+    // fill by half its 1px feathering and feathers the rim outward, so 31
+    // adjacent translucent pieces leave a real ~1px unpainted gap along each of
+    // the 30 shared edges — the pane background showing through as a line, worst
+    // where the mass is dimmest. A mesh draws the triangles exactly: the shared
+    // edge belongs to the two triangles that meet on it and to nothing else.
+    let mut mesh = egui::epaint::Mesh::default();
+    mesh.reserve_vertices(4 * quads.len());
+    mesh.reserve_triangles(4 * quads.len());
     for quad in &quads {
-        painter.add(egui::Shape::convex_polygon(
-            quad.to_vec(),
-            palette.accent.gamma_multiply(0.45),
-            egui::Stroke::NONE,
-        ));
+        let base = mesh.vertices.len() as u32;
+        for corner in quad {
+            mesh.colored_vertex(*corner, palette.accent.gamma_multiply(0.45));
+        }
+        mesh.add_triangle(base, base + 1, base + 2);
+        mesh.add_triangle(base, base + 2, base + 3);
     }
+    painter.add(egui::Shape::mesh(mesh));
 
     // The contour itself, in the brighter token — the same split bars.rs makes
     // between a dim body and an accent edge. Read straight off the fill's top

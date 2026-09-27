@@ -46,9 +46,12 @@ const _: () = assert!(MAX_MODE >= 2 && MAX_MODE < VIZ_BANDS);
 
 /// How much louder a challenger has to be before the figure changes, in dB.
 pub const MARGIN_DB: f32 = 3.0;
-/// Frames the figure is pinned after a switch. The insurance against a genuine
-/// two-cycle, which hysteresis always permits.
-const HOLD_FRAMES: u32 = 45;
+/// Frames the figure is pinned after a switch — 1.5 s at 60 fps. The insurance
+/// against a genuine two-cycle, which hysteresis always permits, and with the
+/// spectrum now tracked briskly it is the *only* thing bounding how often the
+/// figure can change. It costs no latency: a switch happens the moment the
+/// margin is cleared, and only the switch *after* it waits.
+const HOLD_FRAMES: u32 = 90;
 
 /// Pick the plate's mode pair from the smoothed band levels, sticking to the
 /// current one.
@@ -149,7 +152,9 @@ pub fn segments(n: usize, m: usize, rect: egui::Rect) -> Vec<[egui::Pos2; 2]> {
         )
     };
 
-    let mut segs = Vec::new();
+    // Reserved up front: the count is ~GRID²/2, so growing into it costs ten
+    // reallocations and a copy of 32 KB, on a per-frame path.
+    let mut segs = Vec::with_capacity(2 * GRID * GRID);
     for gy in 0..GRID {
         for gx in 0..GRID {
             // Boundary order — top, right, bottom, left — is what makes an
@@ -207,8 +212,19 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &P
             .unwrap_or([-60.0; VIZ_BANDS])
     });
 
-    const ATTACK: f32 = 0.08;
-    const RELEASE: f32 = 0.08;
+    // Aimed at the *spectrum*, not at the figure. The stickiness lives in
+    // `pick_mode`, and the 0.08 that used to be here was a leftover from when the
+    // bare top-two needed the levels blurred to survive — but a 0.08 coefficient
+    // is a 12.5-frame time constant (~208 ms per band), and it cannot average a
+    // *discrete* pick, so it bought no stability at all. It only blurred the input
+    // to the decision, which is where a real change of the music then had to wait
+    // to show up. At 0.3 that wait is ~4 frames instead of ~12.
+    //
+    // Release is faster than attack so a band that stops being loud stops
+    // holding the figure hostage. The other direction is a transient, and a
+    // transient should not win a plate.
+    const ATTACK: f32 = 0.3;
+    const RELEASE: f32 = 0.6;
     compute_bands(viz, &mut prev, ATTACK, RELEASE);
 
     // Which figure is showing, and how many frames it is still pinned for, is

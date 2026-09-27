@@ -23,12 +23,12 @@ pub const SEGMENTS: usize = 4;
 /// The whole view's fill, as convex pieces: one quad per arc step, so
 /// `VIZ_BANDS * SEGMENTS` of them.
 ///
-/// A ring sector is **not** convex — it has the middle cut out — and egui
-/// triangulates every closed path as a fan from its first point
-/// (`epaint::tessellator::fill_closed_path`), which fills such a polygon as
-/// garbage. Quads are convex by construction, and the chord of a quad's outer
-/// edge deviates from the arc by ~0.05px at this radius, so the faceting is
-/// invisible.
+/// A ring sector is **not** convex — it has the middle cut out — and the mesh
+/// `draw` builds fans each quad from its first corner, which is the same
+/// constraint one level down: give the fan a reflex corner and it spills outside
+/// the quad. Quads are convex by construction, and a quad's outer chord deviates
+/// from the arc by ~0.05px at this radius, so the decomposition is exact rather
+/// than approximate.
 ///
 /// Pure and `Ui`-free so the convexity is testable without a window; `draw` is
 /// the only caller.
@@ -86,7 +86,18 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &P
         .map(|&db| ((db + 60.0) / 60.0).clamp(0.0, 1.0))
         .collect();
 
-    for (i, quad) in fill_quads(rect, &levels).into_iter().enumerate() {
+    // One mesh, not one `Shape` per quad. The fill is translucent, and epaint
+    // feathers every closed path half a pixel outward, so 128 separate quads
+    // double-blend a 1px strip along all 224 of their shared edges — a visible
+    // grid, worst on the dim bands where the alpha is lowest. A mesh has no
+    // feathered border: the shared edge is drawn once, by the two triangles that
+    // meet on it. Winding is free — egui_glow disables CULL_FACE and wgpu is
+    // handed `cull_mode: None`.
+    let quads = fill_quads(rect, &levels);
+    let mut mesh = egui::epaint::Mesh::default();
+    mesh.reserve_vertices(4 * quads.len());
+    mesh.reserve_triangles(4 * quads.len());
+    for (i, quad) in quads.into_iter().enumerate() {
         let level = levels[i / SEGMENTS];
         let color = egui::Color32::from_rgba_unmultiplied(
             palette.accent.r(),
@@ -94,10 +105,12 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &P
             palette.accent.b(),
             (80.0 + 175.0 * level) as u8,
         );
-        painter.add(egui::Shape::convex_polygon(
-            quad.to_vec(),
-            color,
-            egui::Stroke::NONE,
-        ));
+        let base = mesh.vertices.len() as u32;
+        for corner in quad {
+            mesh.colored_vertex(corner, color);
+        }
+        mesh.add_triangle(base, base + 1, base + 2);
+        mesh.add_triangle(base, base + 2, base + 3);
     }
+    painter.add(egui::Shape::mesh(mesh));
 }

@@ -935,3 +935,50 @@ mod view_fills {
         }
     }
 }
+
+/// The rule the two fill regressions both turned on, asserted at the level where
+/// it can be seen at all.
+///
+/// `fill_closed_path` is a triangle fan from the first point, and it insets the
+/// fill by half of its 1px feathering — so convexity *and* one `Shape::Path` per
+/// filled area are both preconditions, and a multi-shape tiling leaves a visible
+/// gap along every shared edge whether or not the pieces are convex. Neither
+/// property is measurable from a headless context, and the wrong version of the
+/// rule is what two views' comments asserted, so it is pinned in the source: no
+/// view may build a **filled closed path** at all. Filled areas go through
+/// `fill_quads` into one `epaint::Mesh`.
+///
+/// Per-*mark* primitives are deliberately not banned. `rect_filled` for a bar
+/// column or a spectrogram cell, and `line_segment` for a graticule, are each
+/// their own area with no shared edge to gap against; only tiling **one** area
+/// from several shapes is what feathering breaks.
+///
+/// Same shape as `no_inline_tests.rs` and `the_layout_reads_live_inside_the_menu_closure`:
+/// the defect is a placement, and only the call site can show it.
+#[test]
+fn no_view_fills_a_closed_path() {
+    let dir = std::path::Path::new("src/gui/panes/visualizer/views");
+    for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "rs") {
+            continue;
+        }
+        let src = std::fs::read_to_string(&path).unwrap();
+        // Strip comment lines, so a view may *explain* the rule it follows.
+        let code: String = src
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for banned in ["convex_polygon", "Shape::Path", "PathShape"] {
+            assert!(
+                !code.contains(banned),
+                "{} builds a filled closed path (`{banned}`) — that fill is a triangle \
+                 fan from its first point, and it is inset by half its 1px feathering, so \
+                 a non-convex one spills and adjacent ones leave a gap. Use `fill_quads` \
+                 + one `epaint::Mesh`.",
+                path.display()
+            );
+        }
+    }
+}
