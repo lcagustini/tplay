@@ -7,10 +7,59 @@
 use crate::audio::viz::{compute_bands, VizBuf, VIZ_BANDS};
 use crate::gui::theme::Palette;
 use eframe::egui;
-use std::f32::consts::{FRAC_PI_2, TAU};
 
 fn prev_id() -> egui::Id {
     egui::Id::new("tplay.viz.prev.radial")
+}
+
+/// Leave a ring of padding so a full-scale band never touches the pane edge.
+const PAD_FRAC: f32 = 0.08;
+/// Drawn as a ring, not a filled pie: the drawn length is the level, and a
+/// ring keeps the band count readable the way bars.rs does.
+const RING_W_FRAC: f32 = 0.35;
+/// Arc resolution — 4 per band is indistinguishable from smooth at 32 bands.
+pub const SEGMENTS: usize = 4;
+
+/// The whole view's fill, as convex pieces: one quad per arc step, so
+/// `VIZ_BANDS * SEGMENTS` of them.
+///
+/// A ring sector is **not** convex — it has the middle cut out — and egui
+/// triangulates every closed path as a fan from its first point
+/// (`epaint::tessellator::fill_closed_path`), which fills such a polygon as
+/// garbage. Quads are convex by construction, and the chord of a quad's outer
+/// edge deviates from the arc by ~0.05px at this radius, so the faceting is
+/// invisible.
+///
+/// Pure and `Ui`-free so the convexity is testable without a window; `draw` is
+/// the only caller.
+pub fn fill_quads(rect: egui::Rect, levels: &[f32]) -> Vec<[egui::Pos2; 4]> {
+    let radius = rect.width().min(rect.height()) * 0.5 * (1.0 - PAD_FRAC);
+    let inner = radius * (1.0 - RING_W_FRAC);
+    let center = rect.center();
+    let step = std::f32::consts::TAU / levels.len().max(1) as f32;
+
+    let mut quads = Vec::with_capacity(levels.len() * SEGMENTS);
+    for (i, &level) in levels.iter().enumerate() {
+        let outer = inner + level * (radius - inner);
+        let a0 = i as f32 * step - std::f32::consts::FRAC_PI_2;
+        // A gap between bands, matching the one bars.rs leaves.
+        let a1 = a0 + step * 0.9;
+        // The arc's unit direction at sub-step `s`, so scaling by a radius reads
+        // as what it is.
+        let at = |s: usize| {
+            let a = a0 + (a1 - a0) * s as f32 / SEGMENTS as f32;
+            egui::vec2(a.cos(), a.sin())
+        };
+        for s in 0..SEGMENTS {
+            quads.push([
+                center + at(s) * outer,
+                center + at(s + 1) * outer,
+                center + at(s + 1) * inner,
+                center + at(s) * inner,
+            ]);
+        }
+    }
+    quads
 }
 
 pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &Palette) {
@@ -30,58 +79,23 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &P
         .ctx()
         .memory_mut(|m| m.data.insert_temp(prev_id(), prev));
 
-    // Leave a ring of padding so a full-scale band never touches the pane edge.
-    const PAD_FRAC: f32 = 0.08;
-    // Drawn as a ring, not a filled pie: the drawn length is the level, and a
-    // ring keeps the band count readable the way bars.rs does.
-    const RING_W_FRAC: f32 = 0.35;
-    /// Arc resolution — 4 per band is indistinguishable from smooth at 32 bands.
-    const SEGMENTS: usize = 4;
+    // A floor keeps a silent band a visible tick, so a quiet passage reads as
+    // "32 quiet bands" rather than as "no data".
+    let levels: Vec<f32> = prev
+        .iter()
+        .map(|&db| ((db + 60.0) / 60.0).clamp(0.0, 1.0))
+        .collect();
 
-    let radius = rect.width().min(rect.height()) * 0.5 * (1.0 - PAD_FRAC);
-    let inner = radius * (1.0 - RING_W_FRAC);
-    let center = rect.center();
-
-    let step = TAU / VIZ_BANDS as f32;
-
-    for (i, &db) in prev.iter().enumerate() {
-        let level = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
-        // A floor keeps a silent band a visible tick, so a quiet passage reads as
-        // "32 quiet bands" rather than as "no data".
-        let len = inner + level * (radius - inner);
-        let a0 = i as f32 * step - FRAC_PI_2;
-        // A gap between bands, matching the one bars.rs leaves.
-        let a1 = a0 + step * 0.9;
-
+    for (i, quad) in fill_quads(rect, &levels).into_iter().enumerate() {
+        let level = levels[i / SEGMENTS];
         let color = egui::Color32::from_rgba_unmultiplied(
             palette.accent.r(),
             palette.accent.g(),
             palette.accent.b(),
             (80.0 + 175.0 * level) as u8,
         );
-
-        // A fixed array, not a collected `Vec`: `arc` runs twice per band, so
-        // that was 64 allocations a frame for five points each, and this view
-        // draws 60 times a second. The size is already a const, so the array is
-        // built on the stack and the only allocation left is the polygon below.
-        let arc = |from: f32, to: f32, r: f32| {
-            let mut pts = [center; SEGMENTS + 1];
-            for (s, p) in pts.iter_mut().enumerate() {
-                let a = from + (to - from) * s as f32 / SEGMENTS as f32;
-                *p = center + egui::vec2(a.cos(), a.sin()) * r;
-            }
-            pts
-        };
-        // Out and back: a ring sector is a simple (non-self-intersecting)
-        // polygon, so egui's tessellator fills it correctly. `convex_polygon`
-        // takes the points by value, so this one allocation per band is the
-        // floor without a different primitive — and the order below is the
-        // winding: outer edge backwards, then the inner edge forwards.
-        let mut sector = Vec::with_capacity(2 * (SEGMENTS + 1));
-        sector.extend(arc(a0, a1, len).into_iter().rev());
-        sector.extend(arc(a1, a0, inner));
         painter.add(egui::Shape::convex_polygon(
-            sector,
+            quad.to_vec(),
             color,
             egui::Stroke::NONE,
         ));

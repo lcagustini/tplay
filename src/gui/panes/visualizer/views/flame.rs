@@ -19,6 +19,48 @@ fn prev_id() -> egui::Id {
     egui::Id::new("tplay.viz.prev.flame")
 }
 
+/// The flat floor the contour rises from.
+const BASE_FRAC: f32 = 0.12;
+
+/// The fill down to the baseline, as convex pieces: one trapezoid per contour
+/// step, so `levels.len() - 1` of them.
+///
+/// The whole ridgeline plus a baseline edge is a wiggly mass, so it is **not**
+/// convex, and egui triangulates every closed path as a fan from its first
+/// point (`epaint::tessellator::fill_closed_path`) — which fills a mass as a
+/// wedge of triangles shot from the leftmost peak rather than as the
+/// silhouette. Each trapezoid is convex because `x` only ever increases and the
+/// top edge interpolates between two heights at or above the baseline; a
+/// floor-level step degenerates to zero area, which the same fan emits as
+/// nothing.
+///
+/// Pure and `Ui`-free so the convexity is testable without a window; `draw` is
+/// the only caller. The top edge of each quad *is* the contour, so the caller
+/// reads its stroke back off `quad[0]`/`quad[1]` rather than recomputing it.
+pub fn fill_quads(rect: egui::Rect, levels: &[f32]) -> Vec<[egui::Pos2; 4]> {
+    let n = levels.len();
+    if n < 2 {
+        return Vec::new();
+    }
+    let base_y = rect.bottom() - rect.height() * BASE_FRAC;
+    let amp = rect.height() * (1.0 - BASE_FRAC) * 0.9;
+    // Walk the array rather than indexing a fixed range: a 31-point contour
+    // cannot close, and an off-by-one here would silently draw a gap.
+    let x = |i: usize| rect.left() + i as f32 / (n - 1) as f32 * rect.width();
+    let y = |i: usize| base_y - levels[i] * amp;
+
+    (0..n - 1)
+        .map(|i| {
+            [
+                egui::pos2(x(i), y(i)),
+                egui::pos2(x(i + 1), y(i + 1)),
+                egui::pos2(x(i + 1), base_y),
+                egui::pos2(x(i), base_y),
+            ]
+        })
+        .collect()
+}
+
 pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &Palette) {
     let mut prev: [f32; VIZ_BANDS] = painter.ctx().memory_mut(|m| {
         m.data
@@ -36,37 +78,32 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &P
         .ctx()
         .memory_mut(|m| m.data.insert_temp(prev_id(), prev));
 
-    /// The flat floor the contour rises from.
-    const BASE_FRAC: f32 = 0.12;
-    let base_y = rect.bottom() - rect.height() * BASE_FRAC;
-    let amp = rect.height() * (1.0 - BASE_FRAC) * 0.9;
-
-    // Walk the array rather than indexing a fixed range: a 31-point contour
-    // cannot close, and an off-by-one here would silently draw a gap.
-    let level = |db: f32| ((db + 60.0) / 60.0).clamp(0.0, 1.0);
-    let pts: Vec<egui::Pos2> = prev
+    let levels: Vec<f32> = prev
         .iter()
-        .enumerate()
-        .map(|(i, &db)| {
-            let x = rect.left() + i as f32 / (VIZ_BANDS - 1) as f32 * rect.width();
-            egui::pos2(x, base_y - level(db) * amp)
-        })
+        .map(|&db| ((db + 60.0) / 60.0).clamp(0.0, 1.0))
         .collect();
+    let quads = fill_quads(rect, &levels);
 
     // Fill down to the baseline so it reads as a mass, not a wire.
-    let mut fill = pts.clone();
-    fill.push(egui::pos2(rect.right(), base_y));
-    fill.push(egui::pos2(rect.left(), base_y));
-    painter.add(egui::Shape::convex_polygon(
-        fill,
-        palette.accent.gamma_multiply(0.45),
-        egui::Stroke::NONE,
-    ));
+    for quad in &quads {
+        painter.add(egui::Shape::convex_polygon(
+            quad.to_vec(),
+            palette.accent.gamma_multiply(0.45),
+            egui::Stroke::NONE,
+        ));
+    }
 
     // The contour itself, in the brighter token — the same split bars.rs makes
-    // between a dim body and an accent edge.
+    // between a dim body and an accent edge. Read straight off the fill's top
+    // edge, which is the same polyline, so there is no second copy of the
+    // geometry to drift.
+    let contour: Vec<egui::Pos2> = quads
+        .iter()
+        .map(|q| q[0])
+        .chain(quads.last().map(|q| q[1]))
+        .collect();
     painter.add(egui::Shape::line(
-        pts,
+        contour,
         egui::Stroke::new(1.5_f32, palette.progress_fill),
     ));
 }

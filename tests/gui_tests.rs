@@ -821,3 +821,117 @@ mod breadcrumb {
         );
     }
 }
+
+/// The two views that fill a non-convex area, and the one property egui's
+/// tessellator needs of them.
+///
+/// `epaint::tessellator::fill_closed_path` triangulates a closed path as a fan
+/// from its **first point**, so a polygon with a reflex corner is not drawn
+/// badly — it is drawn as a wedge of triangles spanning the whole shape. Radial
+/// handed it a ring sector (convexity fails because the middle is cut out) and
+/// Flame a ridgeline mass (fails wherever the contour dips). Both filled as
+/// garbage, and the code said so in comments: "a simple (non-self-intersecting)
+/// polygon, so egui's tessellator fills it correctly". Simple is not convex, and
+/// the claim was the bug.
+///
+/// So this is the guard: what they hand the tessellator now is convex. Nothing
+/// else about a fill is observable without a window.
+mod view_fills {
+    use super::egui;
+    use tplay::gui::panes::visualizer::views::{flame, radial};
+
+    const BANDS: usize = 32;
+
+    fn pane() -> egui::Rect {
+        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0))
+    }
+
+    /// Weak convexity: every corner turns the same way. A zero-area piece (a
+    /// Flame step sitting on the floor) turns zero times and is still fine, so
+    /// the check is "no sign disagreement", not "strictly convex".
+    fn assert_convex(quad: &[egui::Pos2; 4], label: &str) {
+        let turns: Vec<f32> = (0..4)
+            .map(|i| {
+                let (a, b, c) = (quad[i], quad[(i + 1) % 4], quad[(i + 2) % 4]);
+                (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x)
+            })
+            .collect();
+        let left = turns.iter().filter(|&&t| t < 0.0).count();
+        let right = turns.iter().filter(|&&t| t > 0.0).count();
+        assert!(
+            left == 0 || right == 0,
+            "{label}: a reflex corner in {quad:?} — turns {turns:?}"
+        );
+    }
+
+    #[test]
+    fn every_filled_piece_is_convex() {
+        for &level in &[0.0, 0.15, 0.5, 0.85, 1.0] {
+            let levels = vec![level; BANDS];
+            for quad in radial::fill_quads(pane(), &levels) {
+                assert_convex(&quad, &format!("radial @ {level}"));
+            }
+            for quad in flame::fill_quads(pane(), &levels) {
+                assert_convex(&quad, &format!("flame @ {level}"));
+            }
+        }
+    }
+
+    /// A flat spectrum is the easy case — one trapezoid per view per level. This
+    /// is the one that broke: a contour that alternates full and empty, so
+    /// every step is a different height and the whole mass is a sawtooth.
+    #[test]
+    fn a_sawtooth_contour_fills_convex_pieces() {
+        let sawtooth: Vec<f32> = (0..BANDS)
+            .map(|i| if i % 2 == 0 { 0.95 } else { 0.05 })
+            .collect();
+        let quads = flame::fill_quads(pane(), &sawtooth);
+        assert_eq!(quads.len(), BANDS - 1);
+        for quad in &quads {
+            assert_convex(quad, "flame sawtooth");
+        }
+    }
+
+    /// The quad list is the drawing, so it has to have the right *count* too:
+    /// one piece per arc step per band, one per contour step.
+    #[test]
+    fn the_decomposition_has_one_piece_per_step() {
+        let levels = vec![0.5; BANDS];
+        assert_eq!(
+            radial::fill_quads(pane(), &levels).len(),
+            BANDS * radial::SEGMENTS,
+            "radial: one quad per arc step per band"
+        );
+        assert_eq!(
+            flame::fill_quads(pane(), &levels).len(),
+            BANDS - 1,
+            "flame: one trapezoid per contour step"
+        );
+        // A one-point contour cannot close, so it has no steps and no pieces —
+        // the guard against indexing it.
+        assert!(flame::fill_quads(pane(), &[0.5]).is_empty());
+        assert!(flame::fill_quads(pane(), &[]).is_empty());
+    }
+
+    /// Convex and the right count still leaves "the pieces are somewhere else"
+    /// open, which is a different wrong shape rather than a different wrong
+    /// tessellation. Both views paint `rect` and nothing else.
+    #[test]
+    fn the_pieces_stay_inside_the_pane() {
+        let rect = pane();
+        let levels = vec![1.0; BANDS];
+        for (label, quads) in [
+            ("radial", radial::fill_quads(rect, &levels)),
+            ("flame", flame::fill_quads(rect, &levels)),
+        ] {
+            for quad in &quads {
+                for p in quad {
+                    assert!(
+                        p.distance(rect.center()) <= rect.width().max(rect.height()),
+                        "{label}: {p:?} is outside the pane"
+                    );
+                }
+            }
+        }
+    }
+}
