@@ -60,21 +60,26 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &P
             (80.0 + 175.0 * level) as u8,
         );
 
+        // A fixed array, not a collected `Vec`: `arc` runs twice per band, so
+        // that was 64 allocations a frame for five points each, and this view
+        // draws 60 times a second. The size is already a const, so the array is
+        // built on the stack and the only allocation left is the polygon below.
         let arc = |from: f32, to: f32, r: f32| {
-            (0..=SEGMENTS)
-                .map(|s| {
-                    let a = from + (to - from) * s as f32 / SEGMENTS as f32;
-                    center + egui::vec2(a.cos(), a.sin()) * r
-                })
-                .collect::<Vec<_>>()
+            let mut pts = [center; SEGMENTS + 1];
+            for (s, p) in pts.iter_mut().enumerate() {
+                let a = from + (to - from) * s as f32 / SEGMENTS as f32;
+                *p = center + egui::vec2(a.cos(), a.sin()) * r;
+            }
+            pts
         };
         // Out and back: a ring sector is a simple (non-self-intersecting)
-        // polygon, so egui's tessellator fills it correctly.
-        let sector = arc(a0, a1, len)
-            .into_iter()
-            .rev()
-            .chain(arc(a1, a0, inner))
-            .collect();
+        // polygon, so egui's tessellator fills it correctly. `convex_polygon`
+        // takes the points by value, so this one allocation per band is the
+        // floor without a different primitive — and the order below is the
+        // winding: outer edge backwards, then the inner edge forwards.
+        let mut sector = Vec::with_capacity(2 * (SEGMENTS + 1));
+        sector.extend(arc(a0, a1, len).into_iter().rev());
+        sector.extend(arc(a1, a0, inner));
         painter.add(egui::Shape::convex_polygon(
             sector,
             color,
