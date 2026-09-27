@@ -4,7 +4,13 @@ use crate::gui::theme::{self, Icon, ThemeState};
 use crate::library;
 use crate::network;
 use eframe::egui;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// egui memory: the jump-to-file search text.
+const PL_QUERY: &str = "tplay.playlist.query";
+/// The playlist toolbar's icon size — the app's icon buttons all carry a literal
+/// (13 in the row chrome, 18 in Now Playing's transport); this is the toolbar's.
+const TOOLBAR_ICON: f32 = 16.0;
 
 pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui) {
     // Owned Arc copy — panes take `&mut app` while using theme data.
@@ -17,6 +23,142 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
     let pl_name = app.playlist_name();
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(pl_name).strong().color(p.text_primary));
+    });
+    ui.add_space(4.0);
+
+    // Jump-to-file. Same box, same haystack and the same single `LIB_QUERY`-style
+    // key shape as the Library's, so the two filters feel like one feature; the
+    // text is held here, not the app, because it is view state.
+    let query_id = egui::Id::new(PL_QUERY);
+    let mut q: String = ui
+        .ctx()
+        .memory_mut(|m| m.data.get_temp::<String>(query_id))
+        .unwrap_or_default();
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("Search")
+                .small()
+                .color(p.text_secondary),
+        );
+        ui.add(
+            egui::TextEdit::singleline(&mut q)
+                .hint_text("title, artist, album…")
+                .desired_width(220.0),
+        );
+    });
+    ui.ctx()
+        .memory_mut(|m| m.data.insert_temp(query_id, q.clone()));
+    let query = q.trim().to_lowercase();
+    ui.add_space(4.0);
+
+    // The toolbar: one row of icons above the list — the three content ops on
+    // the left, the two file actions hard right. Text labels would eat 500px of a
+    // 320px minimum window; at `TOOLBAR_ICON` the whole row is ~230px, so it is a
+    // `horizontal`, not a wrapping one, and every button carries a tooltip.
+    //
+    // A row above the list rather than the old bottom bar, because the footer
+    // sized the ScrollArea from a hardcoded 30px and was drawn *after* it — a row
+    // down there could only overflow what was reserved, while up here
+    // `available_height()` already accounts for it and the list gets the rest.
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+
+        // The sort control is the one button that keeps a text label, and it is
+        // the right place for text: it is a ComboBox because it *picks a column*
+        // out of `SORT_OPTIONS`, and an icon could only say "something about
+        // order" — the two arrows that exist (`sort_asc`/`sort_desc`) mean the
+        // Library's *active column direction*, a different piece of state, and
+        // there is no third arrow to spend. The label is always "Sort by…"
+        // because the ops are one-shot: there is no standing order for it to
+        // report, and the dropdown is where the column names live.
+        egui::ComboBox::from_id_salt("playlist_sort_by")
+            .selected_text("Sort by…")
+            .show_ui(ui, |ui| {
+                for (i, name) in library::SORT_OPTIONS.iter().enumerate() {
+                    // Nothing is ever "selected": each entry applies immediately,
+                    // the way a menu item does, so a checkmark would be a lie.
+                    if ui.selectable_label(false, *name).clicked() {
+                        app.sort_playlist(i);
+                    }
+                }
+            });
+
+        if theme::icon_button(
+            ui,
+            themes.icon(Icon::Reverse),
+            Icon::Reverse,
+            TOOLBAR_ICON,
+            true,
+            false,
+        )
+        .on_hover_text("Play the playlist back to front")
+        .clicked()
+        {
+            app.reverse_playlist();
+        }
+        // `Shuffle`, not a new icon: randomizing once IS a shuffle, and the same
+        // mark already means "shuffle" on the transport row.
+        if theme::icon_button(
+            ui,
+            themes.icon(Icon::Shuffle),
+            Icon::Shuffle,
+            TOOLBAR_ICON,
+            true,
+            false,
+        )
+        .on_hover_text("Shuffle the playlist's order once")
+        .clicked()
+        {
+            app.randomize_playlist();
+        }
+
+        // `Align::Min`, NOT `Center` — see `list_header_right`. The wrong token
+        // here would swallow the pane's whole remaining height and collapse the
+        // list to its 40px floor, silently.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            // Right-to-left puts the first widget furthest right, so Save is added
+            // first to read Create → Save left to right.
+            let save_hover = app
+                .playlist_file()
+                .map(|p| format!("Overwrite playlist: {}", p.display()))
+                .unwrap_or_else(|| "Save the playlist to a .tplay file".into());
+            if theme::icon_button(
+                ui,
+                themes.icon(Icon::Save),
+                Icon::Save,
+                TOOLBAR_ICON,
+                true,
+                false,
+            )
+            .on_hover_text(save_hover)
+            .clicked()
+            {
+                save_playlist(app, ui.ctx());
+            }
+            if theme::icon_button(
+                ui,
+                themes.icon(Icon::NewList),
+                Icon::NewList,
+                TOOLBAR_ICON,
+                true,
+                false,
+            )
+            .on_hover_text("Create a new, empty playlist")
+            .clicked()
+            {
+                if app.playlist_dirty() {
+                    dialogs::ask(
+                        ui.ctx(),
+                        dialogs::ConfirmAction::NewPlaylist,
+                        "New playlist",
+                        "Discard unsaved changes and start a new playlist?",
+                    );
+                } else {
+                    app.new_playlist();
+                }
+            }
+        });
     });
     ui.add_space(4.0);
 
@@ -35,25 +177,34 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
             .unwrap_or(None)
     });
 
-    // The inner ScrollArea would otherwise take every free pixel
-    // (auto_shrink(false, false) sizes to the full available rect), leaving
-    // the footer row zero height and invisible.
-    let footer_h = 30.0;
-    let scroll_h = (ui.available_height() - footer_h).max(40.0);
+    // The list gets everything that is left, which is the whole reason the
+    // actions moved above it: there is no row after this one to reserve space
+    // for, so the old `available_height() - footer_h` guess is gone. The 40px
+    // floor is the one thing that survives — a pane squeezed to nothing should
+    // still show one row rather than none.
+    let scroll_h = ui.available_height().max(40.0);
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .max_height(scroll_h)
         .show(ui, |ui| {
             let mut to_delete: Option<usize> = None;
+            let mut shown = 0usize;
             let row_h = 24.0;
 
             for i in 0..app.playlist().len() {
-                let is_current = app.current_index() == Some(i);
                 let path = &app.playlist()[i];
                 // Tagged title (filename stands in until the scan lands; the
                 // cache is shared with the Library, so visited folders show tags
                 // instantly).
                 let info = app.track_info(path);
+                // Filtering skips a *row*, never reindexes the list: `i` stays
+                // the true playlist index, so the banding, the ✕, the click and
+                // the drag all act on the track that is actually there.
+                if !row_matches(path, info, &query) {
+                    continue;
+                }
+                shown += 1;
+                let is_current = app.current_index() == Some(i);
                 let name = library::title_or_stem(path, info);
                 let fmt = path
                     .extension()
@@ -177,6 +328,16 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
                 drag_hover = None;
             }
 
+            // Only a filtered-out list needs saying so — an empty playlist is
+            // already obvious, and this is the note the Library shows too.
+            if shown == 0 && !query.is_empty() {
+                ui.label(
+                    egui::RichText::new("No tracks match")
+                        .small()
+                        .color(p.text_secondary),
+                );
+            }
+
             if let Some(idx) = to_delete {
                 let name = app
                     .playlist()
@@ -200,60 +361,37 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
         m.data.insert_temp(drag_from_id, drag_from);
         m.data.insert_temp(drag_hover_id, drag_hover);
     });
+}
 
-    // Bottom actions: Create Playlist (asks first on unsaved edits — tracks are
-    // added from the Library now), Save Playlist (a name over the folder on
-    // screen; later saves overwrite the tracked file).
-    ui.add_space(4.0);
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 12.0;
-        if ui.button("Create Playlist").clicked() {
-            if app.playlist_dirty() {
-                dialogs::ask(
-                    ui.ctx(),
-                    dialogs::ConfirmAction::NewPlaylist,
-                    "New playlist",
-                    "Discard unsaved changes and start a new playlist?",
-                );
-            } else {
-                app.new_playlist();
-            }
-        }
-        let save_hover = app
-            .playlist_file()
-            .map(|p| format!("Overwrite playlist: {}", p.display()))
-            .unwrap_or_else(|| "Save the playlist to a .tplay file".into());
-        if ui
-            .button("Save Playlist")
-            .on_hover_text(save_hover)
-            .clicked()
-        {
-            if let Some(path) = app.playlist_file().map(PathBuf::from) {
-                // Tracked file: overwrite, no prompt. An smb:// URI overwrites
-                // on the server.
-                app.save_playlist_to(path);
-            } else if let Some(dir) = browsing_share_dir(app) {
-                // Browsing a share: a name over the directory on screen, so no
-                // mount and no temp file. No dialog.
-                dialogs::ask_save_name(
-                    ui.ctx(),
-                    dialogs::SaveTarget::PlaylistShare,
-                    dir,
-                    library::default_playlist_name(app.playlist_file()),
-                );
-            } else {
-                // Local: a name over the Library's current folder — the user
-                // navigates there first for a different directory, the same rule
-                // the share branch follows.
-                dialogs::ask_save_name(
-                    ui.ctx(),
-                    dialogs::SaveTarget::PlaylistLocal,
-                    app.library().dir().to_string_lossy().into_owned(),
-                    library::default_playlist_name(app.playlist_file()),
-                );
-            }
-        }
-    });
+/// Carry out a Save click: overwrite the tracked file, else ask for a name over
+/// the directory on screen. Split out of the toolbar because the three-branch
+/// rule is the interesting part and it reads better as its own function than as
+/// a hundred lines inside a `with_layout` closure.
+fn save_playlist(app: &mut TPlayApp, ctx: &egui::Context) {
+    if let Some(path) = app.playlist_file().map(PathBuf::from) {
+        // Tracked file: overwrite, no prompt. An smb:// URI overwrites on the
+        // server.
+        app.save_playlist_to(path);
+    } else if let Some(dir) = browsing_share_dir(app) {
+        // Browsing a share: a name over the directory on screen, so no mount and
+        // no temp file. No dialog.
+        dialogs::ask_save_name(
+            ctx,
+            dialogs::SaveTarget::PlaylistShare,
+            dir,
+            library::default_playlist_name(app.playlist_file()),
+        );
+    } else {
+        // Local: a name over the Library's current folder — the user navigates
+        // there first for a different directory, the same rule the share branch
+        // follows.
+        dialogs::ask_save_name(
+            ctx,
+            dialogs::SaveTarget::PlaylistLocal,
+            app.library().dir().to_string_lossy().into_owned(),
+            library::default_playlist_name(app.playlist_file()),
+        );
+    }
 }
 
 /// Where a share-save would write: the share/dir open in the Library's remote
@@ -267,4 +405,28 @@ fn browsing_share_dir(app: &TPlayApp) -> Option<String> {
     }
     let share = b.share.as_ref()?;
     Some(network::dir_uri(&b.host, share, &b.rel))
+}
+
+/// Does a row survive the search text? The haystack is the Library's
+/// title·artist·album, plus the filename so "jump to file" works on a track the
+/// tag scan has not reached yet.
+///
+/// `query` arrives trimmed and lowercased — the caller folds the case once per
+/// frame, so the folding here is the haystack's. `pub` and free of any
+/// `egui::Ui` so the filtering is testable headlessly, the rows themselves are
+/// not. An empty query short-circuits, which is also what keeps an unfiltered
+/// list from building a haystack string per row per frame.
+pub fn row_matches(path: &Path, info: Option<&library::TrackInfo>, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let title = library::title_or_stem(path, info);
+    let hay = format!(
+        "{title} {} {} {}",
+        info.map(|i| i.artist.as_str()).unwrap_or_default(),
+        info.map(|i| i.album.as_str()).unwrap_or_default(),
+        path.file_name().unwrap_or_default().to_string_lossy(),
+    )
+    .to_lowercase();
+    hay.contains(query)
 }

@@ -5,22 +5,12 @@ use crate::audio::transition;
 use crate::config;
 use crate::library;
 use crate::network;
+use crate::playlist;
 use crate::tracks;
 use rodio::{mixer::Mixer, Decoder, Sink, Source};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
-
-/// Tiny inline RNG (XorShift64) - replaces fastrand dependency.
-fn rand_u64(state: &mut u64) -> u64 {
-    *state ^= *state << 13;
-    *state ^= *state >> 7;
-    *state ^= *state << 17;
-    *state
-}
-fn rand_usize(state: &mut u64, max: usize) -> usize {
-    (rand_u64(state) as usize) % max
-}
 
 /// Where the playhead really is, given what the sink reports.
 ///
@@ -425,9 +415,9 @@ impl TPlayApp {
         let idx = if unplayed.is_empty() {
             // Repeat restarts the cycle, so the draw covers the whole playlist;
             // `commit_next_index` is what clears `played` for it.
-            self.repeat.then(|| rand_usize(&mut rng, len))
+            self.repeat.then(|| playlist::rand_usize(&mut rng, len))
         } else {
-            Some(unplayed[rand_usize(&mut rng, unplayed.len())])
+            Some(unplayed[playlist::rand_usize(&mut rng, unplayed.len())])
         };
         idx.map(|i| (i, rng))
     }
@@ -749,7 +739,7 @@ impl TPlayApp {
         if self.shuffle {
             self.reset_shuffle();
             let len = self.playlist.len();
-            let idx = rand_usize(&mut self.rng_state, len);
+            let idx = playlist::rand_usize(&mut self.rng_state, len);
             self.played.push(idx);
             self.start(idx);
         } else {
@@ -854,6 +844,57 @@ impl TPlayApp {
         self.repeat = !self.repeat;
     }
 
+    // ── Playlist editing — content ops, from the Playlist pane's ops row ──────
+    //
+    // The ordering half is `playlist.rs` (pure, tested); what is left here is the
+    // part that has to know about state, and it is the same for all three.
+
+    /// Sort the playlist by a Library column — a `library::SORT_OPTIONS` index,
+    /// so the playlist orders exactly like the file list beside it.
+    pub fn sort_playlist(&mut self, col: usize) {
+        playlist::sort_tracks(&mut self.playlist, &self.tag_cache, col);
+        self.playlist_reordered();
+    }
+
+    /// Play the playlist back to front.
+    pub fn reverse_playlist(&mut self) {
+        self.playlist.reverse();
+        self.playlist_reordered();
+    }
+
+    /// Shuffle the playlist's order, once, with the same RNG the shuffle
+    /// playback picks from.
+    pub fn randomize_playlist(&mut self) {
+        playlist::shuffle_tracks(&mut self.playlist, &mut self.rng_state);
+        self.playlist_reordered();
+    }
+
+    /// What every content edit to the playlist has to repair.
+    ///
+    /// The track that was playing has to keep playing, so `current_index` — an
+    /// index into a list that just moved — is re-found from the track *id*,
+    /// which is stable across a reorder (a local path or an `smb://` URI alike)
+    /// and exact because playlist ids are unique. Without this a sort moves the
+    /// highlight off the row that is playing, and `advance` carries on from
+    /// whatever track slid into the old index.
+    ///
+    /// A direct open (`play_file`) has no index to follow and must not acquire
+    /// one, or the track drops into the playlist's sequential flow.
+    fn playlist_reordered(&mut self) {
+        self.playlist_dirty = true;
+        // A pending crossfade's incoming track is pinned to an index that just
+        // moved, so it goes the same way a seek or a remove sends it.
+        self.cancel_xf();
+        // The `played` history is a list of positions in the old order.
+        self.reset_shuffle();
+        if self.current_index.is_some() {
+            self.current_index = self
+                .current_path
+                .as_ref()
+                .and_then(|cur| self.playlist.iter().position(|p| p == cur));
+        }
+    }
+
     // ── Playlists — plain `.tplay` files on disk, found in the Library like
     //    any other file. Shuffle/repeat are appwide settings (config.json),
     //    never playlist content.
@@ -929,6 +970,10 @@ impl TPlayApp {
         // Remote tracks can't canonicalize and are kept verbatim; local paths
         // that no longer exist are dropped.
         self.playlist = paths.into_iter().filter_map(tracks::normalize).collect();
+        // Duplicate ids collapse here, and this is the only place one can
+        // arrive: `add_files` dedups as tracks go in, so a repeated path can
+        // only have come out of the file being loaded.
+        playlist::dedup(&mut self.playlist);
         self.stop();
         self.ensure_tags(self.playlist.clone());
         self.playlist_file = Some(file);

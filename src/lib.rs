@@ -6,6 +6,7 @@ pub mod config;
 pub mod gui;
 pub mod library;
 pub mod network;
+pub mod playlist;
 pub mod tracks;
 
 /// Re-exported so a test can build the audio `Mixer` that `TPlayApp::new`

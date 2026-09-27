@@ -6,6 +6,7 @@ mod config;
 mod gui;
 mod library;
 mod network;
+mod playlist;
 mod tracks;
 
 use eframe::egui;

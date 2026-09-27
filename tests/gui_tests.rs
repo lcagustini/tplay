@@ -1,10 +1,12 @@
 //! GUI tests — theme application, dock layout (headless egui).
 
+mod common;
+
 use eframe::egui::{self, Color32, FontFamily};
 use std::path::Path;
 use tplay::app::Pane;
 use tplay::audio::eq::EqShared;
-use tplay::gui::theme::{Base, Icon, Layout, Themes, DEFAULT_THEME_ID};
+use tplay::gui::theme::{Base, Icon, Layout, ThemeState, Themes, DEFAULT_THEME_ID};
 
 #[test]
 fn themes_loads_builtin_dark_theme() {
@@ -468,6 +470,155 @@ fn right_to_left_center_does_not_swallow_the_column() {
         min_h < center_h,
         "Align::Min must consume strictly less than Center ({min_h:.1} vs {center_h:.1})"
     );
+}
+
+/// The Playlist pane's search filters rows without touching the list, so the
+/// only logic worth testing is the match itself. `row_matches` is `pub` and
+/// `Ui`-free for exactly this.
+mod playlist_search {
+    use super::Path;
+    use tplay::gui::panes::playlist::row_matches;
+    use tplay::library::TrackInfo;
+
+    fn tagged(title: &str, artist: &str, album: &str) -> TrackInfo {
+        TrackInfo {
+            title: title.into(),
+            artist: artist.into(),
+            album: album.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_empty_query_matches_every_row() {
+        // The unfiltered path, run for every row on every frame.
+        assert!(row_matches(Path::new("/m/a.mp3"), None, ""));
+        assert!(row_matches(
+            Path::new("/m/a.mp3"),
+            Some(&tagged("Song", "Band", "Album")),
+            ""
+        ));
+    }
+
+    #[test]
+    fn the_match_is_case_insensitive_over_title_artist_and_album() {
+        // The contract: the caller trims and lowercases the query once per frame
+        // (the Library's filter does the same), so case folding is this function's
+        // job on the haystack — a user typing "ANTI" must find "Anti".
+        let info = tagged("Ne‐Yo", "Rihanna", "Anti");
+        for q in ["ne‐", "rih", "anti"] {
+            assert!(row_matches(Path::new("/m/x.mp3"), Some(&info), q), "{q}");
+        }
+        assert!(!row_matches(Path::new("/m/x.mp3"), Some(&info), "drake"));
+    }
+
+    #[test]
+    fn an_untagged_row_is_found_by_its_filename() {
+        // The premise for the whole feature on a fresh playlist: the tag scan has
+        // not run, so the only text a row has is its name.
+        assert!(row_matches(
+            Path::new("/music/Blue Monday.wav"),
+            None,
+            "blue"
+        ));
+        // The extension is part of the filename, so a format query works too.
+        assert!(row_matches(
+            Path::new("/music/Blue Monday.wav"),
+            None,
+            ".wav"
+        ));
+        assert!(!row_matches(
+            Path::new("/music/Blue Monday.wav"),
+            None,
+            "sunday"
+        ));
+    }
+}
+
+/// The generated icon set is the one no theme can do without: `load_icons`
+/// swallows a missing or corrupt file (`fs::read(..).ok()?`) and the pane falls
+/// back to a glyph, which on this font is a tofu box. Nothing else would notice,
+/// so the generator's output is checked here instead.
+#[test]
+fn every_bundled_theme_decodes_the_generated_icons() {
+    let ctx = egui::Context::default();
+    for id in ["dark", "retro", "neon"] {
+        let themes = Themes::load();
+        let state = ThemeState::load(&ctx, themes, id);
+        for icon in [Icon::Reverse, Icon::NewList, Icon::Save] {
+            assert!(
+                state.icon(icon).is_some(),
+                "{id} is missing slot {} — run `python3 themes/generate_icons.py`",
+                icon.index()
+            );
+        }
+    }
+}
+
+/// The one pane test that runs the real function instead of mirroring its
+/// shape. The Playlist pane gives its ScrollArea everything `available_height()`
+/// has left *after* the search row and the action row, and a `with_layout` under a
+/// vertical parent can report a min_rect spanning the parent's whole remaining
+/// height — the `right_to_left_center_does_not_swallow_the_column` trap, which
+/// silently collapses the list to the `.max(40.0)` floor instead of erroring.
+///
+/// Measuring the pane's own `min_rect` catches that: a pane whose chrome behaved
+/// claims the height it was given, and one whose chrome swallowed the column
+/// comes back short by however much it ate.
+///
+/// Run at both window sizes because the action row **wraps** — the five controls
+/// fit the default width on one line and the 320px minimum on two, so the small
+/// window is the only case that exercises the wrap at all.
+#[test]
+fn the_playlist_pane_leaves_its_list_the_height_it_was_given() {
+    use common::{test_dir, write_wav, TestApp};
+    use eframe::egui::{pos2, vec2, Rect};
+    use tplay::gui::panes::playlist::playlist_pane;
+    use tplay::gui::theme::ThemeState;
+
+    // The default window, then the minimum one (`main.rs`'s window options).
+    for (win_w, win_h) in [(680.0f32, 460.0f32), (320.0, 160.0)] {
+        let mut t = TestApp::new("playlist-pane-geometry");
+        let dir = test_dir("playlist-pane-geometry");
+        let mut tracks = Vec::new();
+        for n in ["a.wav", "b.wav", "c.wav", "d.wav", "e.wav"] {
+            let p = dir.join(n);
+            write_wav(&p);
+            tracks.push(p);
+        }
+        t.app.add_files(tracks);
+
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(win_w, win_h))),
+            ..Default::default()
+        };
+        let mut claimed = 0.0f32;
+        let _ = ctx.run(raw, |ctx| {
+            let themes = ThemeState::load(ctx, tplay::gui::theme::Themes::load(), "dark");
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let rect = ui.available_rect_before_wrap();
+                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+                    playlist_pane(&mut t.app, &themes, ui);
+                    claimed = ui.min_rect().height();
+                });
+            });
+        });
+
+        // 32px of slack is the CentralPanel's own margin plus the trailing
+        // `add_space`, not a fudge: a working pane claims the rect it was given.
+        assert!(
+            claimed >= win_h - 32.0,
+            "at {win_w}x{win_h} the pane must fill the window — a short claim means the \
+             chrome ate the column and the list is on the 40px floor (claimed \
+             {claimed:.1} of {win_h:.1})"
+        );
+        assert!(
+            claimed <= win_h + 1.0,
+            "at {win_w}x{win_h} the pane must not overflow its own rect either (claimed \
+             {claimed:.1} of {win_h:.1})"
+        );
+    }
 }
 
 /// The Library pane draws one breadcrumb for both sources, so the two segment

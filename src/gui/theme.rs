@@ -478,10 +478,16 @@ pub enum Icon {
     Gapless,
     /// Crossfade playback toggle (lit while active).
     Crossfade,
+    /// Playlist toolbar: play the list back to front.
+    Reverse,
+    /// Playlist toolbar: create a new (empty) playlist.
+    NewList,
+    /// Playlist toolbar: save the playlist to its file.
+    Save,
 }
 
 impl Icon {
-    pub const ALL: [Icon; 20] = [
+    pub const ALL: [Icon; 23] = [
         Icon::Logo,
         Icon::Play,
         Icon::Pause,
@@ -502,9 +508,20 @@ impl Icon {
         Icon::NoCover,
         Icon::Gapless,
         Icon::Crossfade,
+        Icon::Reverse,
+        Icon::NewList,
+        Icon::Save,
     ];
 
-    const DATA: [(&'static str, &'static str); 20] = [
+    /// `(file name, last-resort glyph)` per `ALL` slot, indexed by
+    /// `self as usize`. **Append-only**: a new `Icon` goes at the end of the enum
+    /// and the end of both arrays, or every later icon decodes the wrong file.
+    ///
+    /// The last three are written by `themes/generate_icons.py`; the rest are
+    /// hand-drawn. A glyph is only ever painted when neither the theme nor the
+    /// default ships the PNG, and several of them are known to tofu in the
+    /// bundled egui font — which is exactly why the PNGs exist.
+    const DATA: [(&'static str, &'static str); 23] = [
         ("logo.png", "☰"),
         ("play.png", "▶"),
         ("pause.png", "⏸"),
@@ -525,6 +542,9 @@ impl Icon {
         ("nocover.png", "🎵"),
         ("gapless.png", "⏩"),
         ("crossfade.png", "🔗"),
+        ("reverse.png", "⇅"),
+        ("new_list.png", "✳"),
+        ("save.png", "↓"),
     ];
 
     pub fn index(self) -> usize {
