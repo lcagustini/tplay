@@ -71,7 +71,9 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window. LAN-
 
 - `cargo check` — compiles fast with cached target/.
 - `cargo test` — runs all tests.
+- `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` — what CI gates on, so run them before pushing.
 - `[profile.release] opt-level` is deliberately absent — 3 is Cargo's default.
+- **CI** (`.github/workflows/ci.yml`) — one job on `ubuntu-latest`: `fmt` → `clippy -D warnings` → `test`, then, **only on a push to `main` and only because those passed**, a release build packaged as `tplay-linux-x86_64.tar.gz` (the binary + `themes/`, because `theme_dirs()` looks in `<exe_dir>/themes`) and attached to a GitHub release. The tag is `v<minor from Cargo.toml>.<run_number>`, so the version needs no bot commit to bump it. `libasound2-dev` is the only system package: X11/xkbcommon/wayland/GL all arrive via dlopen, and the tests are headless, so there is no xvfb and no audio device.
 
 ## Dependencies — each one is load-bearing
 

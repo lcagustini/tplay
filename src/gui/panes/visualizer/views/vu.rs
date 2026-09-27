@@ -55,7 +55,7 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &P
         held = target;
         held_at = now;
     } else if now - held_at > HOLD_SECS {
-        held = (held - FALL_RATE * dt as f32).max(target);
+        held = (held - FALL_RATE * dt).max(target);
     }
     ctx.memory_mut(|m| m.data.insert_temp(state_id(), (held, held_at)));
 

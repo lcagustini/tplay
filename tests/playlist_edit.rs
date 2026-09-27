@@ -306,13 +306,16 @@ fn scrambled_playlist(name: &str) -> (TestApp, Vec<PathBuf>) {
     (t, tracks)
 }
 
+/// One playlist reorder, named for the assertion it feeds.
+type Reorder = fn(&mut TPlayApp);
+
 #[test]
 fn a_reorder_keeps_the_playing_track_current() {
     // The failure this guards: `current_index` is an index, and a sort/randomize
     // moves what lives under it. A reorder that only shuffled the Vec would
     // leave the app pointing at whatever track slid into the old slot, and
     // `advance` would carry on from there.
-    let ops: [(&str, fn(&mut TPlayApp)); 3] = [
+    let ops: [(&str, Reorder); 3] = [
         ("sort_by_title", |a| a.sort_playlist(0)),
         ("reverse", TPlayApp::reverse_playlist),
         ("randomize", TPlayApp::randomize_playlist),

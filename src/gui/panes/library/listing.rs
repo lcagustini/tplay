@@ -174,6 +174,9 @@ enum Act {
     Rate(PathBuf),
 }
 
+// Nine arguments, and a params struct would be longer than the call sites it
+// replaces — every one of them is a value the caller already has in hand.
+#[allow(clippy::too_many_arguments)]
 fn draw_file_row(
     app: &TPlayApp,
     ui: &mut egui::Ui,
@@ -477,11 +480,8 @@ fn file_list_ui(
                         // rather than refused later: `tracks::write_tags` also
                         // refuses, so a future caller that forgets this guard still
                         // cannot write to a spool cache.
-                        Some(FileAct::Rate) => {
-                            if !remote {
-                                action = Some(Act::Rate(path.to_path_buf()));
-                            }
-                        }
+                        Some(FileAct::Rate) if remote => {}
+                        Some(FileAct::Rate) => action = Some(Act::Rate(path.to_path_buf())),
                         None => {}
                     }
                 }

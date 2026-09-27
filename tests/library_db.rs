@@ -2,7 +2,7 @@
 //! re-scan harmless.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tplay::library::TrackInfo;
 use tplay::library_db::{PlayStats, TrackDb};
@@ -41,7 +41,7 @@ fn playing_a_track_counts_a_play() {
 }
 
 /// A track id in the temp dir, so nothing here can reach a real library.
-fn track(dir: &PathBuf, name: &str) -> PathBuf {
+fn track(dir: &Path, name: &str) -> PathBuf {
     dir.join(name)
 }
 

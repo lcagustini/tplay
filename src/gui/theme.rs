@@ -353,7 +353,7 @@ pub fn rasterize_icon(path: &Path, px: u32) -> Option<egui::ColorImage> {
     let src = pixmap.data();
     let area = (ICON_SS * ICON_SS) as u16;
     let mut out = vec![0u8; (px * px * 4) as usize];
-    for (i, chunk) in out.chunks_exact_mut(4).enumerate() {
+    for (i, chunk) in out.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let (x, y) = (i as u32 % px, i as u32 / px);
         let mut acc = [0u16; 4];
         for sy in 0..ICON_SS {
