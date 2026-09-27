@@ -1,0 +1,87 @@
+# Credits
+
+## Icons
+
+18 of tplay's 23 pane icons are from **[game-icons.net](https://game-icons.net)**,
+used under the **[Creative Commons Attribution 3.0 Unported licence](http://creativecommons.org/licenses/by/3.0/)**
+(CC BY 3.0). The remaining five — `stop`, `shuffle`, `gapless`, `crossfade` and
+`new_list` — are original to this repository and carry no third-party terms.
+
+Attribution, as CC BY 3.0 requires:
+
+> Icons made by [Delapouite](https://delapouite.com),
+> [Lorc](https://lorcblog.blogspot.com),
+> [Guard13007](https://guard13007.com) and
+> [sbed](http://opengameart.org/content/95-game-icons).
+> Available on https://game-icons.net
+
+### Which icon came from where
+
+| icon | source |
+|---|---|
+| `logo` | `lorc/double-quaver` |
+| `play` | `guard13007/play-button` |
+| `pause` | `guard13007/pause-button` |
+| `prev` | `delapouite/previous-button` |
+| `next` | `delapouite/next-button` |
+| `repeat` | `lorc/cycle` |
+| `volume` | `delapouite/speaker` |
+| `remove` | `sbed/cancel` |
+| `sort_asc` | `delapouite/progression` |
+| `sort_desc` | `delapouite/progression`, mirrored vertically |
+| `star_on` | `delapouite/round-star` |
+| `star_off` | `delapouite/round-star` |
+| `folder` | `delapouite/full-folder` |
+| `minimize` | `delapouite/contract` |
+| `maximize` | `delapouite/expand` |
+| `reverse` | `delapouite/vertical-flip` |
+| `save` | `delapouite/save` |
+| `shuffle` | original to this repository |
+| `stop` | original to this repository |
+| `gapless` | original to this repository |
+| `crossfade` | original to this repository |
+| `new_list` | original to this repository |
+| `nocover` | original to this repository |
+
+### The two that were drawn, not chosen
+
+Two of the original five replaced an upstream icon that was *semantically* right
+and *visually* wrong, which is the only kind of substitution worth recording:
+
+- `stop` was `delapouite/square`, which draws a **hollow** square. A stop button
+  is a solid block in every transport control ever shipped, and the hollow version
+  read as an outline next to the filled `play` triangle.
+- `new_list` has no usable upstream glyph. `delapouite/files` (stacked pages)
+  turns to mush at 20px, and the mark that shipped here is the eight-ray sunburst
+  the old generator drew — 8 rays from 40% out to 90% of the radius, no core.
+
+### Re-deriving a file
+
+The upstream files are stored with two edits and nothing else: the
+`<path d="M0 0h512v512H0z"/>` background rectangle that game-icons ships every
+icon with is removed, and the remaining path's `fill` is replaced with the
+theme's own palette token. The path data is otherwise byte-for-byte upstream, so
+any icon can be re-fetched and re-checked with:
+
+```
+https://raw.githubusercontent.com/game-icons/icons/master/<author>/<name>.svg
+```
+
+A future version of game-icons.net may replace an icon's artwork under the same
+name. The names above are the ones the 19 shapes were taken from on 2026-09-27.
+
+### The two edits matter
+
+The background rectangle is load-bearing to remove, not cosmetic: it is an
+opaque black 512×512 fill, so an icon that kept it rasterizes to a solid black
+square. `every_icon_has_a_parseable_svg_source` in `tests/gui_tests.rs` asserts
+each file has both an opaque and a transparent pixel, which is what catches it.
+
+The `fill` is what makes each theme's set its own, and it is why the icons are
+stored per theme rather than shared. Change a token in a `theme.json` and run
+`python3 themes/recolor_icons.py` to propagate it.
+
+## Everything else
+
+`Cargo.toml` is the licence record for the code's dependencies; the `AGENTS.md`
+dependencies table says what each one is for.

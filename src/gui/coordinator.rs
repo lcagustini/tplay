@@ -417,7 +417,7 @@ pub fn update_ui(app: &mut TPlayApp, themes: &mut ThemeState, ctx: &egui::Contex
                 // controls live here, right-aligned via a right-to-left flush
                 // layout. Within it the platform convention holds: the first added
                 // (Close) lands rightmost, so left-to-right the order is minimize,
-                // maximize/restore, close. Icons are per-theme PNGs
+                // maximize/restore, close. Icons are per-theme files
                 // (text_primary chrome, ✕ close art).
                 let maximized = ui.ctx().input(|i| i.viewport().maximized).unwrap_or(false);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

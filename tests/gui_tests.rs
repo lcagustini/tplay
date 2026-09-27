@@ -6,7 +6,7 @@ use eframe::egui::{self, Color32, FontFamily};
 use std::path::Path;
 use tplay::app::Pane;
 use tplay::audio::eq::EqShared;
-use tplay::gui::theme::{Base, Icon, Layout, ThemeState, Themes, DEFAULT_THEME_ID};
+use tplay::gui::theme::{rasterize_icon, Base, Icon, Layout, ThemeState, Themes, DEFAULT_THEME_ID};
 
 #[test]
 fn themes_loads_builtin_dark_theme() {
@@ -339,8 +339,8 @@ fn higher_priority_dir_wins_and_icons_fall_back() {
     write_theme(&bundled, "mine", "#0000ff"); // no icons dir
     std::fs::create_dir_all(overrides.join("dark").join("icons")).unwrap();
     std::fs::write(
-        overrides.join("dark").join("icons").join("play.png"),
-        b"png",
+        overrides.join("dark").join("icons").join("play.svg"),
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 20 20\"/>",
     )
     .unwrap();
 
@@ -356,8 +356,8 @@ fn higher_priority_dir_wins_and_icons_fall_back() {
     assert!(themes
         .icon_path(mine, Icon::Play)
         .unwrap()
-        .ends_with("dark/icons/play.png"));
-    assert!(themes.icon_path(mine, Icon::Volume).is_none()); // dark has no volume.png
+        .ends_with("dark/icons/play.svg"));
+    assert!(themes.icon_path(mine, Icon::Volume).is_none()); // dark has no volume.svg
 
     let _ = std::fs::remove_dir_all(&base);
 }
@@ -535,21 +535,83 @@ mod playlist_search {
     }
 }
 
-/// The generated icon set is the one no theme can do without: `load_icons`
-/// swallows a missing or corrupt file (`fs::read(..).ok()?`) and the pane falls
-/// back to a glyph, which on this font is a tofu box. Nothing else would notice,
-/// so the generator's output is checked here instead.
+/// Every icon slot in every bundled theme really rasterizes.
+///
+/// `load_icons` swallows a missing or unparseable file (`fs::read(..).ok()?`) and
+/// the pane falls back to a glyph, which on this font is a tofu box. Nothing
+/// else would notice, so the assets are checked here instead.
+///
+/// This replaces both halves of what `themes/generate_icons.py --check` used to
+/// cover, and is strictly stronger on the direction it kept. The old check asked
+/// whether a *mark* had a slot; this asks whether every slot has a file that
+/// parses **and** produces the right pixels. The reverse direction — an SVG with
+/// no `Icon` slot — is the loop below, and is the one that would otherwise be
+/// invisible forever.
+///
+/// The alpha assertions are the load-bearing part. A game-icons SVG that kept its
+/// `<path d="M0 0h512v512H0z"/>` background rectangle rasterizes to a *fully
+/// opaque* 20×20 black square, and a file whose paths were all stripped
+/// rasterizes to a *fully transparent* one. Both load without error and both
+/// render as a solid block, so "it parsed" is not a sufficient check.
 #[test]
-fn every_bundled_theme_decodes_the_generated_icons() {
-    let ctx = egui::Context::default();
+fn every_icon_has_a_parseable_svg_source() {
+    let themes = Themes::load();
     for id in ["dark", "retro", "neon"] {
-        let themes = Themes::load();
-        let state = ThemeState::load(&ctx, themes, id);
-        for icon in [Icon::Reverse, Icon::NewList, Icon::Save] {
+        let theme = themes.get(id).unwrap_or_else(|| themes.default());
+        for icon in Icon::ALL {
+            let path = themes
+                .icon_path(theme, icon)
+                .unwrap_or_else(|| panic!("{id}: no file for slot {}", icon.index()));
+            let px = icon.px();
+            let image = rasterize_icon(&path, px).unwrap_or_else(|| {
+                panic!(
+                    "{id}: slot {} failed to rasterize from {}",
+                    icon.index(),
+                    path.display()
+                )
+            });
+            let label = format!("{id}/{}", icon.file_name());
+
+            assert_eq!(
+                image.size,
+                [px as usize, px as usize],
+                "{label}: wrong size"
+            );
+
+            let alpha = |i: usize| image.pixels[i].a();
+            let opaque = (0..image.pixels.len()).any(|i| alpha(i) > 200);
+            let clear = (0..image.pixels.len()).any(|i| alpha(i) < 40);
             assert!(
-                state.icon(icon).is_some(),
-                "{id} is missing slot {} — run `python3 themes/generate_icons.py`",
-                icon.index()
+                opaque,
+                "{label}: nothing opaque — empty or all-transparent SVG"
+            );
+            assert!(
+                clear,
+                "{label}: fully opaque — the SVG still has a background rect"
+            );
+        }
+    }
+}
+
+/// The reverse direction `every_icon_has_a_parseable_svg_source` cannot see: an
+/// icon file with no `Icon` slot behind it. Nothing in the app reads it, so it
+/// would sit in the tree forever looking maintained.
+#[test]
+fn no_icon_file_is_without_a_slot() {
+    let slots: std::collections::HashSet<&str> = Icon::ALL.iter().map(|i| i.file_name()).collect();
+    for id in ["dark", "retro", "neon"] {
+        let dir = std::path::Path::new("themes").join(id).join("icons");
+        for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            assert!(
+                path.extension().is_some_and(|e| e == "svg"),
+                "{id}: {name} is not an svg"
+            );
+            assert!(
+                slots.contains(name.as_str()),
+                "{id}/{name} has no `Icon` slot — add the variant to `Icon` AND a row to \
+                 `ALL` AND a row to `DATA` in src/gui/theme.rs, all three, at the end"
             );
         }
     }

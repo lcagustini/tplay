@@ -18,8 +18,12 @@ serde_json = "1.0"
 dirs      = "5.0"
 # Docking layout: tab drag/split/tear-off; serde for layout persistence
 egui_dock = { version = "0.15", features = ["serde"] }
-# PNG+JPEG decode for theme icons (synchronously into egui textures) and album covers
+# PNG+JPEG decode for album covers
 image     = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# Theme icon rasterization. default-features = false drops `text` + `system-fonts`,
+# and with them fontdb/rustybuzz: no icon SVG contains text, and letting usvg scan
+# system fonts would fight theme::install_fallback_fonts over egui's font families.
+resvg     = { version = "0.48", default-features = false }
 lofty = "0.25.4"
 smb2 = "0.25.1"
 tokio = { version = "1.53.1", features = ["rt", "net", "time"] }

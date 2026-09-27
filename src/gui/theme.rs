@@ -7,9 +7,11 @@
 //!   3. `./themes/`                 — dev convenience (`cargo run` from repo root)
 //!
 //! Each `theme.json` carries the 13-token palette, `base` (dark/light), and an
-//! optional `metadata_font`. Icons are per-theme PNGs under `<theme>/icons/`,
-//! falling back to the default theme's, then to unicode glyphs. Selection
-//! persists in the `theme` field of `~/.config/tplay/config.json`.
+//! optional `metadata_font`. Icons are per-theme SVGs under `<theme>/icons/`,
+//! rasterized through resvg at startup and on a skin switch, falling back to
+//! the default theme's, then to unicode glyphs. Each theme's SVGs carry that
+//! theme's own token baked into their `fill`. Selection persists in the `theme`
+//! field of `~/.config/tplay/config.json`.
 //!
 //! `palette` exposes the tokens for custom painting (playlist rows, metadata);
 //! `apply` maps them onto egui `Visuals` each frame so a mid-session switch
@@ -282,7 +284,7 @@ impl Themes {
         self.list.iter().find(|t| t.id == id)
     }
 
-    /// The default theme (fallback icon source when a theme has no PNG of
+    /// The default theme (fallback icon source when a theme has no file of
     /// its own). `load()` guarantees a non-empty list.
     pub fn default(&self) -> &Arc<Theme> {
         self.get(DEFAULT_THEME_ID)
@@ -290,7 +292,7 @@ impl Themes {
             .expect("Themes::load always produces at least one theme")
     }
 
-    /// Resolve an icon PNG for a theme: the theme's own file → the default
+    /// Resolve an icon file for a theme: the theme's own file → the default
     /// theme's file → `None` (callers fall back to a unicode glyph).
     pub fn icon_path(&self, theme: &Theme, icon: Icon) -> Option<PathBuf> {
         let own = theme
@@ -311,8 +313,69 @@ impl Themes {
     }
 }
 
-/// Decode a theme's icons (own PNG → default theme's) into GPU textures, one per
-/// `Icon::ALL` slot. Missing/undecodable → `None`, and the pane draws a glyph.
+/// How many samples per axis each output pixel averages. resvg already
+/// antialiases, but a 20px glyph straight off a 512 viewBox is a hard
+/// minification — supersampling and box-averaging is what keeps a 1px diagonal
+/// stroke from aliasing into dashes.
+const ICON_SS: u32 = 4;
+
+/// Rasterize one icon SVG to an egui image, or `None` if the file is missing,
+/// unparseable or empty.
+///
+/// Public so `tests/gui_tests.rs` can assert every bundled icon really rasterizes
+/// — see `every_icon_has_a_parseable_svg_source`.
+///
+/// The scale comes from the tree's own size rather than a hardcoded 512: the
+/// game-icons files are `viewBox="0 0 512 512"` while the hand-authored ones are
+/// `0 0 20 20`, and both still have to land on `px`.
+///
+/// The box-average runs on **premultiplied** RGBA, the only order that is correct
+/// where a pixel is partly covered — averaging straight alpha darkens every
+/// antialiased edge. `from_rgba_premultiplied` then hands egui exactly that, so
+/// nothing is unpremultiplied on the way out.
+pub fn rasterize_icon(path: &Path, px: u32) -> Option<egui::ColorImage> {
+    let data = std::fs::read(path).ok()?;
+    let tree = resvg::usvg::Tree::from_data(&data, &resvg::usvg::Options::default()).ok()?;
+    let size = tree.size();
+    if size.width() <= 0.0 || size.height() <= 0.0 {
+        return None;
+    }
+
+    let big = px * ICON_SS;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(big, big)?;
+    let scale = big as f32 / size.width().max(size.height());
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+
+    let src = pixmap.data();
+    let area = (ICON_SS * ICON_SS) as u16;
+    let mut out = vec![0u8; (px * px * 4) as usize];
+    for (i, chunk) in out.chunks_exact_mut(4).enumerate() {
+        let (x, y) = (i as u32 % px, i as u32 / px);
+        let mut acc = [0u16; 4];
+        for sy in 0..ICON_SS {
+            for sx in 0..ICON_SS {
+                let at = (((y * ICON_SS + sy) * big + (x * ICON_SS + sx)) * 4) as usize;
+                for (c, a) in acc.iter_mut().enumerate() {
+                    *a += src[at + c] as u16;
+                }
+            }
+        }
+        for (c, out) in chunk.iter_mut().enumerate() {
+            *out = (acc[c] / area) as u8;
+        }
+    }
+    Some(egui::ColorImage::from_rgba_premultiplied(
+        [px as usize, px as usize],
+        &out,
+    ))
+}
+
+/// Rasterize a theme's icons (own SVG → default theme's) into GPU textures, one
+/// per `Icon::ALL` slot. Missing/unparseable → `None`, and the pane draws a glyph.
 /// Synchronous at startup/theme-switch: the async loader path showed
 /// pending/error placeholders and stretched buttons.
 pub fn load_icons(
@@ -323,12 +386,8 @@ pub fn load_icons(
     Icon::ALL
         .iter()
         .map(|&icon| {
-            let bytes = std::fs::read(themes.icon_path(theme, icon)?).ok()?;
-            let rgba = image::load_from_memory(&bytes).ok()?.to_rgba8();
-            let color = egui::ColorImage::from_rgba_unmultiplied(
-                [rgba.width() as usize, rgba.height() as usize],
-                &rgba,
-            );
+            let path = themes.icon_path(theme, icon)?;
+            let color = rasterize_icon(&path, icon.px())?;
             Some(ctx.load_texture(
                 format!("tplay-{}-{}", theme.id, icon.file_name()),
                 color,
@@ -399,12 +458,21 @@ impl ThemeState {
     }
 }
 
-/// Pane icons. Each maps to a `<theme>/icons/<name>.png` and a fallback glyph.
+/// Raster size of every toolbar icon, in pixels. The display size is the
+/// caller's (`TOOLBAR_ICON` and friends) — this is what the texture is authored
+/// at, which is what keeps a 20px glyph from aliasing.
+pub const ICON_PX: u32 = 20;
+
+/// The Album Cover pane's placeholder is painted at pane size, so it is
+/// rasterized large rather than minified down.
+pub const NOCOVER_PX: u32 = 128;
+
+/// Pane icons. Each maps to a `<theme>/icons/<name>.svg` and a fallback glyph.
 /// Fallback glyphs must exist in the bundled egui font stack (Ubuntu-Light /
 /// NotoEmoji / emoji-icon-font) or they render as tofu boxes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Icon {
-    /// App logo — menu button in the top panel (per-theme PNG, fallback glyph).
+    /// App logo — menu button in the top panel (per-theme file, fallback glyph).
     Logo,
     Play,
     Pause,
@@ -471,45 +539,66 @@ impl Icon {
     /// `self as usize`. **Append-only**: a new `Icon` goes at the end of the enum
     /// and the end of both arrays, or every later icon decodes the wrong file.
     ///
-    /// The last three are written by `themes/generate_icons.py`; the rest are
-    /// hand-drawn. A glyph is only ever painted when neither the theme nor the
-    /// default ships the PNG, and several of them are known to tofu in the
-    /// bundled egui font — which is exactly why the PNGs exist.
+    /// 19 of the 23 are [game-icons.net](https://game-icons.net) artwork under
+    /// CC BY 3.0 (see `CREDITS`); the rest are original. Each is a per-theme SVG
+    /// with that theme's own palette token baked into its `fill`, which is why a
+    /// single file can never serve two themes. A glyph is only ever painted when
+    /// neither the theme nor the default ships the file, and several glyphs are
+    /// known to tofu in the bundled egui font — which is exactly why the SVGs
+    /// exist.
     const DATA: [(&'static str, &'static str); 23] = [
-        ("logo.png", "☰"),
-        ("play.png", "▶"),
-        ("pause.png", "⏸"),
-        ("stop.png", "⏹"),
-        ("prev.png", "⏮"),
-        ("next.png", "⏭"),
-        ("shuffle.png", "🔀"),
-        ("repeat.png", "🔁"),
-        ("volume.png", "🔊"),
-        ("remove.png", "×"),
-        ("sort_asc.png", "⏶"),
-        ("sort_desc.png", "⏷"),
-        ("star_on.png", "★"),
-        ("star_off.png", "☆"),
-        ("folder.png", "📁"),
-        ("minimize.png", "🗕"),
-        ("maximize.png", "🗖"),
-        ("nocover.png", "🎵"),
-        ("gapless.png", "⏩"),
-        ("crossfade.png", "🔗"),
-        ("reverse.png", "⇅"),
-        ("new_list.png", "✳"),
-        ("save.png", "↓"),
+        ("logo.svg", "☰"),
+        ("play.svg", "▶"),
+        ("pause.svg", "⏸"),
+        ("stop.svg", "⏹"),
+        ("prev.svg", "⏮"),
+        ("next.svg", "⏭"),
+        ("shuffle.svg", "🔀"),
+        ("repeat.svg", "🔁"),
+        ("volume.svg", "🔊"),
+        ("remove.svg", "×"),
+        ("sort_asc.svg", "⏶"),
+        ("sort_desc.svg", "⏷"),
+        ("star_on.svg", "★"),
+        ("star_off.svg", "☆"),
+        ("folder.svg", "📁"),
+        ("minimize.svg", "🗕"),
+        ("maximize.svg", "🗖"),
+        ("nocover.svg", "🎵"),
+        ("gapless.svg", "⏩"),
+        ("crossfade.svg", "🔗"),
+        ("reverse.svg", "⇅"),
+        ("new_list.svg", "✳"),
+        ("save.svg", "↓"),
     ];
+
+    /// The raster size this icon is drawn at, in pixels. Everything is a 20px
+    /// toolbar mark except the Album Cover pane's placeholder, which is painted
+    /// at pane size and so has to be rasterized large to stay crisp.
+    ///
+    /// It cannot be one constant for all of them: rendering everything at 128 and
+    /// letting `TextureOptions::LINEAR` minify 6.4x down to a 20px button
+    /// shimmers on thin strokes, because there is no mip chain to pre-filter it.
+    pub fn px(self) -> u32 {
+        if self == Icon::NoCover {
+            NOCOVER_PX
+        } else {
+            ICON_PX
+        }
+    }
 
     pub fn index(self) -> usize {
         self as usize
     }
 
-    fn file_name(self) -> &'static str {
+    /// The file this slot reads, `<name>.svg`. Public so
+    /// `tests/gui_tests.rs::no_icon_file_is_without_a_slot` can ask the other
+    /// direction: which files on disk have no slot behind them.
+    pub fn file_name(self) -> &'static str {
         Self::DATA[self.index()].0
     }
 
-    /// Last-resort glyph when neither this theme nor the default ships the PNG.
+    /// Last-resort glyph when neither this theme nor the default ships the SVG.
     pub fn glyph(self) -> &'static str {
         Self::DATA[self.index()].1
     }

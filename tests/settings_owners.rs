@@ -333,18 +333,18 @@ fn theme_state_lists_every_loadable_theme() {
     std::fs::remove_dir_all(&root).ok();
 }
 
-/// These fixtures ship no PNGs, so every icon decodes to `None` — which is the
-/// documented "pane renders a unicode glyph" path. The point is that asking for
-/// an icon out of bounds is `None` rather than a panic.
+/// These fixtures ship no icon files, so every slot rasterizes to `None` — which
+/// is the documented "pane renders a unicode glyph" path. The point is that
+/// asking for an icon out of bounds is `None` rather than a panic.
 #[test]
-fn theme_state_icons_are_none_without_pngs() {
+fn theme_state_icons_are_none_without_files() {
     let root = theme_fixture("themestate-list");
     let ctx = egui::Context::default();
     let ts = ThemeState::load(&ctx, known_themes(&root), "alpha");
     for icon in tplay::gui::theme::Icon::ALL {
         assert!(
             ts.icon(icon).is_none(),
-            "{:?} has no PNG in the fixture",
+            "{:?} has no file in the fixture",
             icon
         );
     }
