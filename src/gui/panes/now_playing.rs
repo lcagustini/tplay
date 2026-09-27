@@ -39,7 +39,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
             // lands (`start_track` reads the playing track up front, so this is
             // filled the moment a track starts).
             let cur = app.current_path().map(|p| p.to_path_buf());
-            let info = cur.as_deref().and_then(|p| app.track_info(p));
+            let info = cur.as_deref().and_then(|p| app.db().cache().get(p));
             let title = cur
                 .as_deref()
                 .map(|p| library::title_or_stem(p, info))

@@ -344,13 +344,39 @@ pub type TagCache = HashMap<PathBuf, TrackInfo>;
 
 /// Tags + duration read from one audio file. Missing fields stay blank —
 /// tag strings are fallible metadata, never a reason to fail the scan.
-#[derive(Clone, Debug, Default)]
+///
+/// Serializable because the database stores this verbatim, so a relaunch reads
+/// the tags it already had instead of re-scanning the folder.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct TrackInfo {
     pub title: String,
     pub artist: String,
     pub album: String,
     pub track_no: Option<String>,
+    #[serde(with = "duration_millis")]
     pub duration: Option<Duration>,
+    /// Stars from the file's Popularimeter, `0` for unrated. Read from the
+    /// tags rather than kept as app state, so it survives a re-scan and other
+    /// players see it too — at the cost of whole stars only, since that is all
+    /// a `StarRating` holds.
+    pub rating: u8,
+}
+
+/// `Duration` as whole milliseconds, `std::time::Duration` having no serde impl
+/// of its own. Milliseconds rather than seconds because a sub-second position is
+/// real — the seek bar reads it — and a duration that rounded on the way to disk
+/// would drift from the file it came from.
+mod duration_millis {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::time::Duration;
+
+    pub fn serialize<S: Serializer>(v: &Option<Duration>, s: S) -> Result<S::Ok, S::Error> {
+        v.map(|d| d.as_millis() as u64).serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
+        Ok(Option::<u64>::deserialize(d)?.map(Duration::from_millis))
+    }
 }
 
 /// One row of the Library file list: a subfolder or an audio file, in one
@@ -383,11 +409,17 @@ pub fn read_info(path: &Path) -> Option<TrackInfo> {
             .unwrap_or_default()
     };
     let get_opt = |k: ItemKey| tag.and_then(|t| t.get_string(k)).map(str::to_owned);
+    // `ratings` drops a Popularimeter it cannot parse, so a file carrying one
+    // outside 1..=5 reads as unrated rather than failing the scan.
+    let rating = tag
+        .and_then(|t| t.ratings().next())
+        .map_or(0, |p| p.rating() as u8);
     let mut info = TrackInfo {
         title: get(ItemKey::TrackTitle),
         artist: get(ItemKey::TrackArtist),
         album: get(ItemKey::AlbumTitle),
         track_no: get_opt(ItemKey::TrackNumber),
+        rating,
         duration: {
             let d = tagged.properties().duration();
             if d.is_zero() {

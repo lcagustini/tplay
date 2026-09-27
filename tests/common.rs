@@ -192,7 +192,7 @@ impl TestApp {
             ..Default::default()
         };
         Self {
-            app: tplay::app::TPlayApp::new(&config, mixer),
+            app: tplay::app::TPlayApp::new(&config, tplay::library_db::TrackDb::new(), mixer),
             driver,
             rate: 44_100,
         }
@@ -219,6 +219,48 @@ impl TestApp {
             self.pump(step);
             elapsed += step;
         }
+    }
+
+    /// Run `f` with the mixer pumped on another thread.
+    ///
+    /// Needed for any call that **waits on the mixer** rather than merely
+    /// needing it to have advanced. `Sink::try_seek` is one: it parks in
+    /// `feedback.recv()` until the mixer thread performs the seek and answers,
+    /// so a plain `pump` *after* the call deadlocks — the pump is the thing
+    /// `try_seek` is blocked waiting for. The real app never sees this because
+    /// cpal's audio callback drives the mixer concurrently with the UI thread;
+    /// this reproduces that arrangement.
+    ///
+    /// The driver is moved into a scoped thread for the duration, so `f` gets
+    /// `&mut TPlayApp` while the thread owns the `MixerSource` — the two live in
+    /// different fields, and `f` never sees the driver.
+    ///
+    /// Costs one thread per call. That is the price of the only arrangement that
+    /// matches production; a `try_seek` on a drained sink short-circuits without
+    /// waiting, but that would make a test vacuous rather than correct.
+    pub fn pump_during<R>(&mut self, f: impl FnOnce(&mut tplay::app::TPlayApp) -> R) -> R {
+        // A real driver has to take its place, because `self.driver` is moved.
+        // A detached, never-pumped one is the cheapest stand-in: this method
+        // hands the real driver to the thread below for the whole of `f`.
+        let spare = rodio::mixer::mixer(2, self.rate).1;
+        let driver = std::mem::replace(&mut self.driver, spare);
+
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = done.clone();
+        let pump = std::thread::spawn(move || {
+            // `Relaxed` is enough: the flag is a shutdown signal, not data, and
+            // `join` below is what orders this against `f`.
+            let mut driver = driver;
+            while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+                driver.next();
+            }
+        });
+
+        let out = f(&mut self.app);
+
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        pump.join().expect("the pump thread must not panic");
+        out
     }
 }
 

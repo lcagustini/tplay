@@ -383,7 +383,7 @@ fn file_list_ui(
                         }
                     }
                 } else {
-                    let info = app.track_info(path);
+                    let info = app.db().cache().get(path);
                     let title = library::title_or_stem(path, info);
                     let hay = format!(
                         "{} {} {} {title}",
@@ -618,7 +618,7 @@ pub fn remote_list_ui(
         .collect();
     library::sort_entries(
         &mut entries,
-        app.tag_cache(),
+        app.db().cache(),
         app.library().sort(),
         app.library().sort_asc(),
     );
@@ -633,7 +633,10 @@ pub fn remote_list_ui(
         .filter(|e| !e.is_dir() && !library::is_playlist(e.path()))
         .map(|e| e.path().to_path_buf())
         .collect();
-    let untagged = audio.iter().filter(|p| app.track_info(p).is_none()).count();
+    let untagged = audio
+        .iter()
+        .filter(|p| app.db().cache().get(*p).is_none())
+        .count();
     app.ensure_tags(audio);
 
     // Show the outstanding transfer count, not just a bool: a share browse

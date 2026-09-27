@@ -153,6 +153,7 @@ fn sorting_leaves_every_track_present_exactly_once_on_every_column() {
                 album: format!("Al{i}"),
                 track_no: Some((i + 1).to_string()),
                 duration: Some(Duration::from_secs(i * 7)),
+                ..Default::default()
             })
             .collect(),
     );

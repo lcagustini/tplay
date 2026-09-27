@@ -4,6 +4,7 @@ use crate::audio;
 use crate::audio::transition;
 use crate::config;
 use crate::library;
+use crate::library_db;
 use crate::network;
 use crate::playlist;
 use crate::tracks;
@@ -123,22 +124,25 @@ pub struct TPlayApp {
     /// math needs the old total.
     xf_out_total: Option<Duration>,
 
-    /// The config.json content currently on disk. `flush_config` compares the
-    /// live snapshot against it, so *what* changed is never tracked by hand —
-    /// a setter that forgets to flag itself cannot lose a setting.
-    saved_config: String,
-    /// `ctx` time of the last config.json write, for the debounce window.
-    last_config_save: f64,
+    /// The config.json content currently on disk, and when it was written.
+    /// `flush_config` compares a fresh snapshot against it, so *what* changed is
+    /// never tracked by hand — a setter that forgets to flag itself cannot lose
+    /// a setting.
+    saved_config: config::Persisted,
+    /// The same pair for library.json, which is why the policy is one type rather
+    /// than two fields per file.
+    saved_db: config::Persisted,
 
     // ── Library pane ──────────────────────────────────────────────────────
     /// Browsed dir, rows, sort, bookmarks, hidden-folder toggle. What it can't
     /// own stays here: the tag cache, shared with the other two panes.
     library: library::LibraryState,
-    /// Shared tag/duration cache for every scanned or played track, keyed by id.
-    /// Filenames stand in until an entry lands.
-    tag_cache: library::TagCache,
-    /// Reads tags into `tag_cache`, local or remote. Owns the local scan's
-    /// receiver, so the app holds no mpsc plumbing.
+    /// The tag cache every pane reads, plus the play history only this app knows.
+    /// Two maps with no shared insert path, so re-reading a file's tags cannot
+    /// cost a play count — see `library_db.rs`.
+    db: library_db::TrackDb,
+    /// Reads tags into `db`, local or remote. Owns the local scan's receiver, so
+    /// the app holds no mpsc plumbing.
     tracks: tracks::TagReader,
 
     // ── SMB network ────────────────────────────────────────────────────────
@@ -151,10 +155,16 @@ impl TPlayApp {
     /// parameter: the app holds no `egui::Context` and owns no theme, so it
     /// cannot construct one — `main.rs`'s `TPlay` does both and hands over the
     /// settings `config.json` already carries.
-    pub fn new(config: &Config, mixer: Mixer) -> Self {
-        // Seed the "what's on disk" baseline with what we just read, so the
-        // first flush only writes if a setter has already changed something.
-        let saved_config = serde_json::to_string_pretty(config).unwrap_or_default();
+    ///
+    /// `db` is passed in for the same reason the config is: the library
+    /// database is *read* outside the app, so a test can hand over an empty one
+    /// instead of reaching into the real config dir.
+    pub fn new(config: &Config, db: library_db::TrackDb, mixer: Mixer) -> Self {
+        // Seed the "what's on disk" baselines with what we just read, so the
+        // first flush only writes if something has already changed.
+        let saved_config =
+            config::Persisted::new(&serde_json::to_string_pretty(config).unwrap_or_default());
+        let saved_db = config::Persisted::new(&db.snapshot());
 
         let sink = Sink::connect_new(&mixer);
 
@@ -183,7 +193,7 @@ impl TPlayApp {
             xf_sink: None,
             xf_out_total: None,
             saved_config,
-            last_config_save: 0.0,
+            saved_db,
             library: library::LibraryState::new(
                 dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")),
                 config
@@ -196,7 +206,7 @@ impl TPlayApp {
                     .collect(),
                 config.library.show_hidden,
             ),
-            tag_cache: library::TagCache::new(),
+            db,
             tracks: tracks::TagReader::new(),
             network: network::Network::new(config.servers.clone()),
         };
@@ -239,19 +249,42 @@ impl TPlayApp {
     /// setting. This is the shape `gui/coordinator.rs` already used for
     /// dock_layout.json. Cost is one ~500-byte serialization per frame.
     pub fn flush_config(&mut self, now: f64, closing: bool, theme_id: &str) {
-        let config = self.snapshot(theme_id);
-        let json = serde_json::to_string_pretty(&config).unwrap_or_default();
-        if !config::should_flush(
-            json != self.saved_config,
-            now,
-            self.last_config_save,
-            closing,
-        ) {
+        if !self.saved_config.due(now, closing) {
             return;
         }
-        self.saved_config = json;
-        self.last_config_save = now;
+        let config = self.snapshot(theme_id);
+        let json = serde_json::to_string_pretty(&config).unwrap_or_default();
+        if !self.saved_config.wants_write(&json, now, closing) {
+            return;
+        }
+        self.saved_config.note_written(&json, now);
         config::save(&config);
+    }
+
+    /// The library database's half of the same policy. Same throttle, same
+    /// content compare — and the same reason `due` comes first, which matters
+    /// more here: the content is the whole tag cache, so the serialization this
+    /// skips is the entire library.
+    fn flush_db(&mut self, now: f64, closing: bool) {
+        if !self.saved_db.due(now, closing) {
+            return;
+        }
+        let json = self.db.snapshot();
+        if !self.saved_db.wants_write(&json, now, closing) {
+            return;
+        }
+        // `persist` stamps `first_seen` for anything never written, so the string
+        // it returns is the one that reached the file — and the one to compare
+        // against next frame, or every frame after this would look changed.
+        self.saved_db
+            .note_written(&self.db.persist(now_epoch()), now);
+    }
+
+    /// The database: the tag cache every pane reads, and the play history.
+    /// Writing it is the app's own business — a pane reads, `apply_edit` and
+    /// `start_track` write — so there is deliberately no `db_mut`.
+    pub fn db(&self) -> &library_db::TrackDb {
+        &self.db
     }
 
     /// Every setting, as the file wants it. `theme_id` is passed in because the
@@ -348,8 +381,12 @@ impl TPlayApp {
         // of waiting on a scan (one file, negligible cost). Keyed by the id,
         // which is what every pane looks up by.
         if let Some(info) = tracks::info(&track) {
-            self.tag_cache.insert(track.clone(), info);
+            self.db.cache_mut().insert(track.clone(), info);
         }
+        // One play, once per track that actually starts — `start_track` is the
+        // one place that happens, and `seek` does not go through it, so a seek
+        // is not a second play.
+        self.db.note_played(&track, now_epoch());
 
         let file = match tracks::open(&track) {
             Some(f) => f,
@@ -616,7 +653,7 @@ impl TPlayApp {
                 .map(|(_, p)| {
                     (
                         tracks::is_ready(p),
-                        self.tag_cache.get(p).and_then(|i| i.duration),
+                        self.db.cache().get(p).and_then(|i| i.duration),
                     )
                 })
                 .unzip();
@@ -666,7 +703,7 @@ impl TPlayApp {
                 // Tagged by the id, so every pane still finds the entry.
                 if let Some(info) = tracks::info(&armed.track) {
                     self.total_duration = info.duration;
-                    self.tag_cache.insert(armed.track.clone(), info);
+                    self.db.cache_mut().insert(armed.track.clone(), info);
                 }
                 if self.total_duration.is_none() {
                     self.total_duration = tracks::probe(&armed.track);
@@ -870,7 +907,7 @@ impl TPlayApp {
     /// Sort the playlist by a Library column — a `library::SORT_OPTIONS` index,
     /// so the playlist orders exactly like the file list beside it.
     pub fn sort_playlist(&mut self, col: usize) {
-        playlist::sort_tracks(&mut self.playlist, &self.tag_cache, col);
+        playlist::sort_tracks(&mut self.playlist, self.db.cache(), col);
         self.playlist_reordered();
     }
 
@@ -1041,7 +1078,7 @@ impl TPlayApp {
     /// Starting that scan stays here, because the tag cache and the `TagReader`
     /// are the app's, shared with the other two panes.
     pub fn navigate_to(&mut self, dir: PathBuf) {
-        let Some(scan) = self.library.open(dir, &self.tag_cache) else {
+        let Some(scan) = self.library.open(dir, self.db.cache()) else {
             return;
         };
         self.ensure_tags(scan);
@@ -1050,7 +1087,7 @@ impl TPlayApp {
     /// Header click: pick a new column (ascending) or flip the active one and
     /// re-sort the current folder in place.
     pub fn set_library_sort(&mut self, key: usize) {
-        self.library.set_sort(key, &self.tag_cache);
+        self.library.set_sort(key, self.db.cache());
     }
 
     /// Ensure the given audio files have tag info in the cache. Returns whether
@@ -1062,14 +1099,14 @@ impl TPlayApp {
     /// worker. Both land in the same `tag_cache`, remote keyed by URI, so every
     /// pane fills in identically.
     pub fn ensure_tags(&mut self, paths: Vec<PathBuf>) -> bool {
-        let cache = &self.tag_cache;
+        let cache = self.db.cache();
         self.tracks.request(cache, &mut self.network, &paths)
     }
 
     /// Drain finished local tag results into the cache. Returns whether anything
     /// arrived or the scan ended, so the caller can ask for a repaint.
     pub fn drain_tag_scan(&mut self) -> bool {
-        let cache = &mut self.tag_cache;
+        let cache = self.db.cache_mut();
         self.tracks.drain_into(cache)
     }
 
@@ -1201,16 +1238,6 @@ impl TPlayApp {
         &mut self.eq
     }
 
-    /// The whole tag cache, so a caller can sort a list of entries against it
-    /// (`library::sort_entries`) rather than sorting entry-by-entry. Keys are
-    /// track ids, so a remote one is an `smb://` URI.
-    pub fn tag_cache(&self) -> &library::TagCache {
-        &self.tag_cache
-    }
-
-    pub fn track_info(&self, path: &std::path::Path) -> Option<&library::TrackInfo> {
-        self.tag_cache.get(path)
-    }
     /// Whether any file in the browsed folder is still missing from the tag
     /// cache (i.e. its scan is pending or underway).
     ///
@@ -1222,7 +1249,9 @@ impl TPlayApp {
     /// is why it is here and not on either.
     pub fn library_scanning(&self) -> bool {
         self.library.entries().iter().any(|e| {
-            !e.is_dir() && !library::is_playlist(e.path()) && !self.tag_cache.contains_key(e.path())
+            !e.is_dir()
+                && !library::is_playlist(e.path())
+                && !self.db.cache().contains_key(e.path())
         })
     }
 
@@ -1341,7 +1370,7 @@ impl TPlayApp {
                 network::Event::Tagged(results) => {
                     // Same cache the local scan fills, keyed by URI, so rows
                     // switch from filename to tagged title on their own.
-                    let cache = &mut self.tag_cache;
+                    let cache = self.db.cache_mut();
                     self.tracks.absorb(cache, results);
                     // Housekeeping after a batch, not per frame: this walks the
                     // spool dir, and tag spools are what fill it.
@@ -1355,6 +1384,20 @@ impl TPlayApp {
         // an `Event::Saved` that retargets `playlist_file` is recorded in the
         // same frame it lands.
         self.flush_config(now, closing, theme_id);
+        self.flush_db(now, closing);
         scanning || self.network.busy() || (!self.sink.empty() && !self.sink.is_paused())
     }
+}
+
+/// Wall-clock seconds since the epoch, for the play history.
+///
+/// Not `ctx` time: the debounce clock restarts with the process, but a play
+/// count and a first-seen stamp have to mean the same thing in a later session.
+/// Read from the OS clock rather than `ctx` precisely so a value written to disk
+/// is a real time rather than a session-relative one.
+fn now_epoch() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }

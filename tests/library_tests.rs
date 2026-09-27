@@ -337,6 +337,45 @@ fn read_info_gives_tags_and_a_true_duration_from_a_whole_file() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
+/// The rating lives in the file's Popularimeter, so this is the whole claim: a
+/// star rating written by any other tagger comes back through `read_info`, and
+/// the rewrite that carries it leaves the rest of the tags alone.
+///
+/// The last assert is the one that would catch a botched ID3v2 rewrite. lofty
+/// rewrites the tag block rather than appending to it, so a mishandled rewrite
+/// would cost the title — and this fixture is what the remote-tag path is
+/// verified against, so a silent loss here would poison every other test with
+/// a passing-looking one.
+#[test]
+fn a_stars_rating_written_to_the_file_reads_back() {
+    use lofty::tag::items::popularimeter::{Popularimeter, StarRating};
+
+    let dir = test_dir("a_stars_rating_written_to_the_file_reads_back");
+    let path = dir.join("rated.mp3");
+    write_tagged_mp3(&path, "Ne-Yo", "Test Artist", "Test Album");
+    assert_eq!(
+        read_info(&path).expect("fixture parses").rating,
+        0,
+        "a file with no Popularimeter is unrated, not a failure"
+    );
+
+    let mut tagged = lofty::read_from_path(&path).expect("fixture parses");
+    tagged
+        .primary_tag_mut()
+        .expect("the fixture's ID3v2 tag")
+        .insert_text(
+            ItemKey::Popularimeter,
+            Popularimeter::musicbee(StarRating::Four, 0).to_string(),
+        );
+    tagged.save_to_path(&path, WriteOptions::default()).unwrap();
+
+    let info = read_info(&path).expect("rewritten file parses");
+    assert_eq!(info.rating, 4);
+    assert_eq!(info.title, "Ne-Yo", "the rewrite kept the other tags");
+
+    fs::remove_dir_all(&dir).unwrap();
+}
+
 /// Why `aif`/`aiff` are not in `AUDIO_EXTENSIONS`, kept as a **tripwire**.
 ///
 /// lofty reads AIFF tags, so the format looks free — but symphonia misreads the

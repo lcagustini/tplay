@@ -331,7 +331,12 @@ fn write_theme(dir: &Path, id: &str, palette_accent: &str) {
 
 #[test]
 fn higher_priority_dir_wins_and_icons_fall_back() {
-    let base = std::env::temp_dir().join(format!("tplay-test-{}", std::process::id()));
+    // Its own subdirectory of the shared per-pid root, never the root itself:
+    // cargo runs a binary's tests in parallel, so a `remove_dir_all` on the root
+    // deletes every other test's fixture mid-run — which showed up as a
+    // `write_wav` ENOENT in an unrelated pane test. Same fix, and for the same
+    // reason, as `settings_owners.rs`'s `theme_fixture`.
+    let base = common::test_dir("theme-priority");
     let overrides = base.join("overrides");
     let bundled = base.join("bundled");
     write_theme(&overrides, "dark", "#ff0000");

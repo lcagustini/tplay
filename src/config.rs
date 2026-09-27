@@ -7,6 +7,11 @@
 //! they document the format the tests pin. The live half — [`Prefs`], the six
 //! user-tunable playback settings — is the counterpart of the matching `Config`
 //! fields, and owns their clamping.
+//!
+//! The last section is the **write policy**, which the other persisted file
+//! shares: [`should_flush`] decides *whether*, [`Persisted`] holds the two values
+//! the decision reads, and [`atomic_write`] is how a write reaches disk without
+//! leaving a truncated file behind.
 
 use crate::audio::eq::EQ_BANDS;
 use crate::network;
@@ -308,21 +313,10 @@ pub fn load_from(p: Option<&Path>) -> Config {
 
 pub fn save(config: &Config) {
     let Some(path) = path() else { return };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
     let Ok(json) = serde_json::to_string_pretty(config) else {
         return;
     };
-    // Write-then-rename, so a process killed mid-write cannot leave a truncated
-    // config.json. A half-written one reads back as *malformed*, which `load`
-    // answers by resetting every setting to its default — so the atomic write
-    // is what keeps a bad shutdown from costing the user's configuration.
-    let partial = path.with_extension("json.part");
-    if std::fs::write(&partial, &json).is_ok() && std::fs::rename(&partial, &path).is_ok() {
-        return;
-    }
-    let _ = std::fs::remove_file(&partial);
+    atomic_write(&path, &json);
 }
 
 // ── When to write ───────────────────────────────────────────────────────────
@@ -354,4 +348,80 @@ pub fn should_flush(changed: bool, now: f64, last_save: f64, closing: bool) -> b
         return true;
     }
     now - last_save >= CONFIG_SAVE_DEBOUNCE_SECS
+}
+
+/// The write-throttle state one persisted file keeps: the content last written
+/// and when it was written.
+///
+/// It exists because two files now keep that pair by hand — config.json and the
+/// library database — and a third (`dock_layout.json`, in the GUI layer) keeps
+/// the same idea in egui memory because the coordinator has no app state to hold
+/// it. The *policy* stays in [`should_flush`], which is pure and tested on its
+/// own; this only holds the two values the policy reads, so neither caller can
+/// half-apply it.
+pub struct Persisted {
+    last: String,
+    at: f64,
+}
+
+impl Persisted {
+    /// Seed from what was just read, so the first write happens only if
+    /// something has already changed.
+    pub fn new(seed: &str) -> Self {
+        Self {
+            last: seed.to_owned(),
+            at: 0.0,
+        }
+    }
+
+    /// Whether it is worth *serializing* this frame.
+    ///
+    /// The debounce is asked here as well as at the write, because the point of
+    /// asking is to avoid the work: `config.json` is ~500 bytes, so serializing
+    /// it every frame to discover nothing changed is noise, but a
+    /// `library.json` is the whole tag cache, so that same line becomes
+    /// megabytes a second and grows with the library. Inside the window the
+    /// answer cannot be "yes" anyway, so asking is pure waste. `closing` always
+    /// asks, which is what buys back the change made inside the window.
+    pub fn due(&self, now: f64, closing: bool) -> bool {
+        closing || now - self.at >= CONFIG_SAVE_DEBOUNCE_SECS
+    }
+
+    /// Whether `content` differs from the last write and the debounce window has
+    /// passed.
+    pub fn wants_write(&self, content: &str, now: f64, closing: bool) -> bool {
+        should_flush(content != self.last, now, self.at, closing)
+    }
+
+    /// Record a write. Called *before* the file is written, so a write that fails
+    /// is not retried every frame for the rest of the session.
+    pub fn note_written(&mut self, content: &str, now: f64) {
+        self.last.clear();
+        self.last.push_str(content);
+        self.at = now;
+    }
+}
+
+/// Write `content` to `path` atomically: into `<name>.part`, then renamed over the
+/// target.
+///
+/// A plain `fs::write` truncates in place, so a process killed mid-write leaves a
+/// file that reads back as *malformed* — and the recovery for a malformed file is
+/// to reset everything (for config.json) or to start over (for the library
+/// database, which would cost the user's play history). The `.broken` copy
+/// rescues a file that was *already* damaged; this is what stops the next write
+/// from being the one that damages it.
+pub fn atomic_write(path: &Path, content: &str) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    // `<name>.part` rather than a replaced extension, so the temporary file is
+    // recognisably the same file rather than a second one: `config.json.part`.
+    let mut partial = path.as_os_str().to_os_string();
+    partial.push(".part");
+    let partial = PathBuf::from(partial);
+    if std::fs::write(&partial, content).is_ok() && std::fs::rename(&partial, path).is_ok() {
+        return;
+    }
+    let _ = std::fs::remove_file(&partial);
 }

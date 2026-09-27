@@ -195,7 +195,7 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
                 // Tagged title (filename stands in until the scan lands; the
                 // cache is shared with the Library, so visited folders show tags
                 // instantly).
-                let info = app.track_info(path);
+                let info = app.db().cache().get(path);
                 // Filtering skips a *row*, never reindexes the list: `i` stays
                 // the true playlist index, so the banding, the ✕, the click and
                 // the drag all act on the track that is actually there.
@@ -343,7 +343,7 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
                 let name = app
                     .playlist()
                     .get(idx)
-                    .map(|p| library::title_or_stem(p, app.track_info(p)))
+                    .map(|p| library::title_or_stem(p, app.db().cache().get(p)))
                     .unwrap_or_default();
                 // Armed, not run: the index can be gone by the time the modal is
                 // answered (an in-flight remote playlist can replace the list),

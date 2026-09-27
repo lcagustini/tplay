@@ -5,6 +5,7 @@ mod audio;
 mod config;
 mod gui;
 mod library;
+mod library_db;
 mod network;
 mod playlist;
 mod tracks;
@@ -80,7 +81,8 @@ fn main() -> eframe::Result<()> {
             // ones so any Unicode in tags renders (no tofu boxes).
             gui::theme::install_fallback_fonts(&cc.egui_ctx, gui::theme::SYSTEM_FONT_CANDIDATES);
             let themes = ThemeState::load(&cc.egui_ctx, Themes::load(), &config.theme);
-            let app = app::TPlayApp::new(&config, output.mixer().clone());
+            let app =
+                app::TPlayApp::new(&config, library_db::TrackDb::load(), output.mixer().clone());
             // `output` moves in here and is never read: dropping the
             // `OutputStream` stops the cpal callback, and with nothing pulling
             // the mixer the sink never advances. The `Mixer` the app holds is a
