@@ -3,8 +3,8 @@
 use std::path::{Path, PathBuf};
 use tplay::audio::eq::EQ_PRESETS;
 use tplay::library::{
-    default_playlist_name, playlist_file_name, playlist_json, read_playlist, write_playlist,
-    DEFAULT_PLAYLIST_NAME,
+    default_playlist_name, is_audio, is_playlist, playlist_file_name, playlist_text, read_playlist,
+    write_playlist, DEFAULT_PLAYLIST_NAME,
 };
 #[path = "common.rs"]
 mod common;
@@ -131,7 +131,7 @@ fn mixed_playlist_roundtrips_through_json() {
         PathBuf::from("smb://nas/share/remote.mp3"),
     ];
 
-    let json = playlist_json(&tracks).unwrap();
+    let json = playlist_text(&file, &tracks).unwrap();
     assert!(
         json.contains("smb://nas/share/remote.mp3"),
         "URIs are stored in full"
@@ -192,6 +192,158 @@ fn playlist_file_name_appends_the_extension_and_strips_separators() {
         playlist_file_name(".tplay").as_deref(),
         Some(DEFAULT_PLAYLIST_NAME)
     );
+    // A typed interchange extension is the whole export mechanism: it is kept,
+    // and `playlist_text` writes that format instead of JSON.
+    assert_eq!(playlist_file_name("mix.m3u").as_deref(), Some("mix.m3u"));
+    assert_eq!(playlist_file_name("mix.M3U").as_deref(), Some("mix.M3U"));
+    assert_eq!(playlist_file_name("mix.pls").as_deref(), Some("mix.pls"));
+}
+
+// ── Playlist file formats ──────────────────────────────────────────────
+//
+// One dispatcher, three wire formats. Both halves are pinned here: the read
+// side must cope with what other players write, and the write side must
+// produce what they expect.
+
+/// A real `.m3u` carries metadata lines and blanks that are not tracks, and
+/// relative entries that resolve against the playlist's directory.
+#[test]
+fn m3u_import_skips_metadata_and_resolves_relative_entries() {
+    let dir = test_dir("m3u_import_skips_metadata_and_resolves_relative_entries");
+    let file = dir.join("mix.m3u");
+    std::fs::write(
+        &file,
+        "#EXTM3U\n\
+         #EXTINF:213,Aphex Twin - Xtal\n\
+         \n\
+         sub\\02.mp3\n\
+         ../outside.flac\n\
+         /abs/root.aiff\n",
+    )
+    .unwrap();
+
+    let back = read_playlist(&file, &dir).unwrap();
+
+    assert_eq!(
+        back,
+        vec![
+            dir.join("sub/02.mp3"),
+            dir.join("../outside.flac"),
+            PathBuf::from("/abs/root.aiff"),
+        ],
+        "only the three path lines survive, joined onto the base"
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `NumberOfEntries` is routinely stale in files written by other tools, so the
+/// `File<n>` keys are the truth — and they order numerically, not lexically.
+#[test]
+fn pls_import_orders_by_index_and_ignores_the_entry_count() {
+    let dir = test_dir("pls_import_orders_by_index_and_ignores_the_entry_count");
+    let file = dir.join("mix.pls");
+    std::fs::write(
+        &file,
+        "[playlist]\n\
+         File1=one.mp3\n\
+         File10=ten.mp3\n\
+         File2=two.mp3\n\
+         NumberOfEntries=1\n\
+         Version=2\n",
+    )
+    .unwrap();
+
+    let back = read_playlist(&file, &dir).unwrap();
+
+    assert_eq!(
+        back,
+        vec![
+            dir.join("one.mp3"),
+            dir.join("two.mp3"),
+            dir.join("ten.mp3"),
+        ],
+        "File10 follows File2, and the lying count is ignored"
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The `is_remote`-before-`is_absolute` rule is shared by all three formats, so
+/// an `.m3u` off a share resolves its remote entries the same way a `.tplay`
+/// does — and its relative entries against the share directory, not the spool
+/// cache copy it was read from.
+#[test]
+fn smb_uris_survive_an_m3u_import_onto_a_share_base() {
+    let dir = test_dir("smb_uris_survive_an_m3u_import_onto_a_share_base");
+    let file = dir.join("remote.m3u");
+    std::fs::write(
+        &file,
+        "#EXTM3U\n\
+         smb://nas/media/a.mp3\n\
+         sub/b.flac\n",
+    )
+    .unwrap();
+
+    let back = read_playlist(&file, Path::new("smb://nas/media")).unwrap();
+
+    assert_eq!(
+        back,
+        vec![
+            PathBuf::from("smb://nas/media/a.mp3"),
+            PathBuf::from("smb://nas/media/sub/b.flac"),
+        ]
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The write dispatch, in every format the app claims: what we write, we read.
+/// A `.m3u` holding JSON (or the reverse) is the failure this pins.
+#[test]
+fn a_written_playlist_reads_back_in_every_format() {
+    let dir = test_dir("a_written_playlist_reads_back_in_every_format");
+    let tracks = vec![
+        PathBuf::from("/music/one.mp3"),
+        PathBuf::from("smb://nas/share/two.flac"),
+        PathBuf::from("/music/with space/three.wav"),
+    ];
+
+    for name in ["mix.tplay", "mix.m3u", "mix.m3u8", "mix.pls"] {
+        let file = dir.join(name);
+        write_playlist(&file, &tracks).unwrap();
+        assert_eq!(
+            read_playlist(&file, &dir).unwrap(),
+            tracks,
+            "{name} must round-trip"
+        );
+    }
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The two extension sets the Library filters on, since everything else keys
+/// off them: a playlist row is never audio, and an unlisted file is neither.
+#[test]
+fn recognized_extensions_split_audio_from_playlist() {
+    for (name, audio, playlist) in [
+        ("song.mp3", true, false),
+        ("song.MP3", true, false),
+        ("mix.tplay", false, true),
+        ("mix.m3u", false, true),
+        ("mix.M3U8", false, true),
+        ("mix.pls", false, true),
+        ("notes.txt", false, false),
+        ("cover.jpg", false, false),
+        // Decodable, but deliberately unlisted: symphonia misreads the rate.
+        // See `symphonia_misreads_the_aiff_sample_rate` in library_tests.rs.
+        ("take.aiff", false, false),
+        ("noext", false, false),
+    ] {
+        let path = Path::new(name);
+        assert_eq!(is_audio(path), audio, "is_audio({name})");
+        assert_eq!(is_playlist(path), playlist, "is_playlist({name})");
+    }
 }
 
 // ── Shuffle logic tests ────────────────────────────────────────────────

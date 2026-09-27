@@ -909,9 +909,11 @@ impl TPlayApp {
     /// rather than silently claiming a save that never happened.
     pub fn save_playlist_to(&mut self, path: PathBuf) {
         if network::is_remote(&path) {
-            match library::playlist_json(&self.playlist) {
-                Ok(json) => {
-                    self.network.save(path.to_string_lossy().into_owned(), json);
+            // Same bytes the local write would produce: the format comes from the
+            // target's extension, which on a URI is the remote filename's.
+            match library::playlist_text(&path, &self.playlist) {
+                Ok(text) => {
+                    self.network.save(path.to_string_lossy().into_owned(), text);
                 }
                 Err(e) => eprintln!("tplay: could not serialize playlist: {e}"),
             }

@@ -13,7 +13,18 @@ use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 /// The audio extensions this player can play.
+///
+/// `aif`/`aiff` are absent on purpose: symphonia 0.5.5 ships the demuxer but
+/// misreads an AIFF's sample rate, so every file plays ~4x fast, two octaves
+/// up, and reports a duration 4x short — which would feed the seek bar and the
+/// crossfade math. `symphonia_misreads_the_aiff_sample_rate` (`library_tests.rs`)
+/// is the tripwire that says when to add them back.
 const AUDIO_EXTENSIONS: [&str; 5] = ["mp3", "wav", "ogg", "flac", "m4a"];
+
+/// Playlist file formats this app reads and writes. `.tplay` is ours;
+/// `.m3u`/`.m3u8` and `.pls` are what other players speak, so a list can leave
+/// here and come back.
+const PLAYLIST_EXTENSIONS: [&str; 4] = ["tplay", "m3u", "m3u8", "pls"];
 
 /// Cover art to fall back to when a track has no embedded art: `folder.jpg` is
 /// the classic album-folder convention, `cover.jpg` common from Linux rippers;
@@ -140,16 +151,24 @@ impl Volume {
     }
 }
 
-pub fn is_audio(path: &Path) -> bool {
+/// A file's lowercase extension — the format dispatch's only input. Works on an
+/// `smb://` URI too, since a URI's last segment is the filename.
+fn extension(path: &Path) -> Option<String> {
     path.extension()
         .and_then(|e| e.to_str())
-        .is_some_and(|e| AUDIO_EXTENSIONS.iter().any(|a| e.eq_ignore_ascii_case(a)))
+        .map(|e| e.to_ascii_lowercase())
+}
+
+fn has_extension(path: &Path, set: &[&str]) -> bool {
+    extension(path).is_some_and(|e| set.contains(&e.as_str()))
+}
+
+pub fn is_audio(path: &Path) -> bool {
+    has_extension(path, &AUDIO_EXTENSIONS)
 }
 
 pub fn is_playlist(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("tplay"))
+    has_extension(path, &PLAYLIST_EXTENSIONS)
 }
 
 /// Fallback filename for a playlist save when the tracked file has no usable
@@ -176,9 +195,11 @@ pub fn default_playlist_name(playlist_file: Option<&Path>) -> String {
     }
 }
 
-/// Normalize a user-typed filename into a safe `.tplay` name: the extension is
-/// implied if omitted, and path separators are stripped rather than turned into
-/// a bogus server path. `None` for blank input.
+/// Normalize a user-typed filename into a safe playlist name: the extension is
+/// implied if omitted — `.tplay`, unless the user typed one of the interchange
+/// extensions, which is how "Save" becomes an export with no format picker —
+/// and path separators are stripped rather than turned into a bogus server
+/// path. `None` for blank input.
 pub fn playlist_file_name(typed: &str) -> Option<String> {
     let cleaned = typed.trim().replace(['/', '\\'], "_");
     if cleaned.is_empty() {
@@ -201,51 +222,115 @@ struct PlaylistData {
     paths: Vec<String>,
 }
 
-/// Serialize tracks as `.tplay` JSON. The pure half, shared by the local
-/// writer and the SMB save (which ships the bytes to the worker instead of
-/// writing a local file).
-pub fn playlist_json(tracks: &[PathBuf]) -> std::io::Result<String> {
-    let data = PlaylistData {
-        paths: tracks
-            .iter()
-            .filter_map(|p| p.to_str().map(str::to_owned))
-            .collect(),
-    };
-    Ok(serde_json::to_string_pretty(&data)?)
+/// Serialize the tracks in the format `path`'s extension asks for.
+///
+/// The single writer, so the local `write_playlist` and the SMB save (which
+/// ships the bytes to the worker instead of writing a local file) cannot
+/// disagree about the format.
+///
+/// Paths go out verbatim. The alternative — rewriting entries relative to the
+/// playlist's own directory — is what other tools accept too, but absolute is
+/// what they reliably read, and rewriting is where the `is_remote` trap in
+/// `resolve_entry` comes from.
+pub fn playlist_text(path: &Path, tracks: &[PathBuf]) -> std::io::Result<String> {
+    let entries: Vec<String> = tracks
+        .iter()
+        .filter_map(|p| p.to_str().map(str::to_owned))
+        .collect();
+    Ok(match extension(path).as_deref() {
+        // One entry per line. No `#EXTM3U` header: every reader tolerates its
+        // absence, and it is a claim to UTF-8 this writer does not make.
+        Some("m3u") | Some("m3u8") => {
+            let mut out = String::new();
+            for e in &entries {
+                out.push_str(e);
+                out.push('\n');
+            }
+            out
+        }
+        Some("pls") => {
+            let mut out = String::from("[playlist]\n");
+            for (i, e) in entries.iter().enumerate() {
+                out.push_str(&format!("File{}={e}\n", i + 1));
+            }
+            out.push_str(&format!("NumberOfEntries={}\nVersion=2\n", entries.len()));
+            out
+        }
+        _ => serde_json::to_string_pretty(&PlaylistData { paths: entries })?,
+    })
 }
 
-/// Write the given tracks as a `.tplay` playlist file (paths only).
+/// Write the given tracks as a playlist file (paths only), in the format its
+/// extension names.
 pub fn write_playlist(path: &Path, tracks: &[PathBuf]) -> std::io::Result<()> {
-    std::fs::write(path, playlist_json(tracks)?)
+    std::fs::write(path, playlist_text(path, tracks)?)
 }
 
-/// Read a `.tplay` file, resolving relative entries against `base`.
+/// Read a playlist file in the format its extension names, resolving relative
+/// entries against `base`.
 ///
 /// `base` is explicit, not `path.parent()`, because a remote playlist is read
 /// from its **spool cache copy** — resolving against that would silently drop
 /// every relative track. Local callers pass the file's own directory; remote
 /// callers pass the share directory URI it was browsed at.
+pub fn read_playlist(path: &Path, base: &Path) -> Option<Vec<PathBuf>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let entries: Vec<String> = match extension(path).as_deref() {
+        Some("m3u") | Some("m3u8") => parse_m3u(&text),
+        Some("pls") => parse_pls(&text),
+        _ => serde_json::from_str::<PlaylistData>(&text).ok()?.paths,
+    };
+    Some(
+        entries
+            .into_iter()
+            .map(|e| resolve_entry(e, base))
+            .collect(),
+    )
+}
+
+/// Resolve one entry from any of the formats, the same way for all three.
 ///
 /// `smb://` entries are kept verbatim, never resolved against `base`. They only
 /// *look* relative: `Path::is_relative` is true for anything without a leading
-/// `/`, so keying off it turns `smb://nas/m/x.mp3` into
+/// `/`, so branching on it turns `smb://nas/m/x.mp3` into
 /// `smb://nas/m/smb://nas/m/x.mp3`.
-pub fn read_playlist(path: &Path, base: &Path) -> Option<Vec<PathBuf>> {
-    let json = std::fs::read_to_string(path).ok()?;
-    let data: PlaylistData = serde_json::from_str(&json).ok()?;
-    Some(
-        data.paths
-            .into_iter()
-            .map(|s| {
-                let p = PathBuf::from(s);
-                if crate::network::is_remote(&p) || p.is_absolute() {
-                    p
-                } else {
-                    base.join(p)
-                }
-            })
-            .collect(),
-    )
+fn resolve_entry(entry: String, base: &Path) -> PathBuf {
+    let p = PathBuf::from(entry);
+    if crate::network::is_remote(&p) || p.is_absolute() {
+        p
+    } else {
+        base.join(p)
+    }
+}
+
+/// Plain-text `.m3u`: one entry per line. `#` lines carry metadata, not paths
+/// (`#EXTM3U`, `#EXTINF:seconds,Artist - Title`, and the `#EXT-X-*` set), and
+/// blank lines are padding — neither is a track. `\` is the separator a Windows
+/// writer emitted, and nothing else in a path legitimately contains one.
+fn parse_m3u(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| l.replace('\\', "/"))
+        .collect()
+}
+
+/// INI-ish `.pls`: `File1=`, `File2=`… under a `[playlist]` header.
+///
+/// Entries are keyed by index, so they are ordered numerically — a string sort
+/// puts `File10` before `File2`. `NumberOfEntries` is deliberately ignored: it
+/// is routinely stale in real files, and the keys are the truth.
+fn parse_pls(text: &str) -> Vec<String> {
+    let mut files: Vec<(u32, String)> = text
+        .lines()
+        .filter_map(|l| {
+            let (key, value) = l.split_once('=')?;
+            let index: u32 = key.trim().strip_prefix("File")?.trim().parse().ok()?;
+            Some((index, value.trim().to_owned()))
+        })
+        .collect();
+    files.sort_by_key(|(i, _)| *i);
+    files.into_iter().map(|(_, v)| v).collect()
 }
 
 /// The shared tag/duration cache: track id → what we know about it.
@@ -571,7 +656,7 @@ impl LibraryState {
     /// List `dir` into rows and sort them. False if it isn't a directory, in
     /// which case nothing changed.
     ///
-    /// Returns the audio files to tag — subfolders and `.tplay` rows excluded,
+    /// Returns the audio files to tag — subfolders and playlist rows excluded,
     /// because a playlist file isn't audio and a folder has no tags of its own.
     /// The caller starts the scan; this only says what to scan.
     pub fn open(&mut self, dir: PathBuf, tags: &TagCache) -> Option<Vec<PathBuf>> {

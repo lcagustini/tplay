@@ -12,7 +12,7 @@ use std::time::Duration;
 use tplay::library::*;
 #[path = "common.rs"]
 mod common;
-use crate::common::{test_dir, write_tagged_mp3, write_wav};
+use crate::common::{assert_duration_approx, test_dir, write_tagged_mp3, write_wav};
 
 /// `library_scanning()` reads as "any row missing from the tag cache", so a file
 /// the scan drops pins `Scanning…` on screen for the whole session. A
@@ -333,6 +333,44 @@ fn read_info_gives_tags_and_a_true_duration_from_a_whole_file() {
     assert!(
         bytes.len() > 100_000,
         "premise: the fixture is much larger than any prefix"
+    );
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Why `aif`/`aiff` are not in `AUDIO_EXTENSIONS`, kept as a **tripwire**.
+///
+/// lofty reads AIFF tags, so the format looks free — but symphonia misreads the
+/// sample rate, so every AIFF would play ~4x fast, two octaves up, and report a
+/// duration 4x short, which would feed the seek bar and the crossfade math.
+///
+/// The assertion is on the *misread*, deliberately: when symphonia fixes it this
+/// test fails, and that failure is the signal to add `aif`/`aiff` back to
+/// `AUDIO_EXTENSIONS` and delete this test.
+#[test]
+fn symphonia_misreads_the_aiff_sample_rate() {
+    use tplay::rodio::{Decoder, Source};
+    let dir = test_dir("symphonia_misreads_the_aiff_sample_rate");
+    let path = dir.join("take.aiff");
+    common::write_aiff(&path, "Ne-Yo", "Test Artist");
+
+    // Premise: the fixture is a well-formed AIFF, and lofty reads it correctly.
+    assert!(!is_audio(&path), "premise: the Library does not list it");
+    let info = read_info(&path).expect("lofty reads the file fine");
+    assert_eq!(info.title, "Ne-Yo");
+    assert_eq!(info.artist, "Test Artist");
+    assert_duration_approx(info.duration, Duration::from_secs(1), "lofty duration");
+
+    let decoded = Decoder::try_from(fs::File::open(&path).unwrap()).expect("rodio decodes it");
+    assert_eq!(
+        decoded.sample_rate(),
+        3_904,
+        "symphonia read the rate wrong. If it is now 8000, the bug is FIXED: add \
+         \"aif\" and \"aiff\" back to library::AUDIO_EXTENSIONS (lofty already reads \
+         their tags) and delete this test."
+    );
+    assert!(
+        decoded.total_duration() != Some(Duration::from_secs(1)),
+        "premise: the wrong rate also makes the duration wrong"
     );
     fs::remove_dir_all(&dir).unwrap();
 }

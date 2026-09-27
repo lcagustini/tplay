@@ -7,9 +7,10 @@
 //!
 //! Three things are deliberately **not** here, and the split is the point:
 //!
-//! * **The file format.** `library::{playlist_json, read_playlist,
-//!   write_playlist, is_playlist}` own the `.tplay` shape. Reading a playlist
-//!   off disk is `library`'s job; editing the list in memory is this one's.
+//! * **The file formats.** `library::{playlist_text, read_playlist,
+//!   write_playlist, is_playlist}` own the wire shapes — `.tplay` (ours) plus
+//!   `.m3u`/`.m3u8`/`.pls` (what other players speak). Reading a playlist off
+//!   disk is `library`'s job; editing the list in memory is this one's.
 //! * **The state.** `TPlayApp` owns the list itself plus everything that has to
 //!   be repaired when it changes: `playlist_dirty`, `current_index` (re-found by
 //!   track id, so the row that is playing stays current), the shuffle `played`

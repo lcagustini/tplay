@@ -45,6 +45,51 @@ pub fn write_wav(path: &Path) {
     fs::write(path, data).unwrap();
 }
 
+/// Creates a minimal valid AIFF file (1 second, 8kHz mono 16-bit PCM) carrying
+/// `NAME`/`AUTH` text chunks, which lofty maps to title and artist.
+///
+/// The rate is encoded correctly — 8000 Hz as the 80-bit extended float every
+/// AIFF carries — so this fixture is what proves symphonia misreads it, rather
+/// than a mistake in the fixture. Hand-built for the same reason as `write_wav`:
+/// nothing in this repo can *encode* audio.
+pub fn write_aiff(path: &Path, title: &str, artist: &str) {
+    let n = 8000usize;
+    let samples: Vec<u8> = (0..n).flat_map(|i| (i as i16).to_be_bytes()).collect();
+
+    // IFF chunk: 4-byte id, big-endian size, payload — padded to an even size.
+    let mut text = Vec::new();
+    for (id, value) in [("NAME", title), ("AUTH", artist)] {
+        text.extend_from_slice(id.as_bytes());
+        text.extend_from_slice(&(value.len() as u32).to_be_bytes());
+        text.extend_from_slice(value.as_bytes());
+        if value.len() % 2 == 1 {
+            text.push(0);
+        }
+    }
+
+    let mut body = b"AIFF".to_vec();
+    body.extend_from_slice(&text);
+    // COMM: channels, frame count, sample width, then the rate as an 80-bit
+    // extended float — 8000 Hz = 1.953125 × 2^12.
+    body.extend_from_slice(b"COMM");
+    body.extend_from_slice(&18u32.to_be_bytes());
+    body.extend_from_slice(&1u16.to_be_bytes());
+    body.extend_from_slice(&(n as u32).to_be_bytes());
+    body.extend_from_slice(&16u16.to_be_bytes());
+    body.extend_from_slice(&[0x40, 0x0B, 0x7A, 0, 0, 0, 0, 0, 0, 0]);
+    // SSND: no offset, no block size, then the samples.
+    body.extend_from_slice(b"SSND");
+    body.extend_from_slice(&((8 + samples.len()) as u32).to_be_bytes());
+    body.extend_from_slice(&0u32.to_be_bytes());
+    body.extend_from_slice(&0u32.to_be_bytes());
+    body.extend_from_slice(&samples);
+
+    let mut out = b"FORM".to_vec();
+    out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    out.extend_from_slice(&body);
+    fs::write(path, out).unwrap();
+}
+
 /// Creates a minimal FLAC file (just headers, no audio frames) for header-parse tests.
 /// This is a valid FLAC with STREAMINFO and PADDING but no audio data.
 pub fn write_minimal_flac(path: &Path) {
