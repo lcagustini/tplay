@@ -52,5 +52,10 @@ pub fn visualizer_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::U
     match view {
         VizView::Bars => views::bars::draw(painter, rect, app.viz(), &p),
         VizView::Wave => views::wave::draw(painter, rect, app.viz(), &p),
+        VizView::Radial => views::radial::draw(painter, rect, app.viz(), &p),
+        VizView::Spectrogram => views::spectrogram::draw(painter, rect, app.viz(), &p),
+        VizView::Flame => views::flame::draw(painter, rect, app.viz(), &p),
+        VizView::Vu => views::vu::draw(painter, rect, app.viz(), &p),
+        VizView::Chladni => views::chladni::draw(painter, rect, app.viz(), &p),
     }
 }

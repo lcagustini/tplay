@@ -71,8 +71,19 @@ fn pane_all_is_stable() {
 fn viz_view_registry_is_stable_and_uniquely_named() {
     // The pane's selector iterates ALL; names must stay unique and the default
     // view is what an empty config falls back to (see config_persistence).
-    assert_eq!(VizView::ALL.len(), 2);
-    assert_eq!(VizView::ALL, [VizView::Bars, VizView::Wave]);
+    assert_eq!(VizView::ALL.len(), 7);
+    assert_eq!(
+        VizView::ALL,
+        [
+            VizView::Bars,
+            VizView::Wave,
+            VizView::Radial,
+            VizView::Spectrogram,
+            VizView::Flame,
+            VizView::Vu,
+            VizView::Chladni,
+        ]
+    );
     assert_eq!(VizView::default(), VizView::Bars);
     let mut names: Vec<&str> = VizView::ALL.iter().map(|v| v.name()).collect();
     names.sort_unstable();

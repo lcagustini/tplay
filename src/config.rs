@@ -23,16 +23,34 @@ pub enum VizView {
     #[default]
     Bars,
     Wave,
+    Radial,
+    Spectrogram,
+    Flame,
+    Vu,
+    Chladni,
 }
 
 impl VizView {
-    pub const ALL: [VizView; 2] = [VizView::Bars, VizView::Wave];
+    pub const ALL: [VizView; 7] = [
+        VizView::Bars,
+        VizView::Wave,
+        VizView::Radial,
+        VizView::Spectrogram,
+        VizView::Flame,
+        VizView::Vu,
+        VizView::Chladni,
+    ];
 
     /// Dropdown label in the visualizer pane header.
     pub fn name(self) -> &'static str {
         match self {
             VizView::Bars => "Bars",
             VizView::Wave => "Wave",
+            VizView::Radial => "Radial",
+            VizView::Spectrogram => "Spectrogram",
+            VizView::Flame => "Flame",
+            VizView::Vu => "VU meter",
+            VizView::Chladni => "Chladni",
         }
     }
 }

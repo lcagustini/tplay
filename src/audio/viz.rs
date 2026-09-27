@@ -318,6 +318,41 @@ pub fn compute_bands(viz: &VizBuf, prev: &mut [f32; VIZ_BANDS], attack: f32, rel
     }
 }
 
+/// Overall loudness of the window: `(rms, peak)` in 0..1. The spectrum answers
+/// "what is it made of", this answers "how loud" — the pair is what a meter
+/// needs, and the ring buffer already holds the window, so it is a second pass
+/// over data the tap pushed once.
+///
+/// RMS is `sqrt(mean(x²))`; peak is the largest `|x|`. Silence is `(0.0, 0.0)`
+/// rather than NaN, so a caller can scale by it without a guard.
+pub fn compute_level(viz: &VizBuf) -> (f32, f32) {
+    /// One ring-buffer window: long enough for the RMS to be steady rather than
+    /// sample-locked, and exactly the buffer's own cap.
+    const LEVEL_WINDOW: usize = VIZ_BUFFER_CAP;
+    let samples = viz.snapshot_tail(LEVEL_WINDOW);
+    if samples.is_empty() {
+        return (0.0, 0.0);
+    }
+    let sum_squares: f32 = samples.iter().map(|s| s * s).sum();
+    let rms = (sum_squares / samples.len() as f32).sqrt();
+    let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    (rms.clamp(0.0, 1.0), peak.clamp(0.0, 1.0))
+}
+
+/// The Chladni (cymatic) standing-wave field at `(n, m)` — the term every
+/// Chladni figure is built from, for a point at `(gx, gy)` in 0..1.
+///
+/// Exposed per mode rather than as a whole-figure generator because the mode
+/// numbers come from the spectrum at draw time, and because the antisymmetric
+/// difference is the part a test can pin: it is zero wherever `gx == gy` and
+/// antisymmetric under swapping the two axes.
+pub fn chladni_field(n: usize, m: usize, gx: f32, gy: f32) -> f32 {
+    let (n, m) = (n.max(1) as f32, m.max(1) as f32);
+    let (pi_n_gx, pi_m_gx) = (PI * n * gx, PI * m * gx);
+    let (pi_n_gy, pi_m_gy) = (PI * n * gy, PI * m * gy);
+    (pi_n_gx.sin() * pi_m_gy.sin() - pi_m_gx.sin() * pi_n_gy.sin()).abs()
+}
+
 /// Compute a mirrored wave envelope from the ring buffer for the "wave" view.
 /// Returns `buckets` values in [0, 1] — the peak |sample| per bucket over a
 /// wider time window (~23 ms at 44.1 kHz). One bucket per display column gives

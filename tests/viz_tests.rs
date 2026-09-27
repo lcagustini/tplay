@@ -7,7 +7,10 @@
 //! `eq_live.rs`-style suites, and everything here is pure.
 
 use std::f32::consts::PI;
-use tplay::audio::viz::{compute_bands, compute_wave, fft_magnitude, VizBuf, FFT_SIZE, VIZ_BANDS};
+use tplay::audio::viz::{
+    chladni_field, compute_bands, compute_level, compute_wave, fft_magnitude, VizBuf, FFT_SIZE,
+    VIZ_BANDS,
+};
 
 #[test]
 fn viz_buf_push_and_snapshot() {
@@ -180,4 +183,90 @@ fn compute_wave_reaches_last_bucket() {
     assert_eq!(wave.len(), 350);
     assert_eq!(wave[349], 1.0);
     assert!(wave.iter().all(|&v| v == 1.0));
+}
+
+/// Silence must report zero rather than NaN: the VU view scales by these without
+/// a guard, and NaN through a scale propagates into every painted coordinate.
+#[test]
+fn compute_level_on_silence_is_zero_not_nan() {
+    let (rms, peak) = compute_level(&VizBuf::new());
+    assert_eq!((rms, peak), (0.0, 0.0));
+}
+
+#[test]
+fn compute_level_of_a_full_scale_constant() {
+    let buf = VizBuf::new();
+    for _ in 0..512 {
+        buf.push(1.0);
+    }
+    let (rms, peak) = compute_level(&buf);
+    assert!((rms - 1.0).abs() < 1e-6, "rms {rms}");
+    assert!((peak - 1.0).abs() < 1e-6, "peak {peak}");
+}
+
+/// A half-duty square is the cheapest signal that separates the two numbers: a
+/// meter that reported `rms == peak` would be measuring the wrong one, and a
+/// half-square RMS is exactly `sqrt(0.5)` with no tolerance to argue about.
+#[test]
+fn compute_level_separates_rms_from_peak() {
+    let buf = VizBuf::new();
+    for i in 0..512 {
+        buf.push(if i % 2 == 0 { 1.0 } else { 0.0 });
+    }
+    let (rms, peak) = compute_level(&buf);
+    assert!(
+        (rms - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6,
+        "rms {rms}"
+    );
+    assert_eq!(peak, 1.0);
+    assert!(
+        rms < peak,
+        "rms must sit below the peak or the meter's two needles agree"
+    );
+}
+
+/// The diagonal is the figure's mirror line, and the view relies on the field
+/// vanishing there to read as a symmetric pattern.
+#[test]
+fn chladni_field_vanishes_on_the_diagonal() {
+    for &t in &[0.1f32, 0.25, 0.5, 0.75, 0.9] {
+        assert!(
+            chladni_field(2, 1, t, t) < 1e-6,
+            "not zero on the diagonal at {t}"
+        );
+    }
+}
+
+/// `n == m` is a degenerate mode: the two antisymmetric terms are identical and
+/// cancel everywhere, so the figure would be blank. The view has to keep the two
+/// mode numbers distinct, and this is what makes that necessary.
+#[test]
+fn chladni_modes_must_differ() {
+    for &t in &[0.1f32, 0.25, 0.5, 0.75] {
+        let (u, _) = (t, 1.0 - t);
+        assert!(
+            chladni_field(3, 3, t, u) < 1e-6,
+            "(3,3) is blank at ({t}, {u})"
+        );
+    }
+}
+
+/// `abs()` of the difference makes the field mirror-symmetric across `gx == gy`,
+/// which is what gives a Chladni figure its four-fold look.
+#[test]
+fn chladni_field_mirrors_across_the_diagonal() {
+    let a = chladni_field(2, 1, 0.25, 0.75);
+    let b = chladni_field(2, 1, 0.75, 0.25);
+    assert!(a > 0.5, "the (2,1) figure must have structure, got {a}");
+    assert!((a - b).abs() < 1e-6, "{a} vs {b} across the diagonal");
+}
+
+/// A mode number of 0 would make the whole term zero, so a view deriving its
+/// modes from a band index must not be handed one un-clamped.
+#[test]
+fn chladni_field_clamps_a_zero_mode() {
+    assert!(
+        chladni_field(0, 2, 0.25, 0.75) > 0.5,
+        "mode 0 must be treated as 1, not as a blank figure"
+    );
 }
