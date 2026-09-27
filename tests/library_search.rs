@@ -125,3 +125,65 @@ fn an_out_of_range_column_still_falls_back_to_the_filename() {
         );
     }
 }
+
+/// The Library's search box, which was inline in the pane and so had no headless
+/// test at all — the same gap `playlist::row_matches` was extracted to close, and
+/// the reason this one is `pub` and `Ui`-free too.
+///
+/// It runs for every row of every folder on both browsers, so the empty-query
+/// short-circuit is the difference between one fold per frame and a haystack per
+/// row per frame. That is the first claim below, and it is the one a future
+/// "let me simplify this" would break.
+#[test]
+fn the_library_filter_short_circuits_an_empty_query_and_folds_one_haystack() {
+    use tplay::library::entry_matches;
+
+    let untagged = Entry {
+        path: PathBuf::from("/music/Aardvark.mp3"),
+        is_dir: false,
+    };
+    // An empty query matches everything — the unfiltered path, run per row.
+    assert!(
+        entry_matches(&untagged.path, None, ""),
+        "premise: an unfiltered folder shows every row"
+    );
+
+    let tagged = Entry {
+        path: PathBuf::from("/music/01.mp3"),
+        is_dir: false,
+    };
+    let info = TrackInfo {
+        title: "Ne".into(),
+        artist: "Yo".into(),
+        album: "Greatest Hits".into(),
+        ..Default::default()
+    };
+    // One fold over the three tag fields plus the display title.
+    for q in ["ne", "yo", "greatest"] {
+        assert!(
+            entry_matches(&tagged.path, Some(&info), q),
+            "a tagged row must be findable by {q:?}"
+        );
+    }
+    assert!(
+        !entry_matches(&tagged.path, Some(&info), "absent"),
+        "and a needle that is nowhere is still nowhere"
+    );
+    // An untagged row falls back to its stem, which is what it displays — so a
+    // file the tag scan has not reached is still findable by name.
+    assert!(
+        entry_matches(&untagged.path, None, "aardvark"),
+        "the stem is searchable before the tag scan lands"
+    );
+    // Pinned, because it is a real difference from the Playlist pane's box and
+    // not an oversight: `row_matches` also searches the filename, while this one
+    // searches what the Library documents — title, artist, album, with the stem
+    // as the title's fallback. So a *tagged* row is not findable by its filename
+    // here, and is in the Playlist. Making the two agree is a behaviour change,
+    // so it wants a decision rather than a refactor.
+    assert!(
+        !entry_matches(&tagged.path, Some(&info), "01"),
+        "the Library box searches the tags, not the filename — documented, and \
+         deliberately different from the Playlist pane's box"
+    );
+}

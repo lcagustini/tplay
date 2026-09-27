@@ -160,7 +160,15 @@ fn extension(path: &Path) -> Option<String> {
 }
 
 fn has_extension(path: &Path, set: &[&str]) -> bool {
-    extension(path).is_some_and(|e| set.contains(&e.as_str()))
+    // Not `extension(path)` in a compare: that lowercases into a fresh `String`,
+    // and this is called about three times per row per frame, so an unfiltered
+    // 500-file folder allocated ~1500 Strings a second for a case-insensitive
+    // match. `eq_ignore_ascii_case` is the stdlib's own answer and needs no
+    // buffer. `extension()` still owns the *format dispatch*, which lowercases
+    // once per playlist read or write.
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| set.iter().any(|s| e.eq_ignore_ascii_case(s)))
 }
 
 pub fn is_audio(path: &Path) -> bool {
@@ -528,6 +536,34 @@ pub fn title_or_stem(path: &Path, info: Option<&TrackInfo>) -> String {
                 .unwrap_or_default()
                 .to_string()
         })
+}
+
+/// Whether a library row survives the search box.
+///
+/// The same contract as `playlist::row_matches`, and `pub` and `Ui`-free for the
+/// same reason: this runs for every row of every folder, on both browsers, so it
+/// is the filter's *hot* path and it is the one piece of the Library pane that
+/// cannot be reached by a test that does not have a window.
+///
+/// `query` must already be trimmed and lowercased by the caller — one fold per
+/// frame, not one per row.
+///
+/// The empty-query short-circuit is load-bearing rather than tidy: without it an
+/// unfiltered 500-file folder formats a haystack per row per frame, all of it
+/// discarded. It is the first statement for that reason.
+pub fn entry_matches(path: &Path, info: Option<&TrackInfo>, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let hay = format!(
+        "{} {} {} {}",
+        info.map(|i| i.title.as_str()).unwrap_or_default(),
+        info.map(|i| i.artist.as_str()).unwrap_or_default(),
+        info.map(|i| i.album.as_str()).unwrap_or_default(),
+        title_or_stem(path, info),
+    )
+    .to_lowercase();
+    hay.contains(query)
 }
 
 /// Sort key for a library entry and column. Returns a string that sorts correctly:

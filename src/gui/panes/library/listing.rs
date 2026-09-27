@@ -451,14 +451,7 @@ fn file_list_ui(
                     }
                 } else {
                     let info = app.db().cache().get(path);
-                    let title = library::title_or_stem(path, info);
-                    let hay = format!(
-                        "{} {} {} {title}",
-                        info.map(|i| i.title.as_str()).unwrap_or_default(),
-                        info.map(|i| i.artist.as_str()).unwrap_or_default(),
-                        info.map(|i| i.album.as_str()).unwrap_or_default(),
-                    );
-                    if !query.is_empty() && !hay.to_lowercase().contains(&query) {
+                    if !library::entry_matches(path, info, &query) {
                         i += 1;
                         continue;
                     }
