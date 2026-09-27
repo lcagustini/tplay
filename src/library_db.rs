@@ -427,15 +427,11 @@ impl TrackDb {
         json
     }
 
-    fn file(&self) -> DbFile {
-        DbFile {
-            tags: self
-                .tags
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-            stats: self.stats.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-            views: self.views.clone(),
+    fn file(&self) -> DbFileRef<'_> {
+        DbFileRef {
+            tags: self.tags.iter().collect(),
+            stats: self.stats.iter().map(|(k, v)| (k, *v)).collect(),
+            views: &self.views,
         }
     }
 
@@ -505,6 +501,29 @@ struct DbFile {
     stats: BTreeMap<PathBuf, PlayStats>,
     #[serde(default)]
     views: Vec<SmartView>,
+}
+
+/// The same shape, borrowed — the *serialize* side only.
+///
+/// `DbFile` has to own its keys and values because that is what deserializing
+/// into a long-lived `TrackDb` needs, and nothing about the two directions is
+/// symmetric. The owned form is also what `snapshot` used, and that runs every
+/// `CONFIG_SAVE_DEBOUNCE_SECS` to compare content: a deep clone of every
+/// `PathBuf` and every `TrackInfo` in the library, plus the whole `views` list,
+/// most of it thrown away because nothing had changed. On a 5k-track library
+/// that is ~25k `String` clones and a multi-megabyte transient string, on the UI
+/// thread, forever.
+///
+/// serde serializes `&T` wherever `T: Serialize`, and `&PathBuf` is `Ord`, so the
+/// whole thing is three collects over references. The output is byte-identical —
+/// which `tags_and_play_history_round_trip` and
+/// `the_file_is_written_in_key_order` both check, so this cannot quietly move the
+/// on-disk format.
+#[derive(Serialize)]
+struct DbFileRef<'a> {
+    tags: BTreeMap<&'a PathBuf, &'a TrackInfo>,
+    stats: BTreeMap<&'a PathBuf, PlayStats>,
+    views: &'a [SmartView],
 }
 
 fn path() -> Option<PathBuf> {

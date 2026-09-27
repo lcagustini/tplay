@@ -674,3 +674,75 @@ fn an_edit_moves_the_row_it_belongs_on() {
     assert_eq!(order(&t).len(), 2, "and no row was duplicated or dropped");
     fs::remove_dir_all(&dir).unwrap();
 }
+
+/// The mechanism `flush_db`'s content compare rests on, and the one the borrowed
+/// serialize side could have broken.
+///
+/// `snapshot` runs every `CONFIG_SAVE_DEBOUNCE_SECS` and the caller only writes
+/// when the string *differs* from the last one. So a serialization that is not
+/// deterministic would rewrite the whole database twice a second, forever — and
+/// the symptom is a file that looks fine and a config compare that is silently
+/// never equal, which no behavioural test can see.
+///
+/// The owned `DbFile` and the borrowed `DbFileRef` are two independent ways of
+/// producing the same bytes, so this is also the test that says swapping one for
+/// the other did not move the on-disk format. It mirrors
+/// `equal_configs_serialize_identically` on the config side, for the same reason.
+#[test]
+fn equal_databases_serialize_identically() {
+    let dir = test_dir("equal_databases_serialize_identically");
+    let names = ["m.mp3", "a.mp3", "z.mp3", "b.mp3", "q.mp3"];
+
+    let mut forward = TrackDb::new();
+    for name in names {
+        let p = track(&dir, name);
+        forward.cache_mut().insert(p.clone(), tags(name));
+        forward.note_played(&p, 100);
+    }
+    forward.add_view(SmartView {
+        name: "Rated 4+".into(),
+        rule: Rule {
+            rating_at_least: Some(4),
+            ..Default::default()
+        },
+    });
+
+    // The same content, reached in the opposite order and with the stats stamped
+    // at a different time — so a compare that only held for one construction
+    // order would still pass here.
+    let mut backward = TrackDb::new();
+    for name in names.iter().rev() {
+        let p = track(&dir, name);
+        backward.note_played(&p, 100);
+        backward.cache_mut().insert(p, tags(name));
+    }
+    backward.add_view(SmartView {
+        name: "Rated 4+".into(),
+        rule: Rule {
+            rating_at_least: Some(4),
+            ..Default::default()
+        },
+    });
+
+    let a = forward.snapshot();
+    let b = backward.snapshot();
+    assert!(
+        !a.is_empty(),
+        "premise: a snapshot of real content is not empty"
+    );
+    assert_eq!(
+        a, b,
+        "equal content must serialize equal, or the throttle rewrites the file \
+         twice a second forever:\n--- forward\n{a}\n--- backward\n{b}"
+    );
+
+    // And the real difference must still show up, so the compare is not vacuous.
+    backward.note_played(&track(&dir, "a.mp3"), 200);
+    assert_ne!(
+        backward.snapshot(),
+        a,
+        "a changed play count must read as changed"
+    );
+
+    fs::remove_dir_all(&dir).unwrap();
+}
