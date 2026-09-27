@@ -33,6 +33,83 @@ fn a_missing_config_agrees_with_one_whose_fields_are_absent() {
     assert_eq!(from_default.crossfade_secs, 3.0);
 }
 
+/// The one remaining way a hand-edited `config.json` could cost every setting.
+///
+/// A derived `Deserialize` fails the *whole* struct on an unknown enum variant,
+/// and `load_from`'s only answer to a parse error is to copy the file aside and
+/// return `Config::default()` — so a `viz_view` this build has never heard of
+/// (the downgrade case: a config written by a build with one more view) would
+/// have silently reset volume, EQ gains, saved SMB servers and favourites.
+///
+/// The claim is two-part, and the second is the point: the unknown value falls
+/// back to a default, and **everything else survives**. A fix that only made the
+/// unknown value not-panic would still lose the file.
+#[test]
+fn an_unknown_viz_view_costs_the_other_settings_nothing() {
+    let dir = std::env::temp_dir().join(format!("tplay-test-{}/cfg_viz", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.json");
+
+    let text = r#"{
+        "viz_view": "Aurora",
+        "volume": 0.25,
+        "theme": "neon",
+        "shuffle": true,
+        "eq": { "enabled": true, "gains": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] },
+        "library": { "favorites": ["/music"], "last_dir": "/music", "show_hidden": true },
+        "servers": [{ "host": "10.0.0.5", "username": "guest" }]
+    }"#;
+    std::fs::write(&path, text).unwrap();
+
+    let loaded = load_from(Some(&path));
+
+    // The unknown name becomes the default rather than an error...
+    assert_eq!(
+        loaded.viz_view,
+        VizView::default(),
+        "an unrecognized view name falls back to the default"
+    );
+    // ...and the *rest of the file* is intact, which is what the fallback is for.
+    assert_eq!(loaded.volume, 0.25, "volume survived");
+    assert_eq!(loaded.theme, "neon", "the theme survived");
+    assert!(loaded.shuffle, "shuffle survived");
+    assert!(loaded.eq.enabled, "the EQ survived");
+    assert_eq!(loaded.eq.gains[0], 1.0, "the gains survived");
+    assert_eq!(loaded.library.favorites, ["/music"], "favourites survived");
+    assert_eq!(loaded.library.last_dir, PathBuf::from("/music"));
+    assert!(loaded.library.show_hidden, "the hidden toggle survived");
+    assert_eq!(
+        loaded.servers[0].host, "10.0.0.5",
+        "the saved server survived"
+    );
+
+    // It *parsed*, so nothing was damaged and nothing needed keeping.
+    assert!(
+        !dir.join("config.json.broken").exists(),
+        "an unknown variant is not a malformed file"
+    );
+
+    // The written form is untouched: a known name is still a bare string, so a
+    // build with a custom deserializer here cannot change the on-disk format.
+    let known = Config {
+        viz_view: VizView::Chladni,
+        ..Config::default()
+    };
+    let written = serde_json::to_string(&known).unwrap();
+    assert!(
+        written.contains(r#""viz_view":"Chladni""#),
+        "serialize is unchanged: {written}"
+    );
+    assert_eq!(
+        VizView::default(),
+        VizView::Bars,
+        "premise: the default the fallback resolves to"
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// A hand-edited config that fails to parse used to be replaced with defaults on
 /// the first `flush_config` — which is how a single typo cost every setting. The
 /// original is now kept beside it, so the mistake is recoverable.

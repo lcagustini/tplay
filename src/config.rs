@@ -35,6 +35,30 @@ pub enum VizView {
     Chladni,
 }
 
+/// Read a `VizView` by name, falling back to the default on one this build has
+/// never heard of.
+///
+/// A derived `Deserialize` fails the **whole** `Config` on an unknown variant,
+/// and `load_from`'s only answer to a parse error is to copy the file aside and
+/// hand back `Config::default()`. So a `config.json` written by a build with one
+/// more view — the downgrade case — or a typo in a file the docs call
+/// hand-editable would cost the user their volume, EQ gains, saved SMB servers
+/// and favourites to change which chart gets drawn. The round trip accepts
+/// exactly the same names `Serialize` writes, so the on-disk format is unchanged
+/// and the only thing that changes is that an unrecognised one stops being fatal.
+///
+/// The same reasoning put `library_db::Rule` in a struct of `Option`s. This is
+/// the one other place the two answers disagreed.
+fn de_viz_view<'de, D: serde::Deserializer<'de>>(d: D) -> Result<VizView, D::Error> {
+    String::deserialize(d).map_or(Ok(VizView::default()), |name| {
+        // `from_value` rather than `from_str`: serde has already decoded the
+        // JSON string, so the text still has quoting applied before the variant
+        // name is matched. This is the stdlib's own way to re-enter the derived
+        // `Deserialize` with a value it already holds.
+        Ok(serde_json::from_value(serde_json::Value::String(name)).unwrap_or_default())
+    })
+}
+
 impl VizView {
     pub const ALL: [VizView; 7] = [
         VizView::Bars,
@@ -80,7 +104,7 @@ pub struct Config {
     pub shuffle: bool,
     #[serde(default)]
     pub repeat: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_viz_view")]
     pub viz_view: VizView,
     #[serde(default = "default_volume")]
     pub volume: f32,
