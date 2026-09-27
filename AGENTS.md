@@ -50,7 +50,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window. LAN-
   - `library_search.rs` — sort_key beyond the basics: case-insensitivity, zero-padded millisecond duration ordering (9 s < 10 s), and folders sinking on the tag columns.
   - `playback_integration.rs` — **the headless boundary, lifted.** `TPlayApp::new(&config, mixer)` needs no audio device, so this constructs the real struct and drives real playback: `rodio::mixer::mixer` hands back the `MixerSource` a cpal callback would pull from, and `TestApp::pump` (in `common.rs`) calls `next()` on it by hand. That is rodio's own `Sink`-test technique, and it runs *faster than real time* — 3s of audio is microseconds, not 3s of waiting. Covers: the driver advancing the playhead (the premise for all the others), a drained sink auto-advancing one playlist entry, no wrap-around at the end of the list, the `current_path.is_none()` cascade guard on an empty playlist and after a failed load, a 1s WAV reporting its own duration, stop unloading + the next play rewinding, and pause freezing the playhead while the driver keeps pulling. **Three rodio facts the tests had to be written around, all worth knowing:** `get_pos` is written by a `periodic_access` hook on a 5 ms sample timer, so `pause` and `stop` take effect on the next pull rather than on the call; a *stopped* source yields no samples, so that hook never fires again and `get_pos` stays frozen — the rewind is real but arrives via the fresh `Sink` that `start_track` builds, which is why the stop test asserts by playing again rather than by reading the position; and **`Sink::try_seek` *blocks*** — it parks in `feedback.recv()` until the mixer thread performs the seek and answers, so `app.seek(..)` on a **live** sink deadlocks any test whose only mixer driver is a `pump` on the *next* line. The first two make a position report late; this one hangs the suite, at 0% CPU, all threads in `futex_do_wait` — which is why it reads as neither a crash nor a slow test. The app is fine: cpal's audio callback drives the mixer concurrently in production, so `try_seek` is serviced in milliseconds. The harness reproduces that arrangement with **`TestApp::pump_during(f)`**, which moves the `MixerSource` into a scoped thread so the mixer runs while `f` blocks. **Draining the sink first is not a fix**: `try_seek` short-circuits on `sound_count == 0`, so a seek against a drained sink never runs and an assertion like "a seek is not a second play" passes *vacuously* — it would hold even if seek did count one. Note also that `playback_integration` has no `seek` call, which is why it never met this. `TestApp` is hermetic by construction: `last_dir` points at a temp dir, or `new` would walk the user's home directory.
   - `seek_position.rs` — the `skip_duration`-seek compensation on its own (`effective_pos`): a zero offset is the identity, the offset is added to the sink's own count, an offset alone reports the skip target, sub-second offsets survive, and the sum saturates instead of panicking. The one part of the seek path that still needs its own suite even with integration tests available — `try_seek` succeeds for every format a test can cheaply produce, so the slow path can never be *forced* (see **Slider pinning + position offset**).
-  - `audio_fixtures.rs` — the eight committed real files in `tests/fixtures/` (see **Test conventions**), grouped by what each pins: every supported format decodes and reports its own ~12.27 s; **the decoder and the tag reader agree on every duration**, one number from two independent readers, which is the assertion that earns the fixtures their keep; the four tagged formats return their real `TITLE`/`ARTIST`/`ALBUM` from four different tag locations; and the untagged `m4a` falls back to the filename stem (and is the only stereo file). **Two tests exist because measurement contradicted the written record, and each carries the fix in its assertion message** — `raw_aac_decodes_but_its_lofty_duration_is_an_estimate` (symphonia *does* parse ADTS; `.aac` is excluded because ADTS has no length field, so lofty estimates 12.808 s against the decoder's 12.330 s and the Duration column reads lofty) and `a_correctly_encoded_44100_aiff_is_not_rate_mangled` (the `extended` float bug turns 8000 Hz into 3904 but leaves 44100 Hz alone, so re-enabling AIFF is a per-rate check). `symphonia_has_no_opus_codec` is the only file symphonia cannot open, failing `Unrecognized format` — a container it cannot even identify, which is what a missing codec looks like. Both corrections are written up under **Future milestones** → *Interop*.
+  - `audio_fixtures.rs` — the eight committed real files in `tests/fixtures/` (see **Test conventions**), grouped by what each pins: every supported format decodes and reports its own ~12.27 s; **the decoder and the tag reader agree on every duration**, one number from two independent readers, which is the assertion that earns the fixtures their keep; the four tagged formats return their real `TITLE`/`ARTIST`/`ALBUM` from four different tag locations; and the untagged `m4a` falls back to the filename stem (and is the only stereo file). **Two tests exist because measurement contradicted the written record, and each carries the fix in its assertion message** — `raw_aac_decodes_but_its_lofty_duration_is_an_estimate` (symphonia *does* parse ADTS; `.aac` is excluded because ADTS has no length field, so lofty estimates 12.808 s against the decoder's 12.330 s and the Duration column reads lofty) and `a_correctly_encoded_44100_aiff_is_not_rate_mangled` (the `extended` float bug turns 8000 Hz into 3904 but leaves 44100 Hz alone, so re-enabling AIFF is a per-rate check). `symphonia_has_no_opus_codec` is the only file symphonia cannot open, failing `Unrecognized format` — a container it cannot even identify, which is what a missing codec looks like. Both corrections are written up under **Future milestones** → *Audio formats this stack cannot play*.
   - `cover_tests.rs` — `library::read_cover` on real files: the embedded tag picture wins over a cover file beside the track, `folder.jpg` is the fallback when the tags carry no art, and `None` when neither exists. The `None` half is what lets the Album Cover pane's cache record "checked, no art" and stop re-reading.
   - `eq_live.rs` — `EqSource` live behavior at Source level: 0 dB exact identity, band boost amplitude, gain change mid-iteration, disable/reenable.
   - `tag_cache.rs` — the `drain_tag_scan` mpsc pattern (Empty/Disconnected branches) and dropped-receiver replacement.
@@ -702,38 +702,26 @@ and per-track EQ are still to-do and live under *Future milestones* → **Deferr
 
 ## Future milestones
 
-Not yet built — roadmap only. Each milestone is scoped to the existing
-architecture (the "File to touch" pointers below); nothing here is live until
-implemented and this section rewritten. Shipped work is documented in the feature
-sections, not here: the playlist's sort/reverse/randomize + jump-to-file are under
-**Playlist**, `src/playlist.rs` has the Layout bullet, and the playback niceties
-(balance, remaining, gapless, crossfade) have **Playback niceties**.
+Roadmap only: nothing here is live until implemented and this section rewritten.
+**Shipped work is documented in the feature sections, not here.** The playlist's
+sort/reverse/randomize and jump-to-file are under **Playlist**; `src/playlist.rs`
+has the Layout bullet; the playback niceties have **Playback niceties**; and the
+media library — the persistent database, the star rating, the play count and
+Smart Views — is under **Library** (rows, Smart Views) and **Non-obvious
+machinery** (two maps, no shared insert path).
 
-### 1. Media Library database
+Each item below is scoped against the existing architecture, and each says what
+would have to be *measured* before it is worth doing. No new milestone may
+hardcode constants: the theme-token / shared-constant rules apply to milestones as
+much to shipped code.
 
-Turn the folder browser into a persistent library: the `tag_cache`
-(`HashMap<PathBuf, TrackInfo>` in `app.rs`, currently session-scoped) is the
-seed — persist it to `~/.config/tplay/` on scan completion (`drain_tag_scan`
-already has the hook; same pattern as `config::save`/`config::load`) so
-re-launch needs no re-scan. Add per-track metadata Winamp had that `TrackInfo`
-doesn't: **play count** and **last-played date** (increment in `start_track`) —
-the **rating (1–5 ★)** half is landed, and deliberately in the *file* rather than
-here, so it needs no storage of its own (see **Library**). Library-data fields go into `library.rs` (`TrackInfo` +
-`read_info` + `SORT_OPTIONS` + `sort_key`) and/or the `Config`/`LibraryData`
-structs — the same edit pattern as adding a config field. The headline:
-**Smart Views / auto playlists** — saved rule queries ("rating ≥ 4", "top 25
-played", "added last 90 days") evaluated against the persisted cache, rendered
-as a playlist (reuse the Playlist pane's load machinery; the result is just a
-`Vec<PathBuf>`). No new dependencies; lofty/scan_files already read everything.
-Out of scope: matching Winamp's network features (CDDB, online stores) — this
-app is no-network.
+### Audio formats this stack cannot play
 
-### 2. Interop — **shipped** (`.m3u` / `.m3u8` / `.pls`)
-
-The playlist-format half landed; the audio-format half did not, and the reason
-is a measurement, not a preference. `.m3u`/`.m3u8`/`.pls` import and export are
-documented under **Playlist** → **One playlist file format**; they were the
-whole of the value here. What is left:
+Not a milestone — a list of formats `AUDIO_EXTENSIONS` deliberately leaves out,
+each with the test that says when to add it back. The playlist half of interop
+(`.m3u` / `.m3u8` / `.pls`) **shipped** and is under **Playlist** → **One
+playlist file format**; what is left is the audio half, and the reason for each
+gap is a measurement rather than a preference.
 
 - **AIFF** — symphonia 0.5.5 *has* an AIFF demuxer and lofty reads its tags, so
   it looks free, but the sample rate comes from the `extended` 0.1.0 crate,
@@ -769,17 +757,16 @@ whole of the value here. What is left:
   `the_decoder_and_the_tag_reader_agree_on_every_duration`, which every format in
   `AUDIO_EXTENSIONS` passes and `.aac` does not. Add `aac` when that passes.
 
-Milestone 1 is the big one — the only item here that adds a state file and a
-rule engine. No new milestone may hardcode constants: the theme-token /
-shared-constant rules apply to milestones as much as to shipped code.
-
 ### Deferred
 
 No milestone, no demand — parked deliberately, not forgotten:
 
 - **ReplayGain / loudness normalization** — read `REPLAYGAIN_TRACK_GAIN` (lofty
   exposes it) and apply it as a per-track volume offset at `start_track` time, or
-  as a pre-scan loudness pass. Speculative until someone asks.
+  as a pre-scan loudness pass. The media library made the *storage* half free —
+  one field on `TrackInfo` and `library.json` carries it — but the gain is not
+  read anywhere yet, so this is a field with no reader until the second half
+  lands. Speculative until someone asks.
 - **Per-track EQ** — conflicts with the single live `EqShared` source of truth
   (`audio/eq.rs`) and the "EQ settings are live" design; it would need a per-track
   settings map consulted at `start_track`. Not recommended without a product
