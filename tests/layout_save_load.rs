@@ -129,3 +129,45 @@ fn load_layout_returns_none_for_garbage() {
         .and_then(|s| serde_json::from_str(&s).ok());
     assert!(result.is_none());
 }
+
+/// The ☰ menu's layout list must not be read while the menu is shut.
+///
+/// `layouts_dir()` does a `create_dir_all` and `list_layouts()` a `read_dir` plus
+/// a sort. Hoisted above the `menu_contents` closure — which is where they were —
+/// that was three filesystem calls on every one of 60 frames a second, forever,
+/// to fill a list nobody could see. It is invisible in a screenshot and
+/// unmeasurable from a test without counting syscalls, so what gets pinned is the
+/// *placement* instead: the reads must sit inside the closure egui only invokes
+/// while the menu is open.
+///
+/// The same shape as `no_inline_tests.rs` — a structural property of the source,
+/// checked because the behaviour it guards cannot be observed any other way.
+#[test]
+fn the_layout_reads_live_inside_the_menu_closure() {
+    let src = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
+        .join("src/gui/coordinator.rs");
+    let text = std::fs::read_to_string(&src).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+
+    let menu_at = lines
+        .iter()
+        .position(|l| l.contains("let menu_contents ="))
+        .expect("the menu closure is still there");
+    for call in ["layouts_dir()", "list_layouts("] {
+        // The `fn` line is the definition, not a call; skip it and any comment.
+        let at = lines
+            .iter()
+            .position(|l| {
+                l.contains(call)
+                    && !l.trim_start().starts_with("//")
+                    && !l.contains(&format!("fn {call}"))
+            })
+            .unwrap_or_else(|| panic!("{call} is gone from the coordinator — recheck this test"));
+        assert!(
+            at > menu_at,
+            "{call} at line {} is hoisted above the menu closure at {menu_at}, so it runs \
+             every frame with the menu shut",
+            at + 1
+        );
+    }
+}

@@ -264,16 +264,22 @@ pub fn update_ui(app: &mut TPlayApp, themes: &mut ThemeState, ctx: &egui::Contex
             let win_max_tex = themes.icon(theme::Icon::Maximize).cloned();
             let win_min_tex = themes.icon(theme::Icon::Minimize).cloned();
 
-            // Precompute layouts dir and tracked layout once per frame for the menu.
-            let layouts_dir = layouts_dir();
-            let layout_files = layouts_dir
-                .as_ref()
-                .map(|d| list_layouts(d.as_ref()))
-                .unwrap_or_default();
-            let tracked_layout =
-                ctx.data(|d| d.get_temp::<String>(egui::Id::new(NAMED_LAYOUT_FILE)));
-
             let menu_contents = |ui: &mut egui::Ui| {
+                // Inside the closure, not hoisted above it: `layouts_dir` does a
+                // `create_dir_all` and `list_layouts` a `read_dir` + sort, and
+                // egui only calls this while the ☰ is open. Hoisted, that was
+                // three filesystem calls 60x/sec for a closed menu — the same
+                // per-frame-read defect `LIB_PLACES` exists to prevent in the
+                // Library sidebar, and the answer is the same: read it where it
+                // is drawn.
+                let layouts_dir = layouts_dir();
+                let layout_files = layouts_dir
+                    .as_ref()
+                    .map(|d| list_layouts(d.as_ref()))
+                    .unwrap_or_default();
+                let tracked_layout =
+                    ctx.data(|d| d.get_temp::<String>(egui::Id::new(NAMED_LAYOUT_FILE)));
+
                 ui.label("Theme");
                 let mut sel = themes.current().id.clone();
                 for t in themes.list() {
