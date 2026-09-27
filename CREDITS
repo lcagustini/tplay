@@ -81,6 +81,24 @@ The `fill` is what makes each theme's set its own, and it is why the icons are
 stored per theme rather than shared. Change a token in a `theme.json` and run
 `python3 themes/recolor_icons.py` to propagate it.
 
+## Test audio fixtures
+
+The eight files in `tests/fixtures/` are one real recording encoded into eight
+containers, taken from [audiojs/audio-lena](https://github.com/audiojs/audio-lena)
+— "the audio equivalent of the Lena test image".
+
+| | |
+|---|---|
+| Original | [freesound #246148](https://www.freesound.org/people/heshamwhite/sounds/246148/), *heshamwhite* |
+| Licence | **CC0 1.0** — public domain dedication |
+| Retrieved | 2026-09-27 |
+
+CC0 requires no attribution and imposes no restriction, so these can sit in the
+repository without making it the most restrictive thing in the tree. The
+attribution is recorded anyway, because knowing a fixture's origin is the only
+way to replace it safely. `tests/fixtures/README.md` has the per-file detail and
+explains why the other 13 files of the upstream set are absent.
+
 ## Everything else
 
 `Cargo.toml` is the licence record for the code's dependencies; the `AGENTS.md`

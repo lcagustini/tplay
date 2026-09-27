@@ -49,6 +49,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window. LAN-
   - `library_search.rs` — sort_key beyond the basics: case-insensitivity, zero-padded millisecond duration ordering (9 s < 10 s), and folders sinking on the tag columns.
   - `playback_integration.rs` — **the headless boundary, lifted.** `TPlayApp::new(&config, mixer)` needs no audio device, so this constructs the real struct and drives real playback: `rodio::mixer::mixer` hands back the `MixerSource` a cpal callback would pull from, and `TestApp::pump` (in `common.rs`) calls `next()` on it by hand. That is rodio's own `Sink`-test technique, and it runs *faster than real time* — 3s of audio is microseconds, not 3s of waiting. Covers: the driver advancing the playhead (the premise for all the others), a drained sink auto-advancing one playlist entry, no wrap-around at the end of the list, the `current_path.is_none()` cascade guard on an empty playlist and after a failed load, a 1s WAV reporting its own duration, stop unloading + the next play rewinding, and pause freezing the playhead while the driver keeps pulling. **Three rodio facts the tests had to be written around, all worth knowing:** `get_pos` is written by a `periodic_access` hook on a 5 ms sample timer, so `pause` and `stop` take effect on the next pull rather than on the call; a *stopped* source yields no samples, so that hook never fires again and `get_pos` stays frozen — the rewind is real but arrives via the fresh `Sink` that `start_track` builds, which is why the stop test asserts by playing again rather than by reading the position; and **`Sink::try_seek` *blocks*** — it parks in `feedback.recv()` until the mixer thread performs the seek and answers, so `app.seek(..)` on a **live** sink deadlocks any test whose only mixer driver is a `pump` on the *next* line. The first two make a position report late; this one hangs the suite, at 0% CPU, all threads in `futex_do_wait` — which is why it reads as neither a crash nor a slow test. The app is fine: cpal's audio callback drives the mixer concurrently in production, so `try_seek` is serviced in milliseconds. The harness reproduces that arrangement with **`TestApp::pump_during(f)`**, which moves the `MixerSource` into a scoped thread so the mixer runs while `f` blocks. **Draining the sink first is not a fix**: `try_seek` short-circuits on `sound_count == 0`, so a seek against a drained sink never runs and an assertion like "a seek is not a second play" passes *vacuously* — it would hold even if seek did count one. Note also that `playback_integration` has no `seek` call, which is why it never met this. `TestApp` is hermetic by construction: `last_dir` points at a temp dir, or `new` would walk the user's home directory.
   - `seek_position.rs` — the `skip_duration`-seek compensation on its own (`effective_pos`): a zero offset is the identity, the offset is added to the sink's own count, an offset alone reports the skip target, sub-second offsets survive, and the sum saturates instead of panicking. The one part of the seek path that still needs its own suite even with integration tests available — `try_seek` succeeds for every format a test can cheaply produce, so the slow path can never be *forced* (see **Slider pinning + position offset**).
+  - `audio_fixtures.rs` — the eight committed real files in `tests/fixtures/` (see **Test conventions**), grouped by what each pins: every supported format decodes and reports its own ~12.27 s; **the decoder and the tag reader agree on every duration**, one number from two independent readers, which is the assertion that earns the fixtures their keep; the four tagged formats return their real `TITLE`/`ARTIST`/`ALBUM` from four different tag locations; and the untagged `m4a` falls back to the filename stem (and is the only stereo file). **Two tests exist because measurement contradicted the written record, and each carries the fix in its assertion message** — `raw_aac_decodes_but_its_lofty_duration_is_an_estimate` (symphonia *does* parse ADTS; `.aac` is excluded because ADTS has no length field, so lofty estimates 12.808 s against the decoder's 12.330 s and the Duration column reads lofty) and `a_correctly_encoded_44100_aiff_is_not_rate_mangled` (the `extended` float bug turns 8000 Hz into 3904 but leaves 44100 Hz alone, so re-enabling AIFF is a per-rate check). `symphonia_has_no_opus_codec` is the only file symphonia cannot open, failing `Unrecognized format` — a container it cannot even identify, which is what a missing codec looks like. Both corrections are written up under **Future milestones** → *Interop*.
   - `cover_tests.rs` — `library::read_cover` on real files: the embedded tag picture wins over a cover file beside the track, `folder.jpg` is the fallback when the tags carry no art, and `None` when neither exists. The `None` half is what lets the Album Cover pane's cache record "checked, no art" and stop re-reading.
   - `eq_live.rs` — `EqSource` live behavior at Source level: 0 dB exact identity, band boost amplitude, gain change mid-iteration, disable/reenable.
   - `tag_cache.rs` — the `drain_tag_scan` mpsc pattern (Empty/Disconnected branches) and dropped-receiver replacement.
@@ -658,7 +659,8 @@ and per-track EQ are still to-do and live under *Future milestones* → **Deferr
 
 - **All tests live in `tests/`** — no `#[cfg(test)]` modules in src, and `tests/no_inline_tests.rs` fails the build if one appears (it walks `src/`, skipping comment lines so a doc comment may still *mention* `#[test]`). The reason is not tidiness: cargo compiles an inline module into **both** the `lib` and the `main` unit-test binaries, so `src/audio/viz.rs`'s 8 tests ran **twice** under two unnameable targets and could not be run or filtered as a suite. Moving them to `tests/viz_tests.rs` made them run once, as a target you can name. Cargo auto-discovers each `tests/<suite>.rs` as its own binary, so every suite runs exactly once (`tests/main.rs` was removed — it re-declared the suites and doubled every run). A private helper is reachable from a suite by making it `pub` — the only reason `audio::viz::fft_magnitude` is public.
 - `tests/common.rs` helpers: `temp_dir()`, `test_dir(name)`, `write_wav(path)` (1s 8kHz mono PCM), `write_minimal_flac(path)`, `assert_duration_approx`.
-- Test isolation: each test makes its own temp dir under `/tmp/tplay-test-<pid>/<name>/` and removes it.
+- **`tests/fixtures/` — eight committed real audio files, one per format, and the only fixtures that are not hand-built.** `tests/common.rs` builds its own because nothing in the dependency tree can *encode* audio, which is a fact about the crates and not a reason to ship a synthetic file when a real one exists: a 1 s tone says a decoder opened the file, and nothing about where that format keeps its tag block or whether its declared duration survives a round trip. All eight are one 12.27 s / 44.1 kHz recording in eight containers (CC0, from `audiojs/audio-lena`, which is freesound #246148 by *heshamwhite* — `tests/fixtures/README.md` and `CREDITS` have the provenance), so a duration assertion means the same thing in each and the four tagged formats put their tags in **four different containers' worth of places** — a native `VORBIS_COMMENT` block, a Vorbis comment packet, ID3v2, and a `LIST`/`INFO` chunk. They close three real gaps: **FLAC had no audio at all** (`write_minimal_flac` is headers only) and **OGG and M4A had no fixture whatsoever**. `common.rs` is unchanged and still load-bearing — `write_aiff` in particular must stay hand-built, because `symphonia_misreads_the_aiff_sample_rate` is a tripwire whose premise is a provably correct 8000 Hz rate. **Do not regenerate them:** `ffmpeg` is not a build dependency and the suite is hermetic. 13 of the upstream project's 21 files are deliberately absent (10 MB with no demuxer in this stack) — add one only alongside a test that needs it.
+- Test isolation: each test makes its own temp dir under `/tmp/tplay-test-<pid>/<name>/` and removes it. `audio_fixtures.rs` is the one suite that reads a path it did not create (`CARGO_MANIFEST_DIR`-relative, since cargo promises no working directory) and so writes nothing.
 - Run: `cargo test` (all suites, once each).
 
 ---
@@ -735,20 +737,36 @@ whole of the value here. What is left:
 - **AIFF** — symphonia 0.5.5 *has* an AIFF demuxer and lofty reads its tags, so
   it looks free, but the sample rate comes from the `extended` 0.1.0 crate,
   whose `to_f64` normalizes the 80-bit float as if its top bit were not the
-  implicit leading one. It reads 8000 Hz as 3904 and 44100 Hz as 11332, so a
-  track plays two octaves up and ~4x fast, and `total_duration` (4x short) would
-  feed the seek bar and the crossfade math. `symphonia_misreads_the_aiff_sample_rate`
+  implicit leading one. It reads **8000 Hz as 3904**, so such a track plays two
+  octaves up and ~4x fast, and `total_duration` (4x short) would feed the seek bar
+  and the crossfade math. `symphonia_misreads_the_aiff_sample_rate`
   (`library_tests.rs`) is the tripwire: when it fails, the bug is fixed — add
   `aif`/`aiff` to `AUDIO_EXTENSIONS` and delete the test.
+  **The bug is a property of that value, not of the container, and this used to be
+  documented wrong.** It was also claimed to turn 44100 Hz into 11332; a committed
+  real 44.1 kHz AIFF (`tests/fixtures/lena.aiff`) decodes at **44100**, correct,
+  with a correct duration — `a_correctly_encoded_44100_aiff_is_not_rate_mangled`
+  in `audio_fixtures.rs` pins that. So re-enabling AIFF is a per-rate check, not a
+  blanket undo, and 44.1 kHz is not among the broken ones.
 - **Opus** — symphonia 0.5.5 has no Opus codec crate at all (not in
-  `all-codecs`), only the Ogg container, so `.opus` is not decodable today.
-  Wants rodio 0.22 / symphonia 0.6.
+  `all-codecs`), only the Ogg container, so `.opus` is not decodable today. This
+  is the one of the three that `audio_fixtures.rs` verifies directly, and the
+  error is `Unrecognized format` — a container symphonia cannot even identify,
+  which is what a missing codec looks like from the outside. Wants rodio 0.22 /
+  symphonia 0.6.
 - **WMA, APE, WavPack** — no upstream support; each would be a new dependency,
   and each has to justify itself per the deps table.
 - **MOD/S3M/XM/IT, MIDI** — the Nullsoft hallmark. Needs a decoder dependency;
   out of scope while the dependency rule stands.
-- **Raw `.aac`** — the codec is in `all-codecs` but there is no ADTS demuxer in
-  0.5.5, so only AAC-in-MP4 works, which `.m4a` already covers.
+- **Raw `.aac`** — **this one was documented wrong too, and it does decode.**
+  symphonia 0.5.5 parses ADTS fine; `raw_aac_decodes_but_its_lofty_duration_is_an_estimate`
+  (`audio_fixtures.rs`) opens a real ADTS file and measures it. What actually
+  disqualifies it is the *other* duration reader: ADTS carries no length, so
+  lofty *estimates* one from the bitrate and lands ~0.5 s long (12.808 s against
+  the decoder's 12.330 s), and the Library's Duration column reads lofty — so the
+  row would display a wrong length while playing correctly. The right test is
+  `the_decoder_and_the_tag_reader_agree_on_every_duration`, which every format in
+  `AUDIO_EXTENSIONS` passes and `.aac` does not. Add `aac` when that passes.
 
 Milestone 1 is the big one — the only item here that adds a state file and a
 rule engine. No new milestone may hardcode constants: the theme-token /
