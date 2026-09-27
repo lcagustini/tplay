@@ -25,9 +25,20 @@ const NET_LOGIN: &str = "tplay.network.login";
 
 /// Column widths shared by the sortable header and the file rows (matches SORT_OPTIONS).
 const CELL_WIDTHS: [f32; 4] = [0.0, 90.0, 100.0, 44.0]; // Title is flexible
-/// Fixed right-hand width per row: the three tag cells + the `+` button +
-/// inter-cell spacing, leaving the title column the flexible remainder.
-const ROW_FIXED_W: f32 = CELL_WIDTHS[1] + CELL_WIDTHS[2] + CELL_WIDTHS[3] + 40.0;
+/// The rating cell: a star and its digit, side by side.
+///
+/// **Not** one of `CELL_WIDTHS`, because those are the sortable columns and this is
+/// not one — the header draws one cell per `SORT_OPTIONS` entry and stops, so the
+/// rating sits past the last header cell and the columns still line up. It is not
+/// sortable on purpose: rating is a whole-star field, so ordering by it would
+/// produce long runs of indistinguishable rows.
+const RATING_W: f32 = 24.0;
+/// The star inside that cell. Half the row height, so a 24px row holds it without
+/// the cell's text growing.
+const RATING_STAR: f32 = 10.0;
+/// Fixed right-hand width per row: the three tag cells + the rating cell + the `+`
+/// button + inter-cell spacing, leaving the title column the flexible remainder.
+const ROW_FIXED_W: f32 = CELL_WIDTHS[1] + CELL_WIDTHS[2] + CELL_WIDTHS[3] + RATING_W + 40.0;
 
 /// One clickable column header; true when clicked, and the caller picks the sort
 /// key. The active column is accent-colored with a theme icon (`arrow`) for the
@@ -138,6 +149,8 @@ fn draw_playlist_row(
 enum FileAct {
     Play,
     Add,
+    /// Open the rating picker for the row's track.
+    Rate,
 }
 
 /// What the user asked for by clicking a file-list row.
@@ -155,6 +168,10 @@ enum Act {
     Add(PathBuf),
     /// Load a `.tplay` — local path, or an `smb://` URI to fetch first.
     LoadPlaylist(PathBuf),
+    /// Open the rating picker for one track. The **caller** carries it out, because
+    /// only it knows whether the row came from disk or from a share: a share row's
+    /// rating is display-only, since a spool-cache copy is not the track.
+    Rate(PathBuf),
 }
 
 fn draw_file_row(
@@ -165,6 +182,8 @@ fn draw_file_row(
     i: usize,
     path: &Path,
     info: Option<&library::TrackInfo>,
+    star_on: Option<&egui::TextureHandle>,
+    star_off: Option<&egui::TextureHandle>,
 ) -> Option<FileAct> {
     let p = theme.palette;
     let layout = theme.layout;
@@ -217,6 +236,47 @@ fn draw_file_row(
                 )),
         ),
     );
+
+    // The rating: a star, then its digit, in one fixed-width cell. The star
+    // carries "is it rated" and the digit "how much", because a filled-vs-empty
+    // star alone cannot tell 1 from 5.
+    //
+    // No tint: `star_on`/`star_off` are baked with the accent and secondary
+    // tokens per theme, so the two textures already differ the way the rating
+    // should read. `theme::icon` also falls back to the glyph when a theme ships
+    // no file for the slot, which is the one case where a broken install would
+    // otherwise draw nothing at all.
+    let rating = info.map(|i| i.rating).unwrap_or(0);
+    let (star, star_tex) = if rating > 0 {
+        (theme::Icon::StarOn, star_on)
+    } else {
+        (theme::Icon::StarOff, star_off)
+    };
+    theme::icon(&mut row, star_tex, star, RATING_STAR);
+    let digits = if rating > 0 {
+        rating.to_string()
+    } else {
+        String::new()
+    };
+    let rating_resp = row
+        .add_sized(
+            egui::vec2(RATING_W - RATING_STAR, row_h),
+            egui::Label::new(egui::RichText::new(&digits).color(if rating > 0 {
+                p.accent
+            } else {
+                p.text_secondary
+            }))
+            .truncate()
+            .sense(egui::Sense::click()),
+        )
+        .on_hover_text("Rating — click to change");
+    // The rating is the thing you scan a column for, so the play count rides on
+    // hover rather than in a counter column nobody asked for.
+    let rating_resp = match app.play_history(path) {
+        Some(history) => rating_resp.on_hover_text(history),
+        None => rating_resp,
+    };
+
     let add_clicked = row
         .add(egui::Button::new("+").small().frame(false))
         .on_hover_text_at_pointer("Add to playlist")
@@ -226,6 +286,8 @@ fn draw_file_row(
         Some(FileAct::Play)
     } else if add_clicked {
         Some(FileAct::Add)
+    } else if rating_resp.clicked() {
+        Some(FileAct::Rate)
     } else {
         None
     }
@@ -264,6 +326,8 @@ fn file_list_ui(
 ) -> Option<Act> {
     let p = theme.palette;
     let folder_tex = themes.icon(theme::Icon::Folder).cloned();
+    let star_on = themes.icon(theme::Icon::StarOn).cloned();
+    let star_off = themes.icon(theme::Icon::StarOff).cloned();
     let mut out = None;
 
     // Search box. State is the one `LIB_QUERY` key, so the query deliberately
@@ -395,9 +459,29 @@ fn file_list_ui(
                         i += 1;
                         continue;
                     }
-                    match draw_file_row(app, ui, theme, row_h, i, path, info) {
+                    match draw_file_row(
+                        app,
+                        ui,
+                        theme,
+                        row_h,
+                        i,
+                        path,
+                        info,
+                        star_on.as_ref(),
+                        star_off.as_ref(),
+                    ) {
                         Some(FileAct::Play) => action = Some(Act::Play(path.to_path_buf())),
                         Some(FileAct::Add) => action = Some(Act::Add(path.to_path_buf())),
+                        // Display-only on a share. The cell still shows the rating
+                        // the cached copy carries, and the click is dropped here
+                        // rather than refused later: `tracks::write_tags` also
+                        // refuses, so a future caller that forgets this guard still
+                        // cannot write to a spool cache.
+                        Some(FileAct::Rate) => {
+                            if !remote {
+                                action = Some(Act::Rate(path.to_path_buf()));
+                            }
+                        }
                         None => {}
                     }
                 }
@@ -446,8 +530,16 @@ pub fn local_list_ui(
         Some(Act::Play(path)) => app.play_file(path),
         Some(Act::Add(path)) => app.add_files(vec![path]),
         Some(Act::LoadPlaylist(path)) => app.load_playlist_from(path),
+        Some(Act::Rate(path)) => arm_rating(ui, app, path),
         None => {}
     }
+}
+
+/// Arm the 5-star picker for a local track, carrying the rating the file has now
+/// so the modal can show it without a second lookup.
+fn arm_rating(ui: &egui::Ui, app: &TPlayApp, path: PathBuf) {
+    let current = app.db().cache().get(&path).map(|i| i.rating).unwrap_or(0);
+    dialogs::ask_rating(ui.ctx(), path, current);
 }
 
 /// The right-hand end of a file-list header: composition counts and Add All.
@@ -675,6 +767,10 @@ pub fn remote_list_ui(
         Some(Act::Play(path)) => app.play_file(path),
         Some(Act::Add(path)) => app.add_files(vec![path]),
         Some(Act::LoadPlaylist(uri)) => app.network_mut().fetch(uri.to_string_lossy().into_owned()),
+        // Unreachable: `file_list_ui` drops a `Rate` when `remote` is set, since a
+        // spool-cache copy is not the track. Named so that is a compile-time fact
+        // rather than a comment.
+        Some(Act::Rate(_)) => {}
         None => {}
     }
 }

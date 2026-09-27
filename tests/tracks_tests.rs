@@ -18,6 +18,7 @@
 //!   used to hand an `smb://` URI to `File::open`, which panicked.
 
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tplay::library::TrackInfo;
@@ -468,5 +469,77 @@ fn tag_reader_absorb_caches_ok_and_leaves_err_retryable() {
         cache2.len(),
         1,
         "the successful half of the same batch still lands"
+    );
+}
+
+// ── Writing tags ──────────────────────────────────────────────────────────────
+
+/// The write path's three cases a reader cannot reach: it creates a tag on a file
+/// that has none, it clears a rating, and it refuses a remote track.
+#[test]
+fn a_rating_is_written_cleared_and_clamped() {
+    let dir = common::test_dir("a_rating_is_written_cleared_and_clamped");
+    let mp3 = dir.join("tagged.mp3");
+    common::write_tagged_mp3(&mp3, "Kept Title", "Kept Artist", "Kept Album");
+
+    let set = tracks::Edit { rating: Some(4) };
+    let info = tracks::write_tags(&mp3, &set).expect("writes to a local file");
+    assert_eq!(
+        info.rating, 4,
+        "the returned value is the file's own answer"
+    );
+    assert_eq!(
+        info.title, "Kept Title",
+        "a rating write left the other tags alone"
+    );
+
+    // Out of range clamps rather than panicking: `Edit` is a public field, so a
+    // caller can hand it 9 and there must be no way to reach the rewrite with it.
+    let clamped = tracks::write_tags(&mp3, &tracks::Edit { rating: Some(9) }).unwrap();
+    assert_eq!(clamped.rating, 5);
+
+    // Clearing is a removal, not a zero — a Popularimeter's scale starts at one.
+    let cleared = tracks::write_tags(&mp3, &tracks::Edit { rating: Some(0) }).unwrap();
+    assert_eq!(cleared.rating, 0);
+    assert_eq!(cleared.title, "Kept Title");
+
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A file with no tags at all is the normal state of a fresh rip, and the write
+/// must create the tag rather than refuse — this is the case a fixture carrying
+/// tags would never have reached.
+#[test]
+fn a_write_creates_a_tag_when_the_file_has_none() {
+    let dir = common::test_dir("a_write_creates_a_tag_when_the_file_has_none");
+    let wav = dir.join("bare.wav");
+    common::write_wav(&wav);
+
+    let before = tplay::library::read_info(&wav).expect("a WAV parses");
+    assert!(before.title.is_empty(), "premise: the file carries no tags");
+
+    let after = tracks::write_tags(&wav, &tracks::Edit { rating: Some(3) })
+        .expect("an untagged file is not a reason to refuse");
+    assert_eq!(after.rating, 3);
+    assert_eq!(
+        tracks::info(&wav).map(|i| i.rating),
+        Some(3),
+        "and it is on disk, not just in the return value"
+    );
+
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The refusal that keeps the write path here. A remote track's spool-cache copy
+/// is a cache of bytes, not the track: a rating written there is invisible to the
+/// server and lost at the next eviction, so it is refused rather than written.
+#[test]
+fn a_remote_track_is_refused() {
+    let uri = PathBuf::from("smb://nas/media/music/remote.mp3");
+    let err = tracks::write_tags(&uri, &tracks::Edit { rating: Some(5) })
+        .expect_err("a remote track has no file of its own to write");
+    assert!(
+        err.contains("server"),
+        "the reason should say why, since it is what a user sees: {err}"
     );
 }

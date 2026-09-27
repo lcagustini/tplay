@@ -10,7 +10,7 @@ use crate::playlist;
 use crate::tracks;
 use rodio::{mixer::Mixer, Decoder, Sink, Source};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Where the playhead really is, given what the sink reports.
@@ -1069,6 +1069,44 @@ impl TPlayApp {
     }
 
     // ── Library ────────────────────────────────────────────────────────────
+
+    /// Write a tag edit to one track and take the file's own answer back into the
+    /// cache.
+    ///
+    /// The seam every tag mutation goes through, so there is exactly one place
+    /// that can fail a write, one that refreshes the cache, and one that re-sorts.
+    /// `Err` means **nothing changed** — the cache and the file list are left
+    /// exactly as they were, because a half-applied edit is worse than a refused
+    /// one.
+    pub fn apply_edit(&mut self, track: &Path, edit: tracks::Edit) -> Result<(), String> {
+        let info = tracks::write_tags(track, &edit)?;
+        self.db.cache_mut().insert(track.to_path_buf(), info);
+        // Re-sort, because the entries the pane is drawing *are* the sorted list,
+        // and a tag that is a sort key has just changed. `apply_sort` rather than
+        // `set_sort`: the column has not changed, and re-setting it would flip the
+        // direction.
+        //
+        // Not observable yet — a rating is not one of `SORT_OPTIONS`, so nothing
+        // written through today's `Edit` can move a row. It stays because the
+        // alternative is a manual obligation on whoever adds the first sortable
+        // field, and this repo has already deleted one of those for losing data
+        // silently. Phase 4 covers it.
+        self.library.apply_sort(self.db.cache());
+        Ok(())
+    }
+
+    /// "Played 7 times · last 3 d ago" for a track, or `None` when it has no play
+    /// history — an unplayed track has nothing to say.
+    ///
+    /// The one line that joins two owners: the clock is the app's (it is what
+    /// stamps the history, and it has to be wall-clock so a persisted stamp still
+    /// means something next session) and the counts are the database's. The
+    /// wording is `PlayStats::describe`, which is pure and tested with literals.
+    pub fn play_history(&self, track: &Path) -> Option<String> {
+        self.db
+            .stats_of(track)
+            .and_then(|s| s.describe(now_epoch()))
+    }
 
     /// List a directory and start tagging its audio files in the background.
     /// Persists the last browsed dir on the way.

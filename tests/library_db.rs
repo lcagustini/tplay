@@ -5,7 +5,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 use tplay::library::TrackInfo;
-use tplay::library_db::TrackDb;
+use tplay::library_db::{PlayStats, TrackDb};
 #[path = "common.rs"]
 mod common;
 use crate::common::{test_dir, write_wav, TestApp};
@@ -244,6 +244,71 @@ fn absent_and_unknown_fields_both_load() {
     );
 
     fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The tooltip's wording, which is the only place the play history is read. Four
+/// buckets, because the difference between "4 minutes ago" and "6 minutes ago" is
+/// not information anybody reads a tooltip for.
+#[test]
+fn a_play_history_line_says_how_often_and_how_long_ago() {
+    const NOW: u64 = 1_700_000_000;
+    let at = |plays: u32, secs_ago: u64| PlayStats {
+        plays,
+        last_played: Some(NOW - secs_ago),
+        first_seen: 0,
+    };
+
+    assert!(
+        PlayStats::default().describe(NOW).is_none(),
+        "never played — a tooltip that always shows teaches the reader to ignore it"
+    );
+    assert_eq!(
+        at(1, 30).describe(NOW).unwrap(),
+        "Played once · last just now",
+        "one play is not '1 times'"
+    );
+    assert_eq!(
+        at(7, 5 * 60).describe(NOW).unwrap(),
+        "Played 7 times · last 5 min ago"
+    );
+    assert_eq!(
+        at(7, 4 * 3600).describe(NOW).unwrap(),
+        "Played 7 times · last 4 h ago"
+    );
+    assert_eq!(
+        at(7, 3 * 86_400).describe(NOW).unwrap(),
+        "Played 7 times · last 3 d ago"
+    );
+}
+
+/// The app's half of a tag write: the file's own answer reaches the cache, and a
+/// refusal leaves **nothing** behind. There is no half-applied edit — the cache
+/// and the file agree or the call did nothing.
+#[test]
+fn an_edit_lands_in_the_cache_and_a_refusal_changes_nothing() {
+    use tplay::tracks::Edit;
+
+    let mut t = TestApp::new("an_edit_lands_in_the_cache_and_a_refusal_changes_nothing");
+    let file = t.app.library().dir().join("tone.wav");
+    write_wav(&file);
+
+    t.app
+        .apply_edit(&file, Edit { rating: Some(5) })
+        .expect("a local track is writable");
+    assert_eq!(
+        t.app.db().cache().get(&file).expect("cached").rating,
+        5,
+        "the cache holds the file's answer, not what was asked for"
+    );
+
+    let uri = PathBuf::from("smb://nas/media/remote.wav");
+    t.app
+        .apply_edit(&uri, Edit { rating: Some(1) })
+        .expect_err("a remote track is refused");
+    assert!(
+        t.app.db().cache().get(&uri).is_none(),
+        "the refusal left no row behind"
+    );
 }
 
 /// A missing file is a first run, not damage — and leaves nothing behind, which

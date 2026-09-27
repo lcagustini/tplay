@@ -28,13 +28,22 @@
 //! two silent crashes it caused, is under **Tracks: one surface per source** in
 //! AGENTS.md.
 //!
+//! [`write_tags`] is the one operation that goes the other way, and it sits here
+//! for the same reason the readers do: whether a track *can* be written is a fact
+//! about transports, and a remote track's spool-cache copy is not the track.
+//!
 //! Greppable form: `app.rs` and `src/gui/` never call `File::open` /
 //! `read_info` / `probe_duration` / `read_cover` on a track id, and never bind a
-//! resolved path. They use `open` / `info` / `probe` / `cover` / `is_ready`.
+//! resolved path. They use `open` / `info` / `probe` / `cover` / `is_ready` /
+//! `write_tags`.
 
 use crate::audio;
 use crate::library::{self, TrackInfo};
 use crate::network;
+use lofty::config::WriteOptions;
+use lofty::file::{AudioFile, FileType, TaggedFileExt};
+use lofty::tag::items::popularimeter::{Popularimeter, StarRating};
+use lofty::tag::{ItemKey, Tag, TagType};
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -143,6 +152,116 @@ fn local_file_now(track: &Path) -> Option<PathBuf> {
 /// `local_file_now` against an injected spool dir.
 pub fn local_file_now_in(track: &Path, dir: &Path) -> Option<PathBuf> {
     local_file_in(track, dir).filter(|f| f.is_file())
+}
+
+// ── Writing a track's tags ────────────────────────────────────────────────────
+
+/// The tag changes one write applies. `None` leaves a field alone.
+///
+/// The rating is the only field here today because it is the only one with a UI;
+/// the full editor adds its fields to **this** struct rather than adding a second
+/// write path, so "change a tag" stays one function with one error path.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Edit {
+    /// `0` clears the rating; `1`–`5` set it. Clamped, because a `StarRating`
+    /// holds nothing else and a hand-edited value must not reach the file.
+    pub rating: Option<u8>,
+}
+
+/// Apply `edit` to `track`'s own file and hand back what the file then says.
+///
+/// **The one tag-write path**, and the only writer here — the module's readers
+/// return the thing asked for, and this is the one operation that changes
+/// something. It lives here for the same reason they do: a track can be local or
+/// remote, and the answer to "can this be written" is a fact about transports
+/// that only this module knows. A remote track is refused rather than pointed at
+/// its spool-cache copy — that copy is a cache of bytes, not the track, so a
+/// rating written there is invisible to the server and lost at the next eviction.
+///
+/// Returns the **file's own** `TrackInfo` read back after the write, not the
+/// fields that were asked for: the caller's cache then holds what is on disk even
+/// if a format silently declined one of them.
+pub fn write_tags(track: &Path, edit: &Edit) -> Result<TrackInfo, String> {
+    if network::is_remote(track) {
+        return Err("a track on a server has no file of its own to write".into());
+    }
+    let mut tagged =
+        lofty::read_from_path(track).map_err(|e| format!("{}: {e}", track.display()))?;
+    {
+        // A file with no tags at all has nothing to insert into, and that is the
+        // normal state of a fresh rip, so the tag is created rather than the
+        // write refused.
+        if tagged.primary_tag().is_none() && tagged.first_tag().is_none() {
+            let file = FileType::from_path(track)
+                .ok_or_else(|| format!("{}: unknown file type", track.display()))?;
+            for kind in std::iter::once(file.primary_tag_type()).chain(WRITABLE_TAGS) {
+                if !file.tag_support(kind).is_writable() {
+                    continue;
+                }
+                // Two lofty facts make this a loop with a check rather than one
+                // computed choice. `tag_support` is optimistic: it reports ID3v2
+                // as writable for a WAV, which the RIFF writer then refuses. And
+                // `insert_tag` hands back the tag it *replaced*, so its result
+                // cannot distinguish a refusal from a success — the only honest
+                // check is what the file now carries.
+                tagged.insert_tag(Tag::new(kind));
+                if !tagged.tags().is_empty() {
+                    break;
+                }
+            }
+            if tagged.tags().is_empty() {
+                return Err(format!("{}: no writable tag type", track.display()));
+            }
+        }
+        // `match`, not `or_else`: the closure form borrows `tagged` a second
+        // time while the first borrow is live.
+        let tag = match tagged.primary_tag_mut() {
+            Some(t) => t,
+            None => tagged
+                .first_tag_mut()
+                .ok_or_else(|| format!("{}: no supported tag type", track.display()))?,
+        };
+        if let Some(n) = edit.rating {
+            if n == 0 {
+                // A `Popularimeter` cannot express "unrated" — its scale starts at
+                // one star — so clearing is a removal, not a zero.
+                tag.remove_key(ItemKey::Popularimeter);
+            } else {
+                tag.insert_text(
+                    ItemKey::Popularimeter,
+                    Popularimeter::musicbee(star_rating(n), 0).to_string(),
+                );
+            }
+        }
+    }
+    tagged
+        .save_to_path(track, WriteOptions::default())
+        .map_err(|e| format!("{}: {e}", track.display()))?;
+    library::read_info(track)
+        .ok_or_else(|| format!("{}: unreadable after writing", track.display()))
+}
+
+/// The tag kinds a write will create, in preference order. Container-specific, so
+/// this is a short list of the ones this app can read back — not every type lofty
+/// knows.
+const WRITABLE_TAGS: [TagType; 4] = [
+    TagType::Id3v2,
+    TagType::VorbisComments,
+    TagType::Mp4Ilst,
+    TagType::RiffInfo,
+];
+
+/// A `u8` rating as the enum lofty stores. Saturating rather than panicking: a
+/// rating arrives from a UI and from `apply_edit`'s public signature, and a
+/// clamp is the only thing between that and a file rewrite.
+fn star_rating(n: u8) -> StarRating {
+    match n {
+        0 | 1 => StarRating::One,
+        2 => StarRating::Two,
+        3 => StarRating::Three,
+        4 => StarRating::Four,
+        _ => StarRating::Five,
+    }
 }
 
 // ── Normalizing a playlist entry ─────────────────────────────────────────────

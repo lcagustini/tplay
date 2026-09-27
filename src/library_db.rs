@@ -46,6 +46,43 @@ pub struct PlayStats {
     pub first_seen: u64,
 }
 
+impl PlayStats {
+    /// The row tooltip's text, or `None` for a track with no play history yet —
+    /// an unplayed track has nothing to say, and a tooltip that always appears
+    /// teaches the reader to ignore it.
+    ///
+    /// `now` is a parameter so this stays pure and testable, and so the caller
+    /// passes the *same* clock the history was stamped with. That clock has to be
+    /// wall-clock epoch seconds: `ctx` time restarts with the process, which
+    /// would make every persisted stamp read as decades old.
+    pub fn describe(&self, now: u64) -> Option<String> {
+        if self.plays == 0 {
+            return None;
+        }
+        let times = match self.plays {
+            1 => "Played once".to_string(),
+            n => format!("Played {n} times"),
+        };
+        let last = now.saturating_sub(self.last_played.unwrap_or(self.first_seen));
+        Some(format!("{times} · last {}", ago(last)))
+    }
+}
+
+/// Whole seconds as a short relative phrase. Only four buckets, because the
+/// difference between "4 minutes ago" and "6 minutes ago" is not information
+/// anybody reads a tooltip for.
+fn ago(secs: u64) -> String {
+    const MIN: u64 = 60;
+    const HOUR: u64 = 60 * MIN;
+    const DAY: u64 = 24 * HOUR;
+    match secs {
+        s if s < MIN => "just now".to_string(),
+        s if s < HOUR => format!("{} min ago", s / MIN),
+        s if s < DAY => format!("{} h ago", s / HOUR),
+        s => format!("{} d ago", s / DAY),
+    }
+}
+
 /// The tag cache plus the per-track stats, and the two files' worth of
 /// persistence over them.
 ///
@@ -81,11 +118,9 @@ impl TrackDb {
         &mut self.tags
     }
 
-    /// The stats for a track, or `None` when it has never been persisted.
-    // Temporary: the tests are the only reader until the Library row's tooltip
-    // lands with it, and the binary target is what warns on an unreachable pub
-    // item. Delete the attribute with that tooltip.
-    #[allow(dead_code)]
+    /// The stats for a track, or `None` when it has never been persisted — which
+    /// is the only way a track can be unrated *and* unplayed, and the reason the
+    /// two are separate: a rating lives in the file, a play count only here.
     pub fn stats_of(&self, track: &Path) -> Option<&PlayStats> {
         self.stats.get(track)
     }
