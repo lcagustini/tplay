@@ -24,7 +24,11 @@ fn no_cfg_test_modules_in_src() {
     let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("src");
     let mut files = Vec::new();
     src_files(&root, &mut files);
-    assert!(files.len() >= 20, "expected the whole src tree, found {}", files.len());
+    assert!(
+        files.len() >= 20,
+        "expected the whole src tree, found {}",
+        files.len()
+    );
 
     let mut offenders = Vec::new();
     for file in &files {
@@ -35,7 +39,10 @@ fn no_cfg_test_modules_in_src() {
             if code.starts_with("//") {
                 continue;
             }
-            if code.contains("#[cfg(test)]") || code.contains("#[test]") || code.contains("mod tests") {
+            if code.contains("#[cfg(test)]")
+                || code.contains("#[test]")
+                || code.contains("mod tests")
+            {
                 offenders.push(format!("{}:{}: {}", file.display(), n + 1, code.trim()));
             }
         }

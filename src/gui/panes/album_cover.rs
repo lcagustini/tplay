@@ -31,7 +31,10 @@ pub fn album_cover_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
 
     let ctx = ui.ctx().clone();
     let cur = app.current_path().map(|p| p.to_path_buf());
-    let cur_key = cur.as_ref().map(|c| c.to_string_lossy().into_owned()).unwrap_or_default();
+    let cur_key = cur
+        .as_ref()
+        .map(|c| c.to_string_lossy().into_owned())
+        .unwrap_or_default();
 
     // Re-resolve only when the playing track changed (first frame included).
     let cached: Option<CoverCache> = ctx.data(|d| d.get_temp(cover_id()));

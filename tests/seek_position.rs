@@ -21,7 +21,11 @@ fn a_zero_offset_is_the_identity() {
     // landed in. Nothing may perturb the position rodio reports.
     for secs in [0, 1, 30, 3600] {
         let pos = Duration::from_secs(secs);
-        assert_eq!(effective_pos(pos, Duration::ZERO), pos, "{secs}s must pass through");
+        assert_eq!(
+            effective_pos(pos, Duration::ZERO),
+            pos,
+            "{secs}s must pass through"
+        );
     }
 }
 
@@ -40,7 +44,10 @@ fn the_offset_is_added_to_the_sinks_own_count() {
 fn an_offset_alone_reports_the_skip_target() {
     // A seek to 0 on the slow path: the fresh sink has played nothing yet, so
     // the position must still be the target rather than 0.
-    assert_eq!(effective_pos(Duration::ZERO, Duration::from_secs(45)), Duration::from_secs(45));
+    assert_eq!(
+        effective_pos(Duration::ZERO, Duration::from_secs(45)),
+        Duration::from_secs(45)
+    );
 }
 
 #[test]
@@ -58,7 +65,11 @@ fn the_sum_saturates_rather_than_panicking() {
     // *previous* skip — so a bad pair must not be able to panic in the audio
     // path. Duration::MAX is the ceiling; a plain `+` would overflow and panic.
     let huge = Duration::MAX;
-    assert_eq!(effective_pos(huge, Duration::from_secs(1)), huge, "must clamp, not panic");
+    assert_eq!(
+        effective_pos(huge, Duration::from_secs(1)),
+        huge,
+        "must clamp, not panic"
+    );
     assert_eq!(effective_pos(Duration::from_secs(1), huge), huge);
     assert_eq!(effective_pos(huge, huge), huge);
 }

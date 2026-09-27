@@ -5,8 +5,8 @@
 
 use std::path::Path;
 use tplay::network::{
-    cache_path_in, child_uri, dir_uri, fnv1a64, is_remote, parse_server_input,
-    share_uri, spool_key, split_uri,
+    cache_path_in, child_uri, dir_uri, fnv1a64, is_remote, parse_server_input, share_uri,
+    split_uri, spool_key,
 };
 
 #[test]
@@ -21,13 +21,23 @@ fn is_remote_only_matches_smb_uri_prefix() {
 #[test]
 fn split_uri_covers_server_share_and_deep_paths() {
     // Bare server — share stage (guest browse).
-    assert_eq!(split_uri("smb://192.168.1.50"), Some(("192.168.1.50".into(), None, String::new())));
+    assert_eq!(
+        split_uri("smb://192.168.1.50"),
+        Some(("192.168.1.50".into(), None, String::new()))
+    );
     // Share root.
-    assert_eq!(split_uri("smb://nas/music"), Some(("nas".into(), Some("music".into()), String::new())));
+    assert_eq!(
+        split_uri("smb://nas/music"),
+        Some(("nas".into(), Some("music".into()), String::new()))
+    );
     // Directory + file.
     assert_eq!(
         split_uri("smb://nas/music/Album/track.flac"),
-        Some(("nas".into(), Some("music".into()), "Album/track.flac".into()))
+        Some((
+            "nas".into(),
+            Some("music".into()),
+            "Album/track.flac".into()
+        ))
     );
     // Not an smb uri at all.
     assert_eq!(split_uri("https://nas/music"), None);
@@ -58,7 +68,11 @@ fn add_server_dedups_by_host_and_updates_the_username() {
     // Whitespace from the text field must not create a second, near-identical row.
     net.add_server("  192.168.15.59  ".into(), "carol".into());
     assert_eq!(net.servers().len(), 2, "host must be trimmed before dedup");
-    let row = net.servers().iter().find(|s| s.host == "192.168.15.59").unwrap();
+    let row = net
+        .servers()
+        .iter()
+        .find(|s| s.host == "192.168.15.59")
+        .unwrap();
     assert_eq!(row.username, "carol");
 
     // Removal is by exact host.
@@ -107,15 +121,24 @@ fn uri_builders_round_trip_against_splitter() {
     let rel = "Rock/Album";
     let uri = dir_uri(host, share, rel);
     assert_eq!(uri, "smb://nas/music/Rock/Album");
-    assert_eq!(split_uri(&uri), Some((host.into(), Some(share.into()), rel.into())));
+    assert_eq!(
+        split_uri(&uri),
+        Some((host.into(), Some(share.into()), rel.into()))
+    );
 
     // Share root (empty rel) has no trailing slash.
     assert_eq!(dir_uri(host, share, ""), "smb://nas/music");
     assert_eq!(share_uri(host, share), "smb://nas/music");
 
     // Descending appends exactly one slash regardless of parent form.
-    assert_eq!(child_uri("smb://nas/music", "Album"), "smb://nas/music/Album");
-    assert_eq!(child_uri("smb://nas/music/Album/", "a.flac"), "smb://nas/music/Album/a.flac");
+    assert_eq!(
+        child_uri("smb://nas/music", "Album"),
+        "smb://nas/music/Album"
+    );
+    assert_eq!(
+        child_uri("smb://nas/music/Album/", "a.flac"),
+        "smb://nas/music/Album/a.flac"
+    );
 }
 
 #[test]
@@ -123,7 +146,10 @@ fn uri_parent_is_the_inverse_of_child_uri() {
     use tplay::network::uri_parent;
 
     // The base a remote playlist's relative entries resolve against.
-    assert_eq!(uri_parent("smb://nas/share/dir/list.tplay"), "smb://nas/share/dir");
+    assert_eq!(
+        uri_parent("smb://nas/share/dir/list.tplay"),
+        "smb://nas/share/dir"
+    );
     // A playlist at the share root resolves against the share itself.
     assert_eq!(uri_parent("smb://nas/share/list.tplay"), "smb://nas/share");
     // Deep paths keep everything but the filename.
@@ -138,7 +164,11 @@ fn uri_parent_is_the_inverse_of_child_uri() {
         "smb://nas/a/b/c/d/x.flac",
     ] {
         let name = uri.rsplit('/').next().unwrap();
-        assert_eq!(child_uri(uri_parent(uri), name), uri, "round-trip failed for {uri}");
+        assert_eq!(
+            child_uri(uri_parent(uri), name),
+            uri,
+            "round-trip failed for {uri}"
+        );
     }
 }
 
@@ -258,7 +288,10 @@ fn select_evictions_never_removes_a_played_file() {
     ];
     // total 1510, budget 1000 -> must free >= 510
     let picked = select_evictions(&entries, 1000);
-    assert!(picked.contains(&"big".to_string()), "largest unmarked first: {picked:?}");
+    assert!(
+        picked.contains(&"big".to_string()),
+        "largest unmarked first: {picked:?}"
+    );
     let freed: u64 = entries
         .iter()
         .filter(|x| picked.contains(&x.key))
@@ -280,7 +313,11 @@ fn select_evictions_never_removes_a_played_file() {
     let picked = select_evictions(&entries, 500);
     assert_eq!(picked.len(), 2, "{picked:?}");
     assert!(picked.iter().all(|k| k.starts_with('u')), "{picked:?}");
-    let left: u64 = entries.iter().filter(|x| !picked.contains(&x.key)).map(|x| x.size).sum();
+    let left: u64 = entries
+        .iter()
+        .filter(|x| !picked.contains(&x.key))
+        .map(|x| x.size)
+        .sum();
     assert!(left <= 500, "left {left} over budget");
 
     // Empty cache and empty selection are both fine.
@@ -288,7 +325,11 @@ fn select_evictions_never_removes_a_played_file() {
 
     // Ties break deterministically on key, so repeated runs pick the same files
     // (nondeterministic eviction would churn the cache for no reason).
-    let tied = vec![e("bbb", 100, false), e("aaa", 100, false), e("ccc", 150, false)];
+    let tied = vec![
+        e("bbb", 100, false),
+        e("aaa", 100, false),
+        e("ccc", 150, false),
+    ];
     let first = select_evictions(&tied, 250);
     let second = select_evictions(&tied, 250);
     assert_eq!(first, second);
@@ -316,7 +357,10 @@ fn evict_unplayed_in_deletes_what_it_selects() {
     );
     for (uri, n) in [(uri_played, 900usize), (uri_big, 800), (uri_small, 100)] {
         let p = on_disk(uri);
-        assert!(p.extension().is_some(), "cache files carry the format's extension");
+        assert!(
+            p.extension().is_some(),
+            "cache files carry the format's extension"
+        );
         std::fs::write(&p, vec![0u8; n]).unwrap();
     }
 
@@ -326,14 +370,26 @@ fn evict_unplayed_in_deletes_what_it_selects() {
     // Both unmarked files must go: freeing only the 800 would leave 1000, still
     // over. The largest file overall survives — it is the one playback consumed.
     net.evict_unplayed_in(&dir, 900);
-    assert!(on_disk(uri_played).is_file(), "a played file is never a candidate");
-    assert!(!on_disk(uri_big).exists(), "the selected file is actually unlinked");
-    assert!(!on_disk(uri_small).exists(), "eviction continues until the budget is met");
+    assert!(
+        on_disk(uri_played).is_file(),
+        "a played file is never a candidate"
+    );
+    assert!(
+        !on_disk(uri_big).exists(),
+        "the selected file is actually unlinked"
+    );
+    assert!(
+        !on_disk(uri_small).exists(),
+        "eviction continues until the budget is met"
+    );
 
     let uri_keep = "smb://nas/m/keep.flac";
     std::fs::write(on_disk(uri_keep), vec![0u8; 10]).unwrap();
     net.evict_unplayed_in(&dir, 5000);
-    assert!(on_disk(uri_keep).is_file(), "under budget nothing is deleted");
+    assert!(
+        on_disk(uri_keep).is_file(),
+        "under budget nothing is deleted"
+    );
 
     net.evict_unplayed_in(&dir.join("nope"), 0);
     std::fs::remove_dir_all(&dir).unwrap();
@@ -365,7 +421,10 @@ fn tag_attempts_are_bounded_and_cleared_on_success() {
     // `busy()` reads the in-flight set, never this map, so a retained failure
     // cannot pin the app into a permanent repaint loop.
     let retained_failures_pin_nothing = attempts.is_empty();
-    assert!(!retained_failures_pin_nothing, "the attempt map is retained by design");
+    assert!(
+        !retained_failures_pin_nothing,
+        "the attempt map is retained by design"
+    );
 
     // Success clears it, so the next request starts from zero.
     attempts.remove(uri);
@@ -389,22 +448,17 @@ fn dot_entries_are_dropped_but_dot_folders_are_not() {
         assert!(is_self_or_parent(artifact), "{artifact} must be dropped");
     }
     for real in [
-        "",
-        ".",
-        // A leading dot is content, not an artifact.
-        ".config",
-        "..hidden",
-        "...",
-        "music",
-        "song.mp3",
-        "a.tplay",
+        "", ".", // A leading dot is content, not an artifact.
+        ".config", "..hidden", "...", "music", "song.mp3", "a.tplay",
         // Case matters: these are not the artifacts.
-        ".TIF",
-        ".. ",
+        ".TIF", ".. ",
     ] {
         if real == "." {
             continue; // already asserted above
         }
-        assert!(!is_self_or_parent(real), "{real:?} is content and must survive");
+        assert!(
+            !is_self_or_parent(real),
+            "{real:?} is content and must survive"
+        );
     }
 }

@@ -22,9 +22,18 @@ pub const EQ_PRESETS: [(&str, [f32; 10]); 7] = [
     ("Rock", [2.0, 2.5, 3.0, -1.0, 0.0, 3.0, 2.0, 0.5, 0.5, 0.0]),
     ("Pop", [3.0, 2.5, 1.0, -0.5, -0.5, -1.5, 1.0, 2.0, 2.5, 2.0]),
     ("Jazz", [0.0, 0.5, 0.5, 0.0, 0.5, 1.0, 2.5, 2.0, 1.5, 1.0]),
-    ("Classical", [2.5, 2.0, 0.5, 0.0, -0.5, -1.0, 0.5, 1.5, 2.0, 1.5]),
-    ("Electronic", [4.0, 5.0, -2.0, -1.0, 0.0, 0.0, 0.5, 1.0, 1.0, 0.5]),
-    ("Vocal", [0.0, -2.0, -1.0, 0.0, 0.5, 3.0, 1.5, -1.0, 0.0, 0.0]),
+    (
+        "Classical",
+        [2.5, 2.0, 0.5, 0.0, -0.5, -1.0, 0.5, 1.5, 2.0, 1.5],
+    ),
+    (
+        "Electronic",
+        [4.0, 5.0, -2.0, -1.0, 0.0, 0.0, 0.5, 1.0, 1.0, 0.5],
+    ),
+    (
+        "Vocal",
+        [0.0, -2.0, -1.0, 0.0, 0.5, 3.0, 1.5, -1.0, 0.0, 0.0],
+    ),
 ];
 
 /// The preset a gain set matches, or `None` for Custom. Derived, never stored:
@@ -132,7 +141,12 @@ pub struct EqShared {
 
 /// RBJ peaking EQ filter coefficients.
 /// Based on: https://www.w3.org/TR/audio-eq-cookbook/
-pub fn peaking_eq_coeffs(sample_rate: f32, freq: f32, q: f32, gain_db: f32) -> (f32, f32, f32, f32, f32) {
+pub fn peaking_eq_coeffs(
+    sample_rate: f32,
+    freq: f32,
+    q: f32,
+    gain_db: f32,
+) -> (f32, f32, f32, f32, f32) {
     let a = 10f32.powf(gain_db / 40.0);
     let w0 = 2.0 * std::f32::consts::PI * freq / sample_rate;
     let cos_w0 = w0.cos();
@@ -164,7 +178,15 @@ pub struct Biquad {
 impl Biquad {
     pub fn new(sample_rate: u32, freq: f32, gain_db: f32) -> Self {
         let (b0, b1, b2, a1, a2) = peaking_eq_coeffs(sample_rate as f32, freq, 1.0, gain_db);
-        Self { b0, b1, b2, a1, a2, z1: 0.0, z2: 0.0 }
+        Self {
+            b0,
+            b1,
+            b2,
+            a1,
+            a2,
+            z1: 0.0,
+            z2: 0.0,
+        }
     }
 
     pub fn process(&mut self, input: f32) -> f32 {
@@ -199,9 +221,7 @@ where
             let state = shared.read().unwrap();
             (state.gains, state.enabled)
         };
-        let bands = std::array::from_fn(|i| {
-            Biquad::new(sample_rate, EQ_FREQUENCIES[i], gains[i])
-        });
+        let bands = std::array::from_fn(|i| Biquad::new(sample_rate, EQ_FREQUENCIES[i], gains[i]));
         Self {
             inner,
             shared,
@@ -234,7 +254,8 @@ where
             for i in 0..10 {
                 if state.gains[i] != self.cached_gains[i] {
                     self.cached_gains[i] = state.gains[i];
-                    self.bands[i] = Biquad::new(self.sample_rate, EQ_FREQUENCIES[i], state.gains[i]);
+                    self.bands[i] =
+                        Biquad::new(self.sample_rate, EQ_FREQUENCIES[i], state.gains[i]);
                 }
             }
         }

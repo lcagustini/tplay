@@ -30,7 +30,10 @@ fn fallback_font_renders_u2010() {
         ctx.begin_pass(Default::default());
         for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
             let fid = egui::FontId::new(13.0, family.clone());
-            assert!(has(&ctx, &fid, '\u{2010}'), "{family:?} still missing U+2010");
+            assert!(
+                has(&ctx, &fid, '\u{2010}'),
+                "{family:?} still missing U+2010"
+            );
             assert!(has(&ctx, &fid, '\u{00b7}'));
         }
         let _ = ctx.end_pass();
@@ -41,5 +44,8 @@ fn fallback_font_renders_u2010() {
 #[test]
 fn missing_candidates_are_a_noop() {
     let ctx = egui::Context::default();
-    assert!(!theme::install_fallback_fonts(&ctx, &["/nonexistent/tplay-font.ttf"]));
+    assert!(!theme::install_fallback_fonts(
+        &ctx,
+        &["/nonexistent/tplay-font.ttf"]
+    ));
 }

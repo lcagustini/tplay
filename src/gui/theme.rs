@@ -84,14 +84,46 @@ pub struct Layout {
 impl Layout {
     pub fn with_defaults(self) -> Self {
         Layout {
-            eq_slider_min_h: if self.eq_slider_min_h > 0.0 { self.eq_slider_min_h } else { 60.0 },
-            eq_slider_max_h: if self.eq_slider_max_h > 0.0 { self.eq_slider_max_h } else { 220.0 },
-            eq_band_w_min: if self.eq_band_w_min > 0.0 { self.eq_band_w_min } else { 30.0 },
-            eq_header_gap: if self.eq_header_gap > 0.0 { self.eq_header_gap } else { 6.0 },
-            eq_band_gap: if self.eq_band_gap > 0.0 { self.eq_band_gap } else { 2.0 },
-            text_meta: if self.text_meta > 0.0 { self.text_meta } else { 12.0 },
-            text_time: if self.text_time > 0.0 { self.text_time } else { 13.0 },
-            row_tint_alpha: if self.row_tint_alpha > 0.0 { self.row_tint_alpha } else { 0.10 },
+            eq_slider_min_h: if self.eq_slider_min_h > 0.0 {
+                self.eq_slider_min_h
+            } else {
+                60.0
+            },
+            eq_slider_max_h: if self.eq_slider_max_h > 0.0 {
+                self.eq_slider_max_h
+            } else {
+                220.0
+            },
+            eq_band_w_min: if self.eq_band_w_min > 0.0 {
+                self.eq_band_w_min
+            } else {
+                30.0
+            },
+            eq_header_gap: if self.eq_header_gap > 0.0 {
+                self.eq_header_gap
+            } else {
+                6.0
+            },
+            eq_band_gap: if self.eq_band_gap > 0.0 {
+                self.eq_band_gap
+            } else {
+                2.0
+            },
+            text_meta: if self.text_meta > 0.0 {
+                self.text_meta
+            } else {
+                12.0
+            },
+            text_time: if self.text_time > 0.0 {
+                self.text_time
+            } else {
+                13.0
+            },
+            row_tint_alpha: if self.row_tint_alpha > 0.0 {
+                self.row_tint_alpha
+            } else {
+                0.10
+            },
         }
     }
 }
@@ -116,11 +148,15 @@ pub struct Theme {
 impl Theme {
     fn from_json(text: &str, dir: &Path) -> Option<Theme> {
         let v: serde_json::Value = serde_json::from_str(text).ok()?;
-        let id = v.get("id").and_then(|x| x.as_str())
+        let id = v
+            .get("id")
+            .and_then(|x| x.as_str())
             .or_else(|| dir.file_name().and_then(|n| n.to_str()))
             .unwrap_or(DEFAULT_THEME_ID)
             .to_string();
-        let name = v.get("name").and_then(|x| x.as_str())
+        let name = v
+            .get("name")
+            .and_then(|x| x.as_str())
             .map(str::to_string)
             .unwrap_or_else(|| id.clone());
         let base = match v.get("base").and_then(|x| x.as_str()) {
@@ -134,18 +170,61 @@ impl Theme {
         let palette = Palette::from_json(v.get("palette")?)?;
         let icons_dir = dir.join("icons");
         let icons_dir = icons_dir.is_dir().then_some(icons_dir);
-        let layout = v.get("layout").map_or(Layout::default(), |l| Layout {
-            eq_slider_min_h: l.get("eq_slider_min_h").and_then(|x| x.as_f64()).map(|x| x as f32).unwrap_or(0.0),
-            eq_slider_max_h: l.get("eq_slider_max_h").and_then(|x| x.as_f64()).map(|x| x as f32).unwrap_or(0.0),
-            eq_band_w_min: l.get("eq_band_w_min").and_then(|x| x.as_f64()).map(|x| x as f32).unwrap_or(0.0),
-            eq_header_gap: l.get("eq_header_gap").and_then(|x| x.as_f64()).map(|x| x as f32).unwrap_or(0.0),
-            eq_band_gap: l.get("eq_band_gap").and_then(|x| x.as_f64()).map(|x| x as f32).unwrap_or(0.0),
-            text_meta: l.get("text_meta").and_then(|x| x.as_f64()).map(|x| x as f32).unwrap_or(0.0),
-            text_time: l.get("text_time").and_then(|x| x.as_f64()).map(|x| x as f32).unwrap_or(0.0),
-            row_tint_alpha: l.get("row_tint_alpha").and_then(|x| x.as_f64()).map(|x| x as f32).unwrap_or(0.0),
-        }).with_defaults();
+        let layout = v
+            .get("layout")
+            .map_or(Layout::default(), |l| Layout {
+                eq_slider_min_h: l
+                    .get("eq_slider_min_h")
+                    .and_then(|x| x.as_f64())
+                    .map(|x| x as f32)
+                    .unwrap_or(0.0),
+                eq_slider_max_h: l
+                    .get("eq_slider_max_h")
+                    .and_then(|x| x.as_f64())
+                    .map(|x| x as f32)
+                    .unwrap_or(0.0),
+                eq_band_w_min: l
+                    .get("eq_band_w_min")
+                    .and_then(|x| x.as_f64())
+                    .map(|x| x as f32)
+                    .unwrap_or(0.0),
+                eq_header_gap: l
+                    .get("eq_header_gap")
+                    .and_then(|x| x.as_f64())
+                    .map(|x| x as f32)
+                    .unwrap_or(0.0),
+                eq_band_gap: l
+                    .get("eq_band_gap")
+                    .and_then(|x| x.as_f64())
+                    .map(|x| x as f32)
+                    .unwrap_or(0.0),
+                text_meta: l
+                    .get("text_meta")
+                    .and_then(|x| x.as_f64())
+                    .map(|x| x as f32)
+                    .unwrap_or(0.0),
+                text_time: l
+                    .get("text_time")
+                    .and_then(|x| x.as_f64())
+                    .map(|x| x as f32)
+                    .unwrap_or(0.0),
+                row_tint_alpha: l
+                    .get("row_tint_alpha")
+                    .and_then(|x| x.as_f64())
+                    .map(|x| x as f32)
+                    .unwrap_or(0.0),
+            })
+            .with_defaults();
 
-        Some(Theme { id, name, base, layout, metadata_font, palette, icons_dir })
+        Some(Theme {
+            id,
+            name,
+            base,
+            layout,
+            metadata_font,
+            palette,
+            icons_dir,
+        })
     }
 
     /// Hardcoded dark palette used only when no themes/ folder exists anywhere
@@ -159,7 +238,11 @@ impl Theme {
 
 impl Palette {
     fn from_json(v: &serde_json::Value) -> Option<Palette> {
-        let tok = |k: &str| v.get(k).and_then(|x| x.as_str()).and_then(|s| Color32::from_hex(s).ok());
+        let tok = |k: &str| {
+            v.get(k)
+                .and_then(|x| x.as_str())
+                .and_then(|s| Color32::from_hex(s).ok())
+        };
         Some(Palette {
             bg: tok("bg")?,
             panel_bg: tok("panel_bg")?,
@@ -208,7 +291,9 @@ impl Themes {
     pub fn load_from(dirs: &[PathBuf]) -> Themes {
         let mut list: Vec<Arc<Theme>> = Vec::new();
         for dir in dirs {
-            let Ok(entries) = std::fs::read_dir(dir) else { continue };
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                continue;
+            };
             for entry in entries.flatten() {
                 let theme_dir = entry.path();
                 if !theme_dir.is_dir() {
@@ -253,13 +338,18 @@ impl Themes {
     /// Resolve an icon PNG for a theme: the theme's own file → the default
     /// theme's file → `None` (callers fall back to a unicode glyph).
     pub fn icon_path(&self, theme: &Theme, icon: Icon) -> Option<PathBuf> {
-        let own = theme.icons_dir.as_ref().map(|d| d.join(icon.file_name()))
+        let own = theme
+            .icons_dir
+            .as_ref()
+            .map(|d| d.join(icon.file_name()))
             .filter(|p| p.exists());
         own.or_else(|| {
             if theme.id == self.default().id {
                 return None;
             }
-            self.default().icons_dir.as_ref()
+            self.default()
+                .icons_dir
+                .as_ref()
                 .map(|d| d.join(icon.file_name()))
                 .filter(|p| p.exists())
         })
@@ -316,7 +406,11 @@ impl ThemeState {
             .cloned()
             .unwrap_or_else(|| themes.default().clone());
         let icons = load_icons(ctx, &themes, &current);
-        Self { current, themes, icons }
+        Self {
+            current,
+            themes,
+            icons,
+        }
     }
 
     /// The active theme — what `apply` maps onto egui `Visuals` each frame.
@@ -339,7 +433,9 @@ impl ThemeState {
     /// unknown id or a re-select of the current one — neither is worth a
     /// re-decode, and neither should dirty the config.
     pub fn set(&mut self, ctx: &egui::Context, id: &str) -> bool {
-        let Some(theme) = self.themes.get(id) else { return false };
+        let Some(theme) = self.themes.get(id) else {
+            return false;
+        };
         if theme.id == self.current.id {
             return false;
         }
@@ -457,9 +553,7 @@ pub fn icon_button(
     selected: bool,
 ) -> egui::Response {
     let button = match tex {
-        Some(h) => egui::Button::image(
-            egui::Image::new(h).fit_to_exact_size(Vec2::splat(size)),
-        ),
+        Some(h) => egui::Button::image(egui::Image::new(h).fit_to_exact_size(Vec2::splat(size))),
         None => egui::Button::new(icon.glyph()),
     };
     ui.add_enabled(enabled, button.selected(selected))
@@ -553,7 +647,9 @@ pub const SYSTEM_FONT_CANDIDATES: &[&str] = &[
 /// boxes. Called once at startup. Returns whether a font was installed.
 pub fn install_fallback_fonts(ctx: &egui::Context, candidates: &[&str]) -> bool {
     for path in candidates {
-        let Ok(bytes) = std::fs::read(Path::new(path)) else { continue };
+        let Ok(bytes) = std::fs::read(Path::new(path)) else {
+            continue;
+        };
         let magic = &bytes[..bytes.len().min(4)];
         if magic == [0, 1, 0, 0] || magic == b"OTTO" {
             let mut defs = egui::FontDefinitions::default();
@@ -579,10 +675,23 @@ pub fn install_fallback_fonts(ctx: &egui::Context, candidates: &[&str]) -> bool 
 /// track with a translucent `row_tint_alpha` accent overlay over the banded bg —
 /// which keeps text readable, unlike a gamma-multiplied fill that darkens past
 /// the bg — plus the 3px stripe.
-pub fn row(ui: &mut egui::Ui, i: usize, is_current: bool, row_h: f32, theme: &Theme) -> (egui::Rect, egui::Ui) {
+pub fn row(
+    ui: &mut egui::Ui,
+    i: usize,
+    is_current: bool,
+    row_h: f32,
+    theme: &Theme,
+) -> (egui::Rect, egui::Ui) {
     let p = theme.palette;
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h), egui::Sense::hover());
-    let bg = if i.is_multiple_of(2) { p.row_even } else { p.row_odd };
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), row_h),
+        egui::Sense::hover(),
+    );
+    let bg = if i.is_multiple_of(2) {
+        p.row_even
+    } else {
+        p.row_odd
+    };
     ui.painter().rect_filled(rect, 2.0, bg);
     if is_current {
         let alpha = theme.layout.with_defaults().row_tint_alpha;
@@ -601,7 +710,10 @@ pub fn row(ui: &mut egui::Ui, i: usize, is_current: bool, row_h: f32, theme: &Th
     }
     let mut child = ui.new_child(
         egui::UiBuilder::new()
-            .max_rect(egui::Rect::from_min_max(rect.min + egui::vec2(6.0, 0.0), rect.max))
+            .max_rect(egui::Rect::from_min_max(
+                rect.min + egui::vec2(6.0, 0.0),
+                rect.max,
+            ))
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
     child.spacing_mut().item_spacing.x = 4.0;

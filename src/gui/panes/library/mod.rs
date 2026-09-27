@@ -46,8 +46,13 @@ pub fn library_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui) 
     // browsers get it.
     if !network_mode {
         // First frame this session: list the saved/current dir, start the scan.
-        if !ui.ctx().memory_mut(|m| m.data.get_temp::<bool>(egui::Id::new(LIB_INIT)).unwrap_or(false)) {
-            ui.ctx().memory_mut(|m| m.data.insert_temp(egui::Id::new(LIB_INIT), true));
+        if !ui.ctx().memory_mut(|m| {
+            m.data
+                .get_temp::<bool>(egui::Id::new(LIB_INIT))
+                .unwrap_or(false)
+        }) {
+            ui.ctx()
+                .memory_mut(|m| m.data.insert_temp(egui::Id::new(LIB_INIT), true));
             app.navigate_to(app.library().dir().to_path_buf());
         }
         header::local_header(app, themes, ui, &theme);
@@ -60,9 +65,11 @@ pub fn library_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui) 
     // address is reusable without retyping. Read here and written back at the end
     // because the sidebar's "+" and the form's own Add/Cancel both move it, and
     // the value has to outlive the closure either way.
-    let mut form = ui
-        .ctx()
-        .memory_mut(|m| m.data.get_temp::<Option<String>>(egui::Id::new(NET_FORM)).unwrap_or(None));
+    let mut form = ui.ctx().memory_mut(|m| {
+        m.data
+            .get_temp::<Option<String>>(egui::Id::new(NET_FORM))
+            .unwrap_or(None)
+    });
 
     // Places + Favorites column, file browser column.
     ui.horizontal_top(|ui| {
@@ -80,5 +87,6 @@ pub fn library_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui) 
             None => listing::local_list_ui(app, themes, ui, &theme),
         });
     });
-    ui.ctx().memory_mut(|m| m.data.insert_temp(egui::Id::new(NET_FORM), form));
+    ui.ctx()
+        .memory_mut(|m| m.data.insert_temp(egui::Id::new(NET_FORM), form));
 }

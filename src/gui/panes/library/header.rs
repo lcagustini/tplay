@@ -37,7 +37,11 @@ pub enum Action {
     /// A server: re-list its shares.
     BrowseServer(String),
     /// A share, or a directory inside one.
-    BrowseOpen { uri: String, share: String, rel: String },
+    BrowseOpen {
+        uri: String,
+        share: String,
+        rel: String,
+    },
 }
 
 /// One breadcrumb segment.
@@ -92,7 +96,12 @@ pub fn plan(n: usize, always: usize) -> Vec<Step> {
 /// collapsing is `plan`'s, and the segments come from `local_segs` or
 /// `remote_segs`. The `…` is a plain label, so the segments it hides are not
 /// reachable from it.
-fn breadcrumb<'a>(ui: &mut egui::Ui, p: theme::Palette, segs: &'a [Seg], always: usize) -> Option<&'a Seg> {
+fn breadcrumb<'a>(
+    ui: &mut egui::Ui,
+    p: theme::Palette,
+    segs: &'a [Seg],
+    always: usize,
+) -> Option<&'a Seg> {
     let mut clicked = None;
     ui.horizontal(|ui| {
         for step in plan(segs.len(), always) {
@@ -106,7 +115,11 @@ fn breadcrumb<'a>(ui: &mut egui::Ui, p: theme::Palette, segs: &'a [Seg], always:
             let seg = &segs[i];
             if i + 1 == segs.len() {
                 // Where we are: shown in full, not clickable.
-                let label = ui.label(egui::RichText::new(&seg.label).strong().color(p.text_primary));
+                let label = ui.label(
+                    egui::RichText::new(&seg.label)
+                        .strong()
+                        .color(p.text_primary),
+                );
                 if let Some(h) = &seg.hover {
                     label.on_hover_text(h);
                 }
@@ -115,9 +128,13 @@ fn breadcrumb<'a>(ui: &mut egui::Ui, p: theme::Palette, segs: &'a [Seg], always:
             let w = (seg.label.chars().count() as f32 * SEG_CHAR_W + SEG_PAD_W).min(SEG_MAX_W);
             let resp = ui.add_sized(
                 egui::vec2(w, SEG_H),
-                egui::Label::new(egui::RichText::new(&seg.label).small().color(p.text_secondary))
-                    .truncate()
-                    .sense(egui::Sense::click()),
+                egui::Label::new(
+                    egui::RichText::new(&seg.label)
+                        .small()
+                        .color(p.text_secondary),
+                )
+                .truncate()
+                .sense(egui::Sense::click()),
             );
             let resp = match &seg.hover {
                 Some(h) => resp.on_hover_text(h.as_str()),
@@ -149,7 +166,12 @@ fn apply(app: &mut TPlayApp, seg: &Seg) {
 /// The local browser's header: every ancestor of the current folder, then the
 /// ★ that bookmarks it. The star is local-only, which is why it is here and not
 /// in `breadcrumb`.
-pub fn local_header(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui, theme: &theme::Theme) {
+pub fn local_header(
+    app: &mut TPlayApp,
+    themes: &ThemeState,
+    ui: &mut egui::Ui,
+    theme: &theme::Theme,
+) {
     let p = theme.palette;
     let dir = app.library().dir().to_path_buf();
     let segs = local_segs(&dir);
@@ -165,8 +187,10 @@ pub fn local_header(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui, 
         themes.icon(theme::Icon::StarOff).cloned()
     };
     let fav_btn = match tex {
-        Some(tex) => egui::Button::image(egui::Image::new(&tex).fit_to_exact_size(egui::vec2(14.0, 14.0)))
-            .selected(fav),
+        Some(tex) => {
+            egui::Button::image(egui::Image::new(&tex).fit_to_exact_size(egui::vec2(14.0, 14.0)))
+                .selected(fav)
+        }
         None => egui::Button::new(if fav { "★" } else { "☆" }).selected(fav),
     };
     if ui.add(fav_btn).on_hover_text("Favorite folder").clicked() {
@@ -175,7 +199,12 @@ pub fn local_header(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui, 
 }
 
 /// The remote browser's header: Local → host → share → each directory level.
-pub fn remote_header(app: &mut TPlayApp, ui: &mut egui::Ui, theme: &theme::Theme, browse: &network::NetworkBrowse) {
+pub fn remote_header(
+    app: &mut TPlayApp,
+    ui: &mut egui::Ui,
+    theme: &theme::Theme,
+    browse: &network::NetworkBrowse,
+) {
     let segs = remote_segs(browse);
     // 3 = Local / host / share, so a deep directory still has a way back to the
     // share root. The share-list stage is only 2 segments, under `always` and so
@@ -207,12 +236,21 @@ pub fn local_segs(dir: &Path) -> Vec<Seg> {
 }
 
 pub fn remote_segs(browse: &network::NetworkBrowse) -> Vec<Seg> {
-    let seg = |label: String, action: Action| Seg { label, action, hover: None };
+    let seg = |label: String, action: Action| Seg {
+        label,
+        action,
+        hover: None,
+    };
     // "Local" is the exit back to the folder browser; at the share-list stage it
     // is the only way out, so it is segment 0 and never collapsed away.
     let mut segs = vec![seg(String::from("Local"), Action::LeaveNetwork)];
-    segs.push(seg(browse.host.clone(), Action::BrowseServer(browse.host.clone())));
-    let Some(share) = &browse.share else { return segs };
+    segs.push(seg(
+        browse.host.clone(),
+        Action::BrowseServer(browse.host.clone()),
+    ));
+    let Some(share) = &browse.share else {
+        return segs;
+    };
     segs.push(seg(
         share.clone(),
         Action::BrowseOpen {

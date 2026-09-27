@@ -13,7 +13,9 @@ fn prev_id() -> egui::Id {
 
 pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &Palette) {
     let mut prev: [f32; VIZ_BANDS] = painter.ctx().memory_mut(|m| {
-        m.data.get_temp::<[f32; VIZ_BANDS]>(prev_id()).unwrap_or([-60.0; VIZ_BANDS])
+        m.data
+            .get_temp::<[f32; VIZ_BANDS]>(prev_id())
+            .unwrap_or([-60.0; VIZ_BANDS])
     });
 
     // Attack/release constants (per-frame, 60 FPS assumed)
@@ -22,7 +24,9 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &P
     compute_bands(viz, &mut prev, ATTACK, RELEASE);
 
     // Persist prev for next frame
-    painter.ctx().memory_mut(|m| m.data.insert_temp(prev_id(), prev));
+    painter
+        .ctx()
+        .memory_mut(|m| m.data.insert_temp(prev_id(), prev));
 
     let n = prev.len();
     let bar_w = (rect.width() / n as f32).max(1.0);

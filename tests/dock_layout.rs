@@ -7,9 +7,9 @@
 //! can't parse back. Sessions only save *after* painting, so every on-disk
 //! layout has finite rects; `lay_out` + `finite` replicate that state.
 
-use tplay::app::Pane;
 use eframe::egui::{pos2, vec2, Rect};
 use egui_dock::{DockState, NodeIndex, SurfaceIndex, TabIndex};
+use tplay::app::Pane;
 
 /// Mirror of `coordinator::default_tree` (NowPlaying above Playlist).
 fn two_pane_tree() -> DockState<Pane> {
@@ -52,7 +52,11 @@ fn round_trip(tree: &DockState<Pane>) -> DockState<Pane> {
         r#"{"min":{"x":0.0,"y":0.0},"max":{"x":0.0,"y":0.0}}"#,
     );
     let restored: DockState<Pane> = serde_json::from_str(&json).unwrap();
-    assert_eq!(serde_json::to_string(&restored).unwrap(), json, "JSON must be stable");
+    assert_eq!(
+        serde_json::to_string(&restored).unwrap(),
+        json,
+        "JSON must be stable"
+    );
     restored
 }
 
@@ -78,7 +82,12 @@ fn all_four_panes_survive_serialization() {
     let restored = round_trip(&tree);
     let tabs = tabs_of(&restored);
     assert_eq!(tabs.len(), 4);
-    for p in [Pane::NowPlaying, Pane::Playlist, Pane::Equalizer, Pane::Library] {
+    for p in [
+        Pane::NowPlaying,
+        Pane::Playlist,
+        Pane::Equalizer,
+        Pane::Library,
+    ] {
         assert!(tabs.contains(&p), "pane {p:?} lost in round trip");
     }
 }
@@ -97,8 +106,14 @@ fn removed_pane_is_gone_and_stays_gone() {
     lay_out(&mut tree);
 
     let restored = round_trip(&tree);
-    assert_eq!(restored.iter_all_tabs().count(), 1, "removed pane must not resurrect");
-    assert!(restored.iter_all_tabs().all(|(_, t)| *t == Pane::NowPlaying));
+    assert_eq!(
+        restored.iter_all_tabs().count(),
+        1,
+        "removed pane must not resurrect"
+    );
+    assert!(restored
+        .iter_all_tabs()
+        .all(|(_, t)| *t == Pane::NowPlaying));
 }
 
 #[test]
@@ -115,8 +130,15 @@ fn floating_window_round_trips() {
         .find(|(_, t)| **t == Pane::Equalizer)
         .map(|((s, n), _)| (s, n))
         .unwrap();
-    assert_eq!(restored.iter_all_tabs().count(), 3, "2 docked panes + 1 floating pane");
-    assert!(!surface.is_main(), "floating pane must not live on the main surface");
+    assert_eq!(
+        restored.iter_all_tabs().count(),
+        3,
+        "2 docked panes + 1 floating pane"
+    );
+    assert!(
+        !surface.is_main(),
+        "floating pane must not live on the main surface"
+    );
     // Re-addressing the floating surface keeps its tab list.
     let surface_tabs: Vec<Pane> = restored[surface]
         .iter()
@@ -141,7 +163,10 @@ fn floating_window_size_hint_round_trips() {
 
     // set_size is what the coordinator applies to the EQ window's width; it
     // must serialize alongside the layout without breaking the round trip.
-    restored.get_window_state_mut(surface).unwrap().set_size(vec2(240.0, 180.0));
+    restored
+        .get_window_state_mut(surface)
+        .unwrap()
+        .set_size(vec2(240.0, 180.0));
     let json = serde_json::to_string(&restored).unwrap();
     let again: DockState<Pane> = serde_json::from_str(&json).unwrap();
     assert_eq!(again.iter_all_tabs().count(), 3);

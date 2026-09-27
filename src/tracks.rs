@@ -72,7 +72,9 @@ pub fn info(track: &Path) -> Option<TrackInfo> {
 
 /// `info` against an injected spool dir.
 pub fn info_in(track: &Path, dir: &Path) -> Option<TrackInfo> {
-    local_file_in(track, dir).as_deref().and_then(library::read_info)
+    local_file_in(track, dir)
+        .as_deref()
+        .and_then(library::read_info)
 }
 
 /// `track`'s duration, probed from its file. `None` if it has no bytes on hand
@@ -83,7 +85,9 @@ pub fn probe(track: &Path) -> Option<Duration> {
 
 /// `probe` against an injected spool dir.
 pub fn probe_in(track: &Path, dir: &Path) -> Option<Duration> {
-    local_file_in(track, dir).as_deref().and_then(audio::probe_duration)
+    local_file_in(track, dir)
+        .as_deref()
+        .and_then(audio::probe_duration)
 }
 
 /// `track`'s embedded album art, read from its file. `None` if it has no bytes
@@ -94,7 +98,9 @@ pub fn cover(track: &Path) -> Option<Vec<u8>> {
 
 /// `cover` against an injected spool dir.
 pub fn cover_in(track: &Path, dir: &Path) -> Option<Vec<u8>> {
-    local_file_in(track, dir).as_deref().and_then(library::read_cover)
+    local_file_in(track, dir)
+        .as_deref()
+        .and_then(library::read_cover)
 }
 
 /// Can `track`'s bytes be opened synchronously — the pre-buffer question.

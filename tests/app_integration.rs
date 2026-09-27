@@ -6,21 +6,39 @@
 //! pinned here instead. (It no longer needs an eframe `CreationContext` — the
 //! app holds no `egui::Context` — but the device is still the blocker.)
 
+use std::time::Duration;
 use tplay::app::{Pane, TPlayApp, VizView};
 use tplay::audio::eq::EQ_PRESETS;
-use std::time::Duration;
 
 #[test]
 fn fmt_duration_formats_mm_ss() {
     assert_eq!(TPlayApp::fmt_duration(None), "--:--");
     assert_eq!(TPlayApp::fmt_duration(Some(Duration::ZERO)), "00:00");
-    assert_eq!(TPlayApp::fmt_duration(Some(Duration::from_secs(1))), "00:01");
-    assert_eq!(TPlayApp::fmt_duration(Some(Duration::from_secs(59))), "00:59");
-    assert_eq!(TPlayApp::fmt_duration(Some(Duration::from_secs(60))), "01:00");
-    assert_eq!(TPlayApp::fmt_duration(Some(Duration::from_secs(65))), "01:05");
-    assert_eq!(TPlayApp::fmt_duration(Some(Duration::from_secs(600))), "10:00");
+    assert_eq!(
+        TPlayApp::fmt_duration(Some(Duration::from_secs(1))),
+        "00:01"
+    );
+    assert_eq!(
+        TPlayApp::fmt_duration(Some(Duration::from_secs(59))),
+        "00:59"
+    );
+    assert_eq!(
+        TPlayApp::fmt_duration(Some(Duration::from_secs(60))),
+        "01:00"
+    );
+    assert_eq!(
+        TPlayApp::fmt_duration(Some(Duration::from_secs(65))),
+        "01:05"
+    );
+    assert_eq!(
+        TPlayApp::fmt_duration(Some(Duration::from_secs(600))),
+        "10:00"
+    );
     // Minutes are not rolled into hours: 61:01 for 3661 s is intentional.
-    assert_eq!(TPlayApp::fmt_duration(Some(Duration::from_secs(3661))), "61:01");
+    assert_eq!(
+        TPlayApp::fmt_duration(Some(Duration::from_secs(3661))),
+        "61:01"
+    );
 }
 
 #[test]
@@ -37,7 +55,14 @@ fn pane_all_is_stable() {
     assert_eq!(Pane::ALL.len(), 6);
     assert_eq!(
         Pane::ALL,
-        [Pane::NowPlaying, Pane::Playlist, Pane::Equalizer, Pane::Library, Pane::Visualizer, Pane::AlbumCover]
+        [
+            Pane::NowPlaying,
+            Pane::Playlist,
+            Pane::Equalizer,
+            Pane::Library,
+            Pane::Visualizer,
+            Pane::AlbumCover
+        ]
     );
 }
 
@@ -51,7 +76,11 @@ fn viz_view_registry_is_stable_and_uniquely_named() {
     let mut names: Vec<&str> = VizView::ALL.iter().map(|v| v.name()).collect();
     names.sort_unstable();
     names.dedup();
-    assert_eq!(names.len(), VizView::ALL.len(), "view names must be unique (the selector keys off them)");
+    assert_eq!(
+        names.len(),
+        VizView::ALL.len(),
+        "view names must be unique (the selector keys off them)"
+    );
 }
 
 #[test]

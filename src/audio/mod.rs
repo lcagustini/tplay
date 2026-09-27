@@ -23,10 +23,15 @@ pub fn probe_duration(path: &Path) -> Option<Duration> {
         hint.with_extension(ext);
     }
     let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
         .ok()?;
     let track = probed.format.default_track()?;
-    let tb       = track.codec_params.time_base?;
+    let tb = track.codec_params.time_base?;
     let n_frames = track.codec_params.n_frames?;
     let t = tb.calc_time(n_frames);
     Some(Duration::from_secs_f64(t.seconds as f64 + t.frac))

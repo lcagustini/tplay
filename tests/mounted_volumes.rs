@@ -70,7 +70,12 @@ fn parse_real_mount_table_uses_disk_labels() {
     // Boot/ESP partition (/efi) is excluded — not a user volume.
     assert!(!labels.contains(&"efi".to_string()));
     // No pseudo-fs entries
-    assert!(!labels.iter().any(|l| l == "dev" || l == "sys" || l == "proc" || l == "run" || l == "tmp" || l == "shm"));
+    assert!(!labels.iter().any(|l| l == "dev"
+        || l == "sys"
+        || l == "proc"
+        || l == "run"
+        || l == "tmp"
+        || l == "shm"));
     // No GVFS/fuse entries
     assert!(!labels.iter().any(|l| l == "gvfs" || l == "doc"));
 }
@@ -82,7 +87,9 @@ fn parse_synthetic_mount_table_excludes_network() {
     // Local block devices only, mountpoint leaf as label (no disk labels injected).
     assert!(labels.contains(&"data".to_string()));
     assert!(labels.contains(&"backup".to_string()));
-    assert!(labels.iter().any(|l| l == "nvme0n1p2" || l.starts_with("nvme0n1p")));
+    assert!(labels
+        .iter()
+        .any(|l| l == "nvme0n1p2" || l.starts_with("nvme0n1p")));
     // Network mounts excluded
     assert!(!labels.contains(&"nfs".to_string()));
     assert!(!labels.contains(&"smb".to_string()));
@@ -104,7 +111,9 @@ fn boot_partitions_are_excluded() {
     let vols = Volume::parse_mounts_with_labels(fixture, &HashMap::new());
     let labels: Vec<String> = vols.iter().map(|v| v.label.clone()).collect();
     // Root + the data mount survive.
-    assert!(labels.iter().any(|l| l == "nvme0n1p2" || l.starts_with("nvme0n1p")));
+    assert!(labels
+        .iter()
+        .any(|l| l == "nvme0n1p2" || l.starts_with("nvme0n1p")));
     assert!(labels.contains(&"music".to_string()));
     // All three boot/ESP mountpoints are excluded.
     assert!(!labels.contains(&"efi".to_string()));
@@ -127,7 +136,10 @@ fn volume_path_is_mountpoint() {
     for v in vols {
         // For /mnt/* paths, label equals the mountpoint leaf (no disk labels)
         if v.path.starts_with("/mnt/") {
-            assert_eq!(v.path, std::path::PathBuf::from(format!("/mnt/{}", v.label)));
+            assert_eq!(
+                v.path,
+                std::path::PathBuf::from(format!("/mnt/{}", v.label))
+            );
         } else {
             // Root "/" gets device basename as label but path is "/"
             assert_eq!(v.path, std::path::PathBuf::from("/"));

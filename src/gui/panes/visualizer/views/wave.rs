@@ -28,10 +28,7 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &P
         let x = rect.left() + i as f32 * bar_w;
         let y = w * amp;
         painter.rect_filled(
-            egui::Rect::from_min_max(
-                egui::pos2(x, mid_y - y),
-                egui::pos2(x + bar_w, mid_y + y),
-            ),
+            egui::Rect::from_min_max(egui::pos2(x, mid_y - y), egui::pos2(x + bar_w, mid_y + y)),
             0.0,
             fill_color,
         );
@@ -46,7 +43,13 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &P
         let x1 = x0 + bar_w;
         let y0 = pair[0] * amp;
         let y1 = pair[1] * amp;
-        painter.line_segment([egui::pos2(x0, mid_y - y0), egui::pos2(x1, mid_y - y1)], stroke);
-        painter.line_segment([egui::pos2(x0, mid_y + y0), egui::pos2(x1, mid_y + y1)], stroke);
+        painter.line_segment(
+            [egui::pos2(x0, mid_y - y0), egui::pos2(x1, mid_y - y1)],
+            stroke,
+        );
+        painter.line_segment(
+            [egui::pos2(x0, mid_y + y0), egui::pos2(x1, mid_y + y1)],
+            stroke,
+        );
     }
 }

@@ -1,6 +1,6 @@
 //! Coordinator — wires the panes together in one frame using egui_dock.
 
-use crate::app::{TPlayApp, Pane};
+use crate::app::{Pane, TPlayApp};
 use crate::config::MAX_CROSSFADE_SECS;
 use crate::gui::dialogs;
 use crate::gui::panes;
@@ -41,7 +41,9 @@ fn apply_min_pane_sizes(
             continue;
         }
         let main = tree.main_surface_mut();
-        let Some(leaf) = main.find_tab(&pane).map(|(node, _)| node) else { continue };
+        let Some(leaf) = main.find_tab(&pane).map(|(node, _)| node) else {
+            continue;
+        };
         for (i, node) in main.iter_mut().enumerate() {
             let parent = NodeIndex(i);
             let (vertical, fraction, rect) = match node {
@@ -49,9 +51,19 @@ fn apply_min_pane_sizes(
                 Node::Horizontal { fraction, rect, .. } => (false, fraction, rect),
                 _ => continue,
             };
-            let dim = if vertical { rect.height() } else { rect.width() };
-            if dim <= 0.0 { continue; }
-            let leaf_min = if vertical { min_h + border_v } else { min_w + border_h };
+            let dim = if vertical {
+                rect.height()
+            } else {
+                rect.width()
+            };
+            if dim <= 0.0 {
+                continue;
+            }
+            let leaf_min = if vertical {
+                min_h + border_v
+            } else {
+                min_w + border_h
+            };
             let min_frac = (leaf_min / dim).clamp(0.05, 0.95);
             let (c0, c1) = (parent.left(), parent.right());
             let old = *fraction;
@@ -71,7 +83,8 @@ fn default_tree() -> DockState<Pane> {
     let mut d = DockState::new(vec![Pane::NowPlaying]);
     // 0.15 ≈ Now Playing's content height on a default-size window. All panes are
     // Fill, so this is just the starting split — resizable from there.
-    d.main_surface_mut().split_below(NodeIndex::root(), 0.15, vec![Pane::Playlist]);
+    d.main_surface_mut()
+        .split_below(NodeIndex::root(), 0.15, vec![Pane::Playlist]);
     d
 }
 
@@ -106,7 +119,10 @@ fn add_pane(tree: &mut DockState<Pane>, pane: Pane) {
 
 /// Remove a pane from the dock tree (wherever it lives — main or floating).
 fn remove_pane(tree: &mut DockState<Pane>, pane: Pane) {
-    let target = tree.iter_all_tabs().find(|(_, t)| **t == pane).map(|((s, n), _)| (s, n));
+    let target = tree
+        .iter_all_tabs()
+        .find(|(_, t)| **t == pane)
+        .map(|((s, n), _)| (s, n));
     if let Some((surface, node)) = target {
         tree.remove_tab((surface, node, TabIndex(0)));
     }
@@ -177,7 +193,9 @@ pub(crate) fn save_layout(tree: &DockState<Pane>, path: &std::path::Path) {
 /// Load a DockState from a JSON file. Returns None if the file is missing,
 /// unreadable, or contains invalid JSON.
 fn load_layout(path: &std::path::Path) -> Option<DockState<Pane>> {
-    std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok())
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
 }
 
 /// List all *.json files in the layouts dir, sorted by file name.
@@ -207,9 +225,11 @@ pub fn update_ui(app: &mut TPlayApp, themes: &mut ThemeState, ctx: &egui::Contex
     // Load DockState from egui memory (per-session) or disk (first run). The
     // tree is the single source of truth: which panes are open, their splits and
     // their order live here and persist via dock_layout.json.
-    let mut tree = ctx.data_mut(|d| d.get_temp::<DockState<Pane>>(egui::Id::new(DOCK_ID)))
+    let mut tree = ctx
+        .data_mut(|d| d.get_temp::<DockState<Pane>>(egui::Id::new(DOCK_ID)))
         .or_else(|| {
-            layout_path().and_then(|p| std::fs::read_to_string(p).ok())
+            layout_path()
+                .and_then(|p| std::fs::read_to_string(p).ok())
                 .and_then(|s| {
                     // Seed the on-disk JSON string so we only write when it changes.
                     ctx.data_mut(|d| d.insert_temp(egui::Id::new(DOCK_SAVED_JSON), s.clone()));
@@ -247,8 +267,12 @@ pub fn update_ui(app: &mut TPlayApp, themes: &mut ThemeState, ctx: &egui::Contex
 
             // Precompute layouts dir and tracked layout once per frame for the menu.
             let layouts_dir = layouts_dir();
-            let layout_files = layouts_dir.as_ref().map(|d| list_layouts(d.as_ref())).unwrap_or_default();
-            let tracked_layout = ctx.data(|d| d.get_temp::<String>(egui::Id::new(NAMED_LAYOUT_FILE)));
+            let layout_files = layouts_dir
+                .as_ref()
+                .map(|d| list_layouts(d.as_ref()))
+                .unwrap_or_default();
+            let tracked_layout =
+                ctx.data(|d| d.get_temp::<String>(egui::Id::new(NAMED_LAYOUT_FILE)));
 
             let menu_contents = |ui: &mut egui::Ui| {
                 ui.label("Theme");
@@ -267,7 +291,10 @@ pub fn update_ui(app: &mut TPlayApp, themes: &mut ThemeState, ctx: &egui::Contex
                 ui.separator();
                 ui.label("Library");
                 let mut show_hidden = app.library().show_hidden();
-                if ui.checkbox(&mut show_hidden, "Show hidden folders").changed() {
+                if ui
+                    .checkbox(&mut show_hidden, "Show hidden folders")
+                    .changed()
+                {
                     app.set_show_hidden(show_hidden);
                 }
                 // Crossfade section
@@ -275,23 +302,32 @@ pub fn update_ui(app: &mut TPlayApp, themes: &mut ThemeState, ctx: &egui::Contex
                 ui.label("Crossfade");
                 // Crossfade duration always visible and editable (constant menu height).
                 let mut cf_secs = app.prefs().crossfade_secs();
-                if ui.add(
-                    egui::Slider::new(&mut cf_secs, 0.0..=MAX_CROSSFADE_SECS)
-                        .suffix("s")
-                        .trailing_fill(true),
-                )
-                .changed() {
+                if ui
+                    .add(
+                        egui::Slider::new(&mut cf_secs, 0.0..=MAX_CROSSFADE_SECS)
+                            .suffix("s")
+                            .trailing_fill(true),
+                    )
+                    .changed()
+                {
                     app.prefs_mut().set_crossfade_secs(cf_secs);
                 }
                 // Layouts section — panes + saved layouts + save/load
                 ui.separator();
                 ui.label("Layouts");
                 // Pane visibility checkboxes
-                let open_count = Pane::ALL.iter().filter(|p| pane_is_open(&tree, **p)).count();
+                let open_count = Pane::ALL
+                    .iter()
+                    .filter(|p| pane_is_open(&tree, **p))
+                    .count();
                 for pane in Pane::ALL {
                     let mut open = pane_is_open(&tree, pane);
                     let last_one = open && open_count == 1;
-                    if ui.add_enabled(!last_one, egui::Checkbox::new(&mut open, pane_title(pane).text()))
+                    if ui
+                        .add_enabled(
+                            !last_one,
+                            egui::Checkbox::new(&mut open, pane_title(pane).text()),
+                        )
                         .changed()
                     {
                         if open {
@@ -304,19 +340,34 @@ pub fn update_ui(app: &mut TPlayApp, themes: &mut ThemeState, ctx: &egui::Contex
                 ui.separator();
                 // Saved layouts from the layouts/ directory
                 for path in &layout_files {
-                    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("layout");
+                    let stem = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("layout");
                     ui.horizontal(|ui| {
                         if ui.selectable_label(false, stem).clicked() {
                             if let Some(loaded) = load_layout(path) {
                                 tree = loaded;
-                                ctx.data_mut(|d| d.insert_temp(egui::Id::new(NAMED_LAYOUT_FILE), path.to_string_lossy().into_owned()));
+                                ctx.data_mut(|d| {
+                                    d.insert_temp(
+                                        egui::Id::new(NAMED_LAYOUT_FILE),
+                                        path.to_string_lossy().into_owned(),
+                                    )
+                                });
                                 ui.close_menu();
                             }
                         }
                         // Delete button (✕) — uses the same remove icon as window close
-                        if theme::icon_button(ui, win_close_tex.as_ref(), theme::Icon::Remove, 13.0, true, false)
-                            .on_hover_text(format!("Delete saved layout \"{stem}\""))
-                            .clicked()
+                        if theme::icon_button(
+                            ui,
+                            win_close_tex.as_ref(),
+                            theme::Icon::Remove,
+                            13.0,
+                            true,
+                            false,
+                        )
+                        .on_hover_text(format!("Delete saved layout \"{stem}\""))
+                        .clicked()
                         {
                             dialogs::ask(
                                 ctx,
@@ -337,7 +388,11 @@ pub fn update_ui(app: &mut TPlayApp, themes: &mut ThemeState, ctx: &egui::Contex
                     .filter(|s| !s.is_empty())
                     .map(|p| format!("Overwrite layout: {}", p))
                     .unwrap_or_else(|| "Save the current dock layout".into());
-                if ui.button("Save current layout…").on_hover_text(save_hover).clicked() {
+                if ui
+                    .button("Save current layout…")
+                    .on_hover_text(save_hover)
+                    .clicked()
+                {
                     if let Some(dir) = &layouts_dir {
                         dialogs::ask_save_name(
                             ctx,
@@ -369,30 +424,49 @@ pub fn update_ui(app: &mut TPlayApp, themes: &mut ThemeState, ctx: &egui::Contex
                 // (Close) lands rightmost, so left-to-right the order is minimize,
                 // maximize/restore, close. Icons are per-theme PNGs
                 // (text_primary chrome, ✕ close art).
-                let maximized = ui
-                    .ctx()
-                    .input(|i| i.viewport().maximized)
-                    .unwrap_or(false);
-                ui.with_layout(
-                    egui::Layout::right_to_left(egui::Align::Center),
-                    |ui| {
-                        let close = theme::icon_button(ui, win_close_tex.as_ref(), theme::Icon::Remove, 13.0, true, false)
-                            .on_hover_text("Close");
-                        if close.clicked() {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                        let maximize = theme::icon_button(ui, win_max_tex.as_ref(), theme::Icon::Maximize, 13.0, true, false)
-                            .on_hover_text(if maximized { "Restore" } else { "Maximize" });
-                        if maximize.clicked() {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
-                        }
-                        let minimize = theme::icon_button(ui, win_min_tex.as_ref(), theme::Icon::Minimize, 13.0, true, false)
-                            .on_hover_text("Minimize");
-                        if minimize.clicked() {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-                        }
-                    },
-                );
+                let maximized = ui.ctx().input(|i| i.viewport().maximized).unwrap_or(false);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let close = theme::icon_button(
+                        ui,
+                        win_close_tex.as_ref(),
+                        theme::Icon::Remove,
+                        13.0,
+                        true,
+                        false,
+                    )
+                    .on_hover_text("Close");
+                    if close.clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    let maximize = theme::icon_button(
+                        ui,
+                        win_max_tex.as_ref(),
+                        theme::Icon::Maximize,
+                        13.0,
+                        true,
+                        false,
+                    )
+                    .on_hover_text(if maximized {
+                        "Restore"
+                    } else {
+                        "Maximize"
+                    });
+                    if maximize.clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+                    }
+                    let minimize = theme::icon_button(
+                        ui,
+                        win_min_tex.as_ref(),
+                        theme::Icon::Minimize,
+                        13.0,
+                        true,
+                        false,
+                    )
+                    .on_hover_text("Minimize");
+                    if minimize.clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                    }
+                });
             });
         });
 
@@ -404,10 +478,12 @@ pub fn update_ui(app: &mut TPlayApp, themes: &mut ThemeState, ctx: &egui::Contex
     let border_v = style.tab_bar.height
         + style.tab.tab_body.inner_margin.top
         + style.tab.tab_body.inner_margin.bottom;
-    let border_h = style.tab.tab_body.inner_margin.left
-        + style.tab.tab_body.inner_margin.right;
+    let border_h = style.tab.tab_body.inner_margin.left + style.tab.tab_body.inner_margin.right;
 
-    let mut viewer = PaneViewer { app, themes: &*themes };
+    let mut viewer = PaneViewer {
+        app,
+        themes: &*themes,
+    };
     DockArea::new(&mut tree)
         .show_add_buttons(false)
         .show_add_popup(false)
@@ -421,9 +497,14 @@ pub fn update_ui(app: &mut TPlayApp, themes: &mut ThemeState, ctx: &egui::Contex
     // window resize happen inside `show()` and ignore the pre-show pass.
     let mut corrected = apply_min_pane_sizes(&mut tree, ctx, border_v, border_h);
     // EQ pane minimum width: 10 bands at their minimum width.
-    let eq_min_w = ctx.data(|d| d.get_temp::<f32>(egui::Id::new(PANE_CONTENT_W).with(Pane::Equalizer))).unwrap_or(0.0);
+    let eq_min_w = ctx
+        .data(|d| d.get_temp::<f32>(egui::Id::new(PANE_CONTENT_W).with(Pane::Equalizer)))
+        .unwrap_or(0.0);
     if eq_min_w > 0.0 {
-        let eq_surface = tree.iter_all_tabs().find(|(_, t)| **t == Pane::Equalizer).map(|((s, _), _)| s);
+        let eq_surface = tree
+            .iter_all_tabs()
+            .find(|(_, t)| **t == Pane::Equalizer)
+            .map(|((s, _), _)| s);
         if let Some(surface) = eq_surface {
             if let Some(ws) = tree.get_window_state_mut(surface) {
                 let cur = ws.rect();
@@ -435,7 +516,9 @@ pub fn update_ui(app: &mut TPlayApp, themes: &mut ThemeState, ctx: &egui::Contex
             }
         }
     }
-    if corrected { ctx.request_repaint(); }
+    if corrected {
+        ctx.request_repaint();
+    }
 
     // Modals last: a dialog is armed by a click anywhere in the frame (a pane,
     // this menu) and drawn + carried out here, above everything.
@@ -446,7 +529,9 @@ pub fn update_ui(app: &mut TPlayApp, themes: &mut ThemeState, ctx: &egui::Contex
     ctx.data_mut(|d| d.insert_temp(egui::Id::new(DOCK_ID), tree.clone()));
     if let Some(path) = layout_path() {
         let json = serde_json::to_string(&tree).unwrap_or_default();
-        let saved = ctx.data(|d| d.get_temp::<String>(egui::Id::new(DOCK_SAVED_JSON))).unwrap_or_default();
+        let saved = ctx
+            .data(|d| d.get_temp::<String>(egui::Id::new(DOCK_SAVED_JSON)))
+            .unwrap_or_default();
         let closing = ctx.input(|i| i.viewport().close_requested());
         if json != saved || closing {
             save_layout(&tree, &path);

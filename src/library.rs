@@ -19,14 +19,35 @@ const AUDIO_EXTENSIONS: [&str; 5] = ["mp3", "wav", "ogg", "flac", "m4a"];
 /// the classic album-folder convention, `cover.jpg` common from Linux rippers;
 /// PNG variants too. Checked in the track's own dir.
 const COVER_FILES: [&str; 6] = [
-    "folder.jpg", "Folder.jpg", "cover.jpg", "Cover.jpg", "folder.png", "cover.png",
+    "folder.jpg",
+    "Folder.jpg",
+    "cover.jpg",
+    "Cover.jpg",
+    "folder.png",
+    "cover.png",
 ];
 
 /// Pseudo/device-tree filesystems to exclude from Volumes.
 const PSEUDO_FSTYPES: &[&str] = &[
-    "devtmpfs", "devpts", "sysfs", "proc", "tmpfs", "cgroup2", "configfs", "debugfs",
-    "tracefs", "bpf", "mqueue", "hugetlbfs", "efivarfs", "securityfs", "pstore",
-    "autofs", "rpc_pipefs", "nfsd", "fusectl",
+    "devtmpfs",
+    "devpts",
+    "sysfs",
+    "proc",
+    "tmpfs",
+    "cgroup2",
+    "configfs",
+    "debugfs",
+    "tracefs",
+    "bpf",
+    "mqueue",
+    "hugetlbfs",
+    "efivarfs",
+    "securityfs",
+    "pstore",
+    "autofs",
+    "rpc_pipefs",
+    "nfsd",
+    "fusectl",
 ];
 
 /// Boot/ESP mountpoints to exclude — system partitions, not user volumes.
@@ -64,7 +85,10 @@ impl Volume {
     }
 
     /// Pure core of `parse_mounts` — label map injected, so tests are hermetic.
-    pub fn parse_mounts_with_labels(mounts: &str, disk_labels: &std::collections::HashMap<String, String>) -> Vec<Volume> {
+    pub fn parse_mounts_with_labels(
+        mounts: &str,
+        disk_labels: &std::collections::HashMap<String, String>,
+    ) -> Vec<Volume> {
         let mut vols = Vec::new();
         for line in mounts.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
@@ -91,16 +115,13 @@ impl Volume {
                 .file_name()
                 .and_then(|s| s.to_str())
                 .unwrap_or(device);
-            let label = disk_labels
-                .get(dev_name)
-                .cloned()
-                .unwrap_or_else(|| {
-                    path.file_name()
-                        .and_then(|s| s.to_str())
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| dev_name.to_string())
-                });
+            let label = disk_labels.get(dev_name).cloned().unwrap_or_else(|| {
+                path.file_name()
+                    .and_then(|s| s.to_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| dev_name.to_string())
+            });
 
             vols.push(Volume { label, path });
         }
@@ -126,7 +147,9 @@ pub fn is_audio(path: &Path) -> bool {
 }
 
 pub fn is_playlist(path: &Path) -> bool {
-    path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("tplay"))
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("tplay"))
 }
 
 /// Fallback filename for a playlist save when the tracked file has no usable
@@ -174,14 +197,19 @@ pub fn playlist_file_name(typed: &str) -> Option<String> {
 
 /// Playlist file format (shared for read/write).
 #[derive(Serialize, Deserialize)]
-struct PlaylistData { paths: Vec<String> }
+struct PlaylistData {
+    paths: Vec<String>,
+}
 
 /// Serialize tracks as `.tplay` JSON. The pure half, shared by the local
 /// writer and the SMB save (which ships the bytes to the worker instead of
 /// writing a local file).
 pub fn playlist_json(tracks: &[PathBuf]) -> std::io::Result<String> {
     let data = PlaylistData {
-        paths: tracks.iter().filter_map(|p| p.to_str().map(str::to_owned)).collect(),
+        paths: tracks
+            .iter()
+            .filter_map(|p| p.to_str().map(str::to_owned))
+            .collect(),
     };
     Ok(serde_json::to_string_pretty(&data)?)
 }
@@ -251,8 +279,12 @@ pub struct Entry {
 }
 
 impl Entry {
-    pub fn path(&self) -> &Path { &self.path }
-    pub fn is_dir(&self) -> bool { self.is_dir }
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+    pub fn is_dir(&self) -> bool {
+        self.is_dir
+    }
 }
 
 /// Read tags + duration for one file. `None` only when the file isn't a
@@ -260,7 +292,11 @@ impl Entry {
 pub fn read_info(path: &Path) -> Option<TrackInfo> {
     let tagged = lofty::read_from_path(path).ok()?;
     let tag = tagged.primary_tag().or_else(|| tagged.first_tag());
-    let get = |k: ItemKey| tag.and_then(|t| t.get_string(k)).map(str::to_owned).unwrap_or_default();
+    let get = |k: ItemKey| {
+        tag.and_then(|t| t.get_string(k))
+            .map(str::to_owned)
+            .unwrap_or_default()
+    };
     let get_opt = |k: ItemKey| tag.and_then(|t| t.get_string(k)).map(str::to_owned);
     let mut info = TrackInfo {
         title: get(ItemKey::TrackTitle),
@@ -269,7 +305,11 @@ pub fn read_info(path: &Path) -> Option<TrackInfo> {
         track_no: get_opt(ItemKey::TrackNumber),
         duration: {
             let d = tagged.properties().duration();
-            if d.is_zero() { None } else { Some(d) }
+            if d.is_zero() {
+                None
+            } else {
+                Some(d)
+            }
         },
     };
     // lofty reports Duration::ZERO for streams with unknown length (mainly MP3).
@@ -353,12 +393,7 @@ pub const SORT_OPTIONS: [&str; 4] = ["Title", "Artist", "Album", "Duration"];
 /// Descending is a `reverse()` after an ascending sort rather than a reversed
 /// comparator, so equal keys keep their relative order instead of flipping on
 /// every toggle.
-pub fn sort_entries(
-    entries: &mut [Entry],
-    cache: &TagCache,
-    col: usize,
-    asc: bool,
-) {
+pub fn sort_entries(entries: &mut [Entry], cache: &TagCache, col: usize, asc: bool) {
     entries.sort_by_cached_key(|e| sort_key(e, cache.get(e.path()), col));
     if !asc {
         entries.reverse();
@@ -368,7 +403,12 @@ pub fn sort_entries(
 /// Tagged title, falling back to the file stem — matches what rows display.
 pub fn title_or_stem(path: &Path, info: Option<&TrackInfo>) -> String {
     info.and_then(|i| (!i.title.is_empty()).then_some(i.title.clone()))
-        .unwrap_or_else(|| path.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string())
+        .unwrap_or_else(|| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default()
+                .to_string()
+        })
 }
 
 /// Sort key for a library entry and column. Returns a string that sorts correctly:
@@ -381,14 +421,24 @@ pub fn sort_key(e: &Entry, info: Option<&TrackInfo>, col: usize) -> String {
         0 => {
             // Title: a folder's name, or a file's tagged title / stem.
             if e.is_dir {
-                e.path.file_name().and_then(|s| s.to_str()).unwrap_or_default().to_string()
+                e.path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default()
+                    .to_string()
             } else {
                 title_or_stem(e.path(), info).to_string()
             }
         }
         1 => {
             // Artist
-            if e.is_dir { String::new() } else { info.map(|i| i.artist.as_str()).unwrap_or_default().to_string() }
+            if e.is_dir {
+                String::new()
+            } else {
+                info.map(|i| i.artist.as_str())
+                    .unwrap_or_default()
+                    .to_string()
+            }
         }
         2 => {
             // Album, then track number within it. Unnumbered tracks fall back to
@@ -396,12 +446,17 @@ pub fn sort_key(e: &Entry, info: Option<&TrackInfo>, col: usize) -> String {
             // ('0' < '1'). A "3/12" multi-disc number does not parse and takes
             // that same fallback — the album still groups, the order does not.
             // ponytail: parse the leading digits if multi-disc ordering matters.
-            if e.is_dir { String::new() } else {
+            if e.is_dir {
+                String::new()
+            } else {
                 let album = info.map(|i| i.album.as_str()).unwrap_or_default();
                 // The same \x7f sink as the empty case below, so an untagged
                 // file ties with a folder instead of sorting above every album.
                 let head = if album.is_empty() { "\x7f" } else { album };
-                let track = match info.and_then(|i| i.track_no.as_deref()).and_then(|n| n.trim().parse::<u32>().ok()) {
+                let track = match info
+                    .and_then(|i| i.track_no.as_deref())
+                    .and_then(|n| n.trim().parse::<u32>().ok())
+                {
                     Some(n) => format!("{n:06}"),
                     None => title_or_stem(e.path(), info),
                 };
@@ -418,10 +473,19 @@ pub fn sort_key(e: &Entry, info: Option<&TrackInfo>, col: usize) -> String {
                 "~".to_string()
             }
         }
-        _ => e.path.file_name().and_then(|s| s.to_str()).unwrap_or_default().to_string(),
+        _ => e
+            .path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string(),
     };
     // \x7f (DEL) prefixes an empty string so it sorts after normal content
-    if s.is_empty() { format!("\x7f{}", s) } else { s.to_lowercase() }
+    if s.is_empty() {
+        format!("\x7f{}", s)
+    } else {
+        s.to_lowercase()
+    }
 }
 
 /// Home + XDG user dirs, shown above Favorites. Missing dirs skipped, dupes
@@ -472,16 +536,37 @@ pub struct LibraryState {
 
 impl LibraryState {
     pub fn new(dir: PathBuf, favorites: Vec<PathBuf>, show_hidden: bool) -> Self {
-        Self { dir, entries: Vec::new(), sort: 0, asc: true, favorites, show_hidden }
+        Self {
+            dir,
+            entries: Vec::new(),
+            sort: 0,
+            asc: true,
+            favorites,
+            show_hidden,
+        }
     }
 
-    pub fn dir(&self) -> &Path { &self.dir }
-    pub fn entries(&self) -> &[Entry] { &self.entries }
-    pub fn sort(&self) -> usize { self.sort }
-    pub fn sort_asc(&self) -> bool { self.asc }
-    pub fn favorites(&self) -> &[PathBuf] { &self.favorites }
-    pub fn show_hidden(&self) -> bool { self.show_hidden }
-    pub fn is_favorite(&self, dir: &Path) -> bool { self.favorites.iter().any(|d| d == dir) }
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+    pub fn entries(&self) -> &[Entry] {
+        &self.entries
+    }
+    pub fn sort(&self) -> usize {
+        self.sort
+    }
+    pub fn sort_asc(&self) -> bool {
+        self.asc
+    }
+    pub fn favorites(&self) -> &[PathBuf] {
+        &self.favorites
+    }
+    pub fn show_hidden(&self) -> bool {
+        self.show_hidden
+    }
+    pub fn is_favorite(&self, dir: &Path) -> bool {
+        self.favorites.iter().any(|d| d == dir)
+    }
 
     /// List `dir` into rows and sort them. False if it isn't a directory, in
     /// which case nothing changed.
@@ -497,8 +582,14 @@ impl LibraryState {
         let (dirs, files) = list_dir(&self.dir, self.show_hidden);
         self.entries = dirs
             .into_iter()
-            .map(|p| Entry { path: p, is_dir: true })
-            .chain(files.into_iter().map(|p| Entry { path: p, is_dir: false }))
+            .map(|p| Entry {
+                path: p,
+                is_dir: true,
+            })
+            .chain(files.into_iter().map(|p| Entry {
+                path: p,
+                is_dir: false,
+            }))
             .collect();
         self.apply_sort(tags);
         Some(self.to_scan())

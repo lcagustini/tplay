@@ -53,9 +53,10 @@ fn main() -> eframe::Result<()> {
     // Fall back to the device-chosen default if the device rejects the fixed
     // size. The device lives here, not in `TPlayApp` — the app holds only the
     // `Mixer` this stream's callback pulls from.
-    let output = match OutputStreamBuilder::from_default_device()
-        .map(|b| b.with_buffer_size(BufferSize::Fixed(config.buffer_size.clamp(512, 65536))).open_stream())
-    {
+    let output = match OutputStreamBuilder::from_default_device().map(|b| {
+        b.with_buffer_size(BufferSize::Fixed(config.buffer_size.clamp(512, 65536)))
+            .open_stream()
+    }) {
         Ok(Ok(s)) => s,
         _ => OutputStreamBuilder::open_default_stream().expect("No audio output device found"),
     };
@@ -84,7 +85,11 @@ fn main() -> eframe::Result<()> {
             // the mixer the sink never advances. The `Mixer` the app holds is a
             // clone of an `Arc` and outlives the stream on its own — but
             // playback stops without this field.
-            Ok(Box::new(TPlay { app, themes, _output: output }))
+            Ok(Box::new(TPlay {
+                app,
+                themes,
+                _output: output,
+            }))
         }),
     )
 }

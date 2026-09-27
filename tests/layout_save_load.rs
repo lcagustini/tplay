@@ -2,9 +2,9 @@
 
 mod common;
 use common::{lay_out, test_dir};
+use egui_dock::DockState;
 use std::fs;
 use tplay::app::Pane;
-use egui_dock::DockState;
 
 fn two_pane_tree() -> DockState<Pane> {
     let mut d = DockState::new(vec![Pane::NowPlaying]);
@@ -34,7 +34,11 @@ fn round_trip(tree: &DockState<Pane>) -> DockState<Pane> {
         r#"{"min":{"x":0.0,"y":0.0},"max":{"x":0.0,"y":0.0}}"#,
     );
     let restored: DockState<Pane> = serde_json::from_str(&json).unwrap();
-    assert_eq!(serde_json::to_string(&restored).unwrap(), json, "JSON must be stable");
+    assert_eq!(
+        serde_json::to_string(&restored).unwrap(),
+        json,
+        "JSON must be stable"
+    );
     restored
 }
 
@@ -63,14 +67,30 @@ fn layout_save_load_round_trips() {
     let from_disk: DockState<Pane> = serde_json::from_str(&restored_json).unwrap();
 
     // Verify tabs survived
-    assert_eq!(tabs_of(&from_disk), vec![Pane::NowPlaying, Pane::Playlist, Pane::Equalizer, Pane::Library]);
+    assert_eq!(
+        tabs_of(&from_disk),
+        vec![
+            Pane::NowPlaying,
+            Pane::Playlist,
+            Pane::Equalizer,
+            Pane::Library
+        ]
+    );
 
     // Second save-over write (proves the save-over path)
     let json2 = serde_json::to_string(&from_disk).unwrap();
     fs::write(&path, &json2).unwrap();
     let again_json = fs::read_to_string(&path).unwrap();
     let again: DockState<Pane> = serde_json::from_str(&again_json).unwrap();
-    assert_eq!(tabs_of(&again), vec![Pane::NowPlaying, Pane::Playlist, Pane::Equalizer, Pane::Library]);
+    assert_eq!(
+        tabs_of(&again),
+        vec![
+            Pane::NowPlaying,
+            Pane::Playlist,
+            Pane::Equalizer,
+            Pane::Library
+        ]
+    );
     assert_eq!(again_json, json2);
 }
 
@@ -91,7 +111,10 @@ fn list_layouts_lists_json_files_sorted() {
         .collect();
     layouts.sort();
 
-    let names: Vec<_> = layouts.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+    let names: Vec<_> = layouts
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
     assert_eq!(names, vec!["a.json", "b.json"]);
 }
 

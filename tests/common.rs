@@ -57,7 +57,7 @@ pub fn write_minimal_flac(path: &Path) {
     data.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // sample rate (0), channels, bits per sample
     data.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // total samples (0)
     data.extend_from_slice(&[0x00; 16]); // MD5
-    // PADDING block (type 1, last=1, length=100)
+                                         // PADDING block (type 1, last=1, length=100)
     data.extend_from_slice(&[0x81, 0x00, 0x00, 0x64]);
     data.extend_from_slice(&[0u8; 100]);
     fs::write(path, data).unwrap();
@@ -146,7 +146,11 @@ impl TestApp {
             },
             ..Default::default()
         };
-        Self { app: tplay::app::TPlayApp::new(&config, mixer), driver, rate: 44_100 }
+        Self {
+            app: tplay::app::TPlayApp::new(&config, mixer),
+            driver,
+            rate: 44_100,
+        }
     }
 
     /// Pull `secs` worth of samples. This is the only thing that makes the sink
@@ -178,7 +182,13 @@ pub fn assert_duration_approx(actual: Option<Duration>, expected: Duration, msg:
     match actual {
         Some(d) => {
             let diff = d.abs_diff(expected);
-            assert!(diff <= Duration::from_secs(1), "{} (got {:?}, expected {:?})", msg, d, expected);
+            assert!(
+                diff <= Duration::from_secs(1),
+                "{} (got {:?}, expected {:?})",
+                msg,
+                d,
+                expected
+            );
         }
         None => panic!("{} (got None, expected {:?})", msg, expected),
     }

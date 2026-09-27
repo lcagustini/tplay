@@ -38,10 +38,24 @@ pub fn effective_pos(sink_pos: Duration, offset: Duration) -> Duration {
 
 // Docking panes (egui_dock) - used by GUI layer only
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Debug)]
-pub enum Pane { NowPlaying, Playlist, Equalizer, Library, Visualizer, AlbumCover }
+pub enum Pane {
+    NowPlaying,
+    Playlist,
+    Equalizer,
+    Library,
+    Visualizer,
+    AlbumCover,
+}
 
 impl Pane {
-    pub const ALL: [Pane; 6] = [Pane::NowPlaying, Pane::Playlist, Pane::Equalizer, Pane::Library, Pane::Visualizer, Pane::AlbumCover];
+    pub const ALL: [Pane; 6] = [
+        Pane::NowPlaying,
+        Pane::Playlist,
+        Pane::Equalizer,
+        Pane::Library,
+        Pane::Visualizer,
+        Pane::AlbumCover,
+    ];
 }
 
 /// Config types, re-exported because the GUI and the tests reach them through
@@ -180,7 +194,14 @@ impl TPlayApp {
             last_config_save: 0.0,
             library: library::LibraryState::new(
                 dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")),
-                config.library.favorites.clone().into_iter().map(PathBuf::from).filter(|d| d.is_dir()).collect(),
+                config
+                    .library
+                    .favorites
+                    .clone()
+                    .into_iter()
+                    .map(PathBuf::from)
+                    .filter(|d| d.is_dir())
+                    .collect(),
                 config.library.show_hidden,
             ),
             tag_cache: library::TagCache::new(),
@@ -228,7 +249,12 @@ impl TPlayApp {
     pub fn flush_config(&mut self, now: f64, closing: bool, theme_id: &str) {
         let config = self.snapshot(theme_id);
         let json = serde_json::to_string_pretty(&config).unwrap_or_default();
-        if !config::should_flush(json != self.saved_config, now, self.last_config_save, closing) {
+        if !config::should_flush(
+            json != self.saved_config,
+            now,
+            self.last_config_save,
+            closing,
+        ) {
             return;
         }
         self.saved_config = json;
@@ -260,9 +286,18 @@ impl TPlayApp {
             volume: self.volume,
             buffer_size: self.buffer_size,
             spool_cache_mb: self.spool_cache_mb,
-            last_playlist: self.playlist_file.as_ref().and_then(|p| p.to_str()).map(str::to_owned),
+            last_playlist: self
+                .playlist_file
+                .as_ref()
+                .and_then(|p| p.to_str())
+                .map(str::to_owned),
             library: LibraryData {
-                favorites: self.library.favorites().iter().filter_map(|d| d.to_str().map(str::to_owned)).collect(),
+                favorites: self
+                    .library
+                    .favorites()
+                    .iter()
+                    .filter_map(|d| d.to_str().map(str::to_owned))
+                    .collect(),
                 last_dir: self.library.dir().to_string_lossy().into_owned(),
                 show_hidden: self.library.show_hidden(),
             },
@@ -319,11 +354,21 @@ impl TPlayApp {
 
         let file = match tracks::open(&track) {
             Some(f) => f,
-            None => { eprintln!("tplay: no file for {}", track.display()); self.current_path = None; self.total_duration = None; return; }
+            None => {
+                eprintln!("tplay: no file for {}", track.display());
+                self.current_path = None;
+                self.total_duration = None;
+                return;
+            }
         };
         let decoder = match Decoder::try_from(file) {
             Ok(d) => d,
-            Err(e) => { eprintln!("tplay: decode error: {e}"); self.current_path = None; self.total_duration = None; return; }
+            Err(e) => {
+                eprintln!("tplay: decode error: {e}");
+                self.current_path = None;
+                self.total_duration = None;
+                return;
+            }
         };
         let total_duration = decoder.total_duration().or_else(|| tracks::probe(&track));
         self.total_duration = total_duration;
@@ -472,8 +517,14 @@ impl TPlayApp {
         self.seek_target = Some(progress);
         self.cancel_xf(); // a seek invalidates any live crossfade/gapless
 
-        let path = match self.current_path.clone() { Some(p) => p, None => return };
-        let total_secs = match self.total_duration { Some(d) => d.as_secs_f32(), None => return };
+        let path = match self.current_path.clone() {
+            Some(p) => p,
+            None => return,
+        };
+        let total_secs = match self.total_duration {
+            Some(d) => d.as_secs_f32(),
+            None => return,
+        };
         let target = Duration::from_secs_f32((progress * total_secs).max(0.0));
 
         if self.sink.try_seek(target).is_ok() {
@@ -489,8 +540,20 @@ impl TPlayApp {
         // `File::open`, which for a remote track is an `smb://` URI — so seeking
         // a non-seekable remote track silently did nothing. `tracks::open`
         // resolves, and the app never sees a local path.
-        let file   = match tracks::open(&path)             { Some(f) => f, None => { eprintln!("seek: no file for {}", path.display()); return; } };
-        let source = match Decoder::try_from(file)         { Ok(s) => s, Err(e) => { eprintln!("seek decode: {e}"); return; } };
+        let file = match tracks::open(&path) {
+            Some(f) => f,
+            None => {
+                eprintln!("seek: no file for {}", path.display());
+                return;
+            }
+        };
+        let source = match Decoder::try_from(file) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("seek decode: {e}");
+                return;
+            }
+        };
 
         self.sink = Sink::connect_new(&self.mixer);
         self.sink.set_volume(self.volume);
@@ -503,7 +566,9 @@ impl TPlayApp {
         let balance_source =
             audio::balance::BalanceSource::new(tap_source, self.prefs.balance_shared());
         self.sink.append(balance_source);
-        if was_paused { self.sink.pause(); }
+        if was_paused {
+            self.sink.pause();
+        }
     }
 
     pub fn advance(&mut self) {
@@ -552,7 +617,12 @@ impl TPlayApp {
             let next = peeked.map(|(i, _)| (i, self.playlist[i].clone()));
             let (ready, tagged) = next
                 .as_ref()
-                .map(|(_, p)| (tracks::is_ready(p), self.tag_cache.get(p).and_then(|i| i.duration)))
+                .map(|(_, p)| {
+                    (
+                        tracks::is_ready(p),
+                        self.tag_cache.get(p).and_then(|i| i.duration),
+                    )
+                })
                 .unzip();
 
             let input = transition::ArmInput {
@@ -636,11 +706,16 @@ impl TPlayApp {
         d.map(|d| {
             let s = d.as_secs();
             format!("{:02}:{:02}", s / 60, s % 60)
-        }).unwrap_or_else(|| "--:--".into())
+        })
+        .unwrap_or_else(|| "--:--".into())
     }
 
     pub fn format_freq(f: f32) -> String {
-        if f >= 1000.0 { format!("{}K", (f / 1000.0) as i32) } else { format!("{}", f as i32) }
+        if f >= 1000.0 {
+            format!("{}K", (f / 1000.0) as i32)
+        } else {
+            format!("{}", f as i32)
+        }
     }
 
     /// Public actions called by GUI layer.
@@ -831,7 +906,9 @@ impl TPlayApp {
     /// longer exist are dropped; unparseable files leave the playlist alone.
     pub fn load_playlist_from(&mut self, path: PathBuf) {
         let base = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-        let Some(paths) = library::read_playlist(&path, base) else { return };
+        let Some(paths) = library::read_playlist(&path, base) else {
+            return;
+        };
         self.apply_playlist(paths, path);
     }
 
@@ -899,7 +976,9 @@ impl TPlayApp {
     /// Starting that scan stays here, because the tag cache and the `TagReader`
     /// are the app's, shared with the other two panes.
     pub fn navigate_to(&mut self, dir: PathBuf) {
-        let Some(scan) = self.library.open(dir, &self.tag_cache) else { return };
+        let Some(scan) = self.library.open(dir, &self.tag_cache) else {
+            return;
+        };
         self.ensure_tags(scan);
     }
 
@@ -998,15 +1077,31 @@ impl TPlayApp {
 
     // Read-only getters
 
-    pub fn current_path(&self) -> Option<&std::path::Path> { self.current_path.as_deref() }
-    pub fn total_duration(&self) -> Option<Duration> { self.total_duration }
-    pub fn volume(&self) -> f32 { self.volume }
-    pub fn playlist(&self) -> &[PathBuf] { &self.playlist }
-    pub fn current_index(&self) -> Option<usize> { self.current_index }
-    pub fn shuffle(&self) -> bool { self.shuffle }
-    pub fn repeat(&self) -> bool { self.repeat }
+    pub fn current_path(&self) -> Option<&std::path::Path> {
+        self.current_path.as_deref()
+    }
+    pub fn total_duration(&self) -> Option<Duration> {
+        self.total_duration
+    }
+    pub fn volume(&self) -> f32 {
+        self.volume
+    }
+    pub fn playlist(&self) -> &[PathBuf] {
+        &self.playlist
+    }
+    pub fn current_index(&self) -> Option<usize> {
+        self.current_index
+    }
+    pub fn shuffle(&self) -> bool {
+        self.shuffle
+    }
+    pub fn repeat(&self) -> bool {
+        self.repeat
+    }
     /// Visualization buffer (shared with the tap source).
-    pub fn viz(&self) -> &audio::viz::VizBuf { &self.viz }
+    pub fn viz(&self) -> &audio::viz::VizBuf {
+        &self.viz
+    }
 
     // ── Owned state groups ───────────────────────────────────────────────
     //
@@ -1022,16 +1117,28 @@ impl TPlayApp {
     /// The six user-tunable playback settings. Their clamping lives in
     /// `Prefs`; persistence is the config compare in `flush_config`, so a
     /// caller just sets the value and forgets about the file.
-    pub fn prefs(&self) -> &config::Prefs { &self.prefs }
-    pub fn prefs_mut(&mut self) -> &mut config::Prefs { &mut self.prefs }
+    pub fn prefs(&self) -> &config::Prefs {
+        &self.prefs
+    }
+    pub fn prefs_mut(&mut self) -> &mut config::Prefs {
+        &mut self.prefs
+    }
 
-    pub fn library(&self) -> &library::LibraryState { &self.library }
-    pub fn library_mut(&mut self) -> &mut library::LibraryState { &mut self.library }
+    pub fn library(&self) -> &library::LibraryState {
+        &self.library
+    }
+    pub fn library_mut(&mut self) -> &mut library::LibraryState {
+        &mut self.library
+    }
 
     /// The 10-band EQ. Gains live in an `Arc` the running source reads, so
     /// setting one is live: no sink rebuild, no audio restart.
-    pub fn eq(&self) -> &audio::eq::EqSettings { &self.eq }
-    pub fn eq_mut(&mut self) -> &mut audio::eq::EqSettings { &mut self.eq }
+    pub fn eq(&self) -> &audio::eq::EqSettings {
+        &self.eq
+    }
+    pub fn eq_mut(&mut self) -> &mut audio::eq::EqSettings {
+        &mut self.eq
+    }
 
     /// The whole tag cache, so a caller can sort a list of entries against it
     /// (`library::sort_entries`) rather than sorting entry-by-entry. Keys are
@@ -1053,10 +1160,9 @@ impl TPlayApp {
     /// over its own entries. Spans two owners (browse state + tag cache), which
     /// is why it is here and not on either.
     pub fn library_scanning(&self) -> bool {
-        self.library
-            .entries()
-            .iter()
-            .any(|e| !e.is_dir() && !library::is_playlist(e.path()) && !self.tag_cache.contains_key(e.path()))
+        self.library.entries().iter().any(|e| {
+            !e.is_dir() && !library::is_playlist(e.path()) && !self.tag_cache.contains_key(e.path())
+        })
     }
 
     /// Toggle hidden-folder display and re-list the current dir so the change
@@ -1188,8 +1294,6 @@ impl TPlayApp {
         // an `Event::Saved` that retargets `playlist_file` is recorded in the
         // same frame it lands.
         self.flush_config(now, closing, theme_id);
-        scanning
-            || self.network.busy()
-            || (!self.sink.empty() && !self.sink.is_paused())
+        scanning || self.network.busy() || (!self.sink.empty() && !self.sink.is_paused())
     }
 }

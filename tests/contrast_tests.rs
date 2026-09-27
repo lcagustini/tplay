@@ -24,14 +24,22 @@ fn parse_hex(s: &str) -> RGB {
     let s = s.trim_start_matches('#');
     assert_eq!(s.len(), 6, "expected 6-digit hex, got {s}");
     let v = |i: usize| u8::from_str_radix(&s[i..i + 2], 16).unwrap() as f64;
-    RGB { r: v(0), g: v(2), b: v(4) }
+    RGB {
+        r: v(0),
+        g: v(2),
+        b: v(4),
+    }
 }
 
 /// WCAG relative luminance (0..1).
 fn luminance(c: &RGB) -> f64 {
     let lin = |x: f64| {
         let c = x / 255.0;
-        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
     };
     0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
 }
@@ -46,7 +54,11 @@ fn contrast(a: &RGB, b: &RGB) -> f64 {
 /// byte space — mirrors what egui's translucent fill does on screen.
 fn composite(fg: &RGB, bg: &RGB, alpha: f64) -> RGB {
     let c = |x: f64, y: f64| alpha * x + (1.0 - alpha) * y;
-    RGB { r: c(fg.r, bg.r), g: c(fg.g, bg.g), b: c(fg.b, bg.b) }
+    RGB {
+        r: c(fg.r, bg.r),
+        g: c(fg.g, bg.g),
+        b: c(fg.b, bg.b),
+    }
 }
 
 #[derive(Clone)]
@@ -94,7 +106,10 @@ impl Palette {
 
 fn theme_file(id: &str) -> PathBuf {
     let root = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    PathBuf::from(root).join("themes").join(id).join("theme.json")
+    PathBuf::from(root)
+        .join("themes")
+        .join(id)
+        .join("theme.json")
 }
 
 const TEXT: f64 = 4.5; // normal text (accent doubles as text: sort header, tag, tab title)
@@ -104,9 +119,20 @@ const UI: f64 = 3.0; // non-text UI components
 fn bundled_themes_keep_text_readable() {
     for id in ["dark", "retro", "neon"] {
         let p = Palette::from_json(&theme_file(id));
-        for (name, surf) in [("bg", &p.bg), ("panel_bg", &p.panel_bg), ("row_even", &p.row_even), ("row_odd", &p.row_odd)] {
-            assert!(contrast(&p.text_primary, surf) >= TEXT, "{id}: text_primary on {name}");
-            assert!(contrast(&p.text_secondary, surf) >= TEXT, "{id}: text_secondary on {name}");
+        for (name, surf) in [
+            ("bg", &p.bg),
+            ("panel_bg", &p.panel_bg),
+            ("row_even", &p.row_even),
+            ("row_odd", &p.row_odd),
+        ] {
+            assert!(
+                contrast(&p.text_primary, surf) >= TEXT,
+                "{id}: text_primary on {name}"
+            );
+            assert!(
+                contrast(&p.text_secondary, surf) >= TEXT,
+                "{id}: text_secondary on {name}"
+            );
             assert!(contrast(&p.accent, surf) >= TEXT, "{id}: accent on {name}");
         }
     }
@@ -116,9 +142,18 @@ fn bundled_themes_keep_text_readable() {
 fn bundled_themes_keep_ui_components_visible() {
     for id in ["dark", "retro", "neon"] {
         let p = Palette::from_json(&theme_file(id));
-        assert!(contrast(&p.focus_ring, &p.bg) >= UI, "{id}: focus_ring on bg");
-        assert!(contrast(&p.progress_fill, &p.slider_track) >= UI, "{id}: progress_fill on slider_track");
-        assert!(contrast(&p.slider_handle, &p.slider_track) >= UI, "{id}: slider_handle on slider_track");
+        assert!(
+            contrast(&p.focus_ring, &p.bg) >= UI,
+            "{id}: focus_ring on bg"
+        );
+        assert!(
+            contrast(&p.progress_fill, &p.slider_track) >= UI,
+            "{id}: progress_fill on slider_track"
+        );
+        assert!(
+            contrast(&p.slider_handle, &p.slider_track) >= UI,
+            "{id}: slider_handle on slider_track"
+        );
     }
 }
 
@@ -131,7 +166,10 @@ fn active_row_tint_keeps_title_readable() {
         let alpha = p.layout_alpha(&theme_file(id), "row_tint_alpha", 0.10);
         for (name, surf) in [("row_even", &p.row_even), ("row_odd", &p.row_odd)] {
             let tinted = composite(&p.accent, surf, alpha);
-            assert!(contrast(&p.text_primary, &tinted) >= TEXT, "{id}: text_primary on tinted {name}");
+            assert!(
+                contrast(&p.text_primary, &tinted) >= TEXT,
+                "{id}: text_primary on tinted {name}"
+            );
         }
     }
 }
@@ -141,11 +179,13 @@ fn eq_band_floor_fits_minimum_window() {
     // The EQ pane floors its width at 10 × eq_band_w_min (no scrollbars), so
     // the floor must stay inside the 320px minimum window width.
     for id in ["dark", "retro", "neon"] {
-        let v: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(theme_file(id)).unwrap(),
-        )
-        .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(theme_file(id)).unwrap()).unwrap();
         let w = v["layout"]["eq_band_w_min"].as_f64().unwrap_or(30.0);
-        assert!(10.0 * w <= 320.0, "{id}: 10×eq_band_w_min {:.0} exceeds 320px minimum window", 10.0 * w);
+        assert!(
+            10.0 * w <= 320.0,
+            "{id}: 10×eq_band_w_min {:.0} exceeds 320px minimum window",
+            10.0 * w
+        );
     }
 }

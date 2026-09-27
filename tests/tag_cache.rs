@@ -19,12 +19,12 @@
 //! `tracks_tests::tag_reader_requests_then_drains_and_clears`; the scan thread
 //! itself is in `library_tests::scan_files_sends_results_and_stops_on_drop`.
 
-use tplay::library::TrackInfo;
-use tplay::network::Network;
-use tplay::tracks::TagReader;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+use tplay::library::TrackInfo;
+use tplay::network::Network;
+use tplay::tracks::TagReader;
 #[path = "common.rs"]
 mod common;
 
@@ -33,7 +33,10 @@ fn an_idle_reader_never_reports_a_change() {
     // No scan has ever been requested: there is no receiver at all.
     let mut reader = TagReader::new();
     let mut cache: HashMap<PathBuf, TrackInfo> = HashMap::new();
-    assert!(!reader.drain_into(&mut cache), "a reader with no scan reports no change");
+    assert!(
+        !reader.drain_into(&mut cache),
+        "a reader with no scan reports no change"
+    );
     assert!(!reader.drain_into(&mut cache), "and keeps reporting none");
     assert!(cache.is_empty());
 }
@@ -62,7 +65,10 @@ fn a_dropped_scan_is_replaced_by_the_next_request() {
 
     let deadline = Instant::now() + Duration::from_secs(20);
     while !cache.contains_key(&c) {
-        assert!(Instant::now() < deadline, "the replacement scan never delivered c");
+        assert!(
+            Instant::now() < deadline,
+            "the replacement scan never delivered c"
+        );
         reader.drain_into(&mut cache);
         std::thread::yield_now();
     }
@@ -72,14 +78,25 @@ fn a_dropped_scan_is_replaced_by_the_next_request() {
     // If `a` did land, its value is real; if not, the next request will re-scan
     // it. Either way it must not be a blank or partial entry.
     if let Some(info) = cache.get(&a) {
-        common::assert_duration_approx(info.duration, Duration::from_secs(1), "abandoned scan's result");
+        common::assert_duration_approx(
+            info.duration,
+            Duration::from_secs(1),
+            "abandoned scan's result",
+        );
     }
-    common::assert_duration_approx(cache[&c].duration, Duration::from_secs(1), "replacement scan");
+    common::assert_duration_approx(
+        cache[&c].duration,
+        Duration::from_secs(1),
+        "replacement scan",
+    );
 
     // And the reader still settles — replacing a scan must not wedge it.
     let deadline = Instant::now() + Duration::from_secs(20);
     while reader.drain_into(&mut cache) {
-        assert!(Instant::now() < deadline, "reader wedged after replacing a scan");
+        assert!(
+            Instant::now() < deadline,
+            "reader wedged after replacing a scan"
+        );
         std::thread::yield_now();
     }
 

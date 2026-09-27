@@ -18,9 +18,18 @@ fn xor_shift(state: &mut u64) -> u64 {
 /// Mirror of TPlayApp::peek_next_index (shuffle branch) — pure: it reads
 /// `played`/`rng_state` and mutates neither, and the draw comes from a scratch
 /// copy so repeated peeks are idempotent and cost no entropy.
-fn shuffle_peek(len: usize, played: &[usize], rng_state: u64, repeat: bool) -> Option<(usize, u64)> {
-    if len == 0 { return None; }
-    if len == 1 { return repeat.then_some(0).map(|i| (i, rng_state)); }
+fn shuffle_peek(
+    len: usize,
+    played: &[usize],
+    rng_state: u64,
+    repeat: bool,
+) -> Option<(usize, u64)> {
+    if len == 0 {
+        return None;
+    }
+    if len == 1 {
+        return repeat.then_some(0).map(|i| (i, rng_state));
+    }
 
     let unplayed: Vec<usize> = (0..len).filter(|i| !played.contains(i)).collect();
     let mut rng = rng_state;
@@ -35,7 +44,9 @@ fn shuffle_peek(len: usize, played: &[usize], rng_state: u64, repeat: bool) -> O
 /// Mirror of TPlayApp::commit_next_index — the only writer of `played`.
 fn shuffle_commit(len: usize, played: &mut Vec<usize>, rng_state: &mut u64, idx: usize, rng: u64) {
     *rng_state = rng;
-    if len < 2 { return; }
+    if len < 2 {
+        return;
+    }
     // Exhausted pool + repeat starts a new cycle.
     if (0..len).all(|i| played.contains(&i)) {
         played.clear();
@@ -44,7 +55,12 @@ fn shuffle_commit(len: usize, played: &mut Vec<usize>, rng_state: &mut u64, idx:
 }
 
 /// Mirror of TPlayApp::next_track_index shuffle branch — peek, then commit.
-fn shuffle_next(len: usize, played: &mut Vec<usize>, rng_state: &mut u64, repeat: bool) -> Option<usize> {
+fn shuffle_next(
+    len: usize,
+    played: &mut Vec<usize>,
+    rng_state: &mut u64,
+    repeat: bool,
+) -> Option<usize> {
     let (idx, rng) = shuffle_peek(len, played, *rng_state, repeat)?;
     shuffle_commit(len, played, rng_state, idx, rng);
     Some(idx)
@@ -52,8 +68,12 @@ fn shuffle_next(len: usize, played: &mut Vec<usize>, rng_state: &mut u64, repeat
 
 /// Mirror of TPlayApp::peek_prev_index (shuffle branch) — pure.
 fn shuffle_prev_peek(len: usize, played: &[usize], repeat: bool) -> Option<usize> {
-    if len == 0 { return None; }
-    if len == 1 { return repeat.then_some(0); }
+    if len == 0 {
+        return None;
+    }
+    if len == 1 {
+        return repeat.then_some(0);
+    }
     if played.len() > 1 {
         played.get(played.len() - 2).copied()
     } else if repeat {
@@ -91,7 +111,11 @@ fn added_tracks_join_the_unplayed_pool() {
     let mut played = vec![0, 2];
 
     let unplayed: Vec<usize> = (0..len).filter(|i| !played.contains(i)).collect();
-    assert_eq!(unplayed, vec![1, 3, 4], "new track is available without resetting history");
+    assert_eq!(
+        unplayed,
+        vec![1, 3, 4],
+        "new track is available without resetting history"
+    );
 
     // The very next shuffle draw comes from the unplayed pool.
     let mut rng = 0xC0FFEE;
@@ -199,7 +223,11 @@ fn an_uncommitted_peek_leaves_the_order_alone() {
     for _ in 0..120 {
         shuffle_peek(len, &played, rng, false);
     }
-    assert_eq!(played, vec![0, 2], "deliberation must not mark anything played");
+    assert_eq!(
+        played,
+        vec![0, 2],
+        "deliberation must not mark anything played"
+    );
     assert_eq!(rng, 0xC0FFEE, "a peek must not consume entropy");
 }
 
@@ -218,7 +246,10 @@ fn an_armed_track_commits_exactly_one_entry() {
 
     assert_eq!(played, vec![0, 2, peeked], "one play, one history entry");
     assert_ne!(rng, 0xC0FFEE, "the commit installs the draw the peek made");
-    assert!(!played[..2].contains(&peeked), "the new entry is the committed one");
+    assert!(
+        !played[..2].contains(&peeked),
+        "the new entry is the committed one"
+    );
 }
 
 /// `prev` pops the history, so a history polluted by deliberation made it jump
@@ -235,7 +266,11 @@ fn history_length_tracks_plays_not_frames() {
             shuffle_peek(len, &played, rng, false);
         }
         shuffle_next(len, &mut played, &mut rng, false).expect("a candidate exists");
-        assert_eq!(played.len(), track + 1, "history grows by one per track, not per frame");
+        assert_eq!(
+            played.len(),
+            track + 1,
+            "history grows by one per track, not per frame"
+        );
     }
 }
 
@@ -250,7 +285,11 @@ fn repeat_restarts_the_cycle_on_commit_not_on_peek() {
     for _ in 0..120 {
         shuffle_peek(len, &played, rng, true);
     }
-    assert_eq!(played, vec![0, 1, 2], "peeking at an exhausted pool must not clear it");
+    assert_eq!(
+        played,
+        vec![0, 1, 2],
+        "peeking at an exhausted pool must not clear it"
+    );
 
     let (idx, r) = shuffle_peek(len, &played, rng, true).unwrap();
     shuffle_commit(len, &mut played, &mut rng, idx, r);
@@ -340,7 +379,10 @@ fn an_unavailable_prev_commits_nothing() {
     let len = 4;
     let mut played = vec![]; // shuffle + repeat, empty history
     assert!(shuffle_prev(len, &mut played, true).is_none());
-    assert!(played.is_empty(), "a refused step must not touch the history");
+    assert!(
+        played.is_empty(),
+        "a refused step must not touch the history"
+    );
 }
 
 /// A single-entry history loops on that track, so stepping onto it must not

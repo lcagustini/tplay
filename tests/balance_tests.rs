@@ -3,11 +3,11 @@
 //! swaps gains without a sink rebuild. These tests drive a BalanceSource
 //! over a synthetic source and mutate the shared state while iterating.
 
-use tplay::audio::balance::{BalanceSource, balance_gains};
 use rodio::buffer::SamplesBuffer;
 use rodio::Source;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+use tplay::audio::balance::{balance_gains, BalanceSource};
 
 /// Minimal infinite-ish f32 source: finite sample buffer the BalanceSource drains.
 struct TestSrc {
@@ -56,13 +56,18 @@ fn balance_gains_curve_is_correct() {
     assert_eq!(balance_gains(0.5), (0.5, 1.0));
     // Clamped outside range
     assert_eq!(balance_gains(-2.0), (1.0, -1.0)); // right gain negative (will silence)
-    assert_eq!(balance_gains(2.0), (-1.0, 1.0));  // left gain negative
+    assert_eq!(balance_gains(2.0), (-1.0, 1.0)); // left gain negative
 }
 
 #[test]
 fn mono_input_becomes_stereo_with_balance_applied() {
     let shared = Arc::new(RwLock::new(0.0f32));
-    let src = TestSrc { sr: 44100, channels: 1, samples: vec![1.0; 100], pos: 0 };
+    let src = TestSrc {
+        sr: 44100,
+        channels: 1,
+        samples: vec![1.0; 100],
+        pos: 0,
+    };
     let out: Vec<f32> = BalanceSource::new(src, Arc::clone(&shared)).collect();
 
     // At center balance: mono 1.0 → L=1.0, R=1.0 (100 input → 200 output samples)
@@ -76,28 +81,44 @@ fn mono_input_becomes_stereo_with_balance_applied() {
 #[test]
 fn mono_full_left_routes_to_left_only() {
     let shared = Arc::new(RwLock::new(-1.0f32));
-    let src = TestSrc { sr: 44100, channels: 1, samples: vec![1.0; 100], pos: 0 };
+    let src = TestSrc {
+        sr: 44100,
+        channels: 1,
+        samples: vec![1.0; 100],
+        pos: 0,
+    };
     let out: Vec<f32> = BalanceSource::new(src, Arc::clone(&shared)).collect();
 
     // Full left: L=1.0, R=0.0 (100 input → 200 output samples)
     assert_eq!(out.len(), 200);
     for (i, &s) in out.iter().enumerate() {
         let expected = if i % 2 == 0 { 1.0 } else { 0.0 };
-        assert!((s - expected).abs() < 1e-5, "index {i}: got {s}, expected {expected}");
+        assert!(
+            (s - expected).abs() < 1e-5,
+            "index {i}: got {s}, expected {expected}"
+        );
     }
 }
 
 #[test]
 fn mono_full_right_routes_to_right_only() {
     let shared = Arc::new(RwLock::new(1.0f32));
-    let src = TestSrc { sr: 44100, channels: 1, samples: vec![1.0; 100], pos: 0 };
+    let src = TestSrc {
+        sr: 44100,
+        channels: 1,
+        samples: vec![1.0; 100],
+        pos: 0,
+    };
     let out: Vec<f32> = BalanceSource::new(src, Arc::clone(&shared)).collect();
 
     // Full right: L=0.0, R=1.0 (100 input → 200 output samples)
     assert_eq!(out.len(), 200);
     for (i, &s) in out.iter().enumerate() {
         let expected = if i % 2 == 0 { 0.0 } else { 1.0 };
-        assert!((s - expected).abs() < 1e-5, "index {i}: got {s}, expected {expected}");
+        assert!(
+            (s - expected).abs() < 1e-5,
+            "index {i}: got {s}, expected {expected}"
+        );
     }
 }
 
@@ -108,7 +129,11 @@ fn stereo_balance_zero_is_bit_identical_passthrough() {
     let shared = Arc::new(RwLock::new(0.0f32));
     let input_l: Vec<f32> = (0..100).map(|i| i as f32 * 0.01).collect();
     let input_r: Vec<f32> = (0..100).map(|i| (i as f32 * 0.01) + 0.5).collect();
-    let interleaved: Vec<f32> = input_l.iter().zip(&input_r).flat_map(|(&l, &r)| [l, r]).collect();
+    let interleaved: Vec<f32> = input_l
+        .iter()
+        .zip(&input_r)
+        .flat_map(|(&l, &r)| [l, r])
+        .collect();
 
     let buf = SamplesBuffer::new(2, 44100, interleaved.clone());
     let out: Vec<f32> = BalanceSource::new(buf, Arc::clone(&shared)).collect();
@@ -116,7 +141,10 @@ fn stereo_balance_zero_is_bit_identical_passthrough() {
     // Output must be bit-identical to input (interleaved L,R)
     assert_eq!(out.len(), interleaved.len());
     for (i, (&a, &b)) in out.iter().zip(interleaved.iter()).enumerate() {
-        assert!((a - b).abs() < 1e-7, "bit-transparent at balance 0 failed at {i}: {a} vs {b}");
+        assert!(
+            (a - b).abs() < 1e-7,
+            "bit-transparent at balance 0 failed at {i}: {a} vs {b}"
+        );
     }
 }
 
@@ -125,7 +153,11 @@ fn stereo_balance_scales_channels_independently() {
     let shared = Arc::new(RwLock::new(-0.5f32)); // L=1.0, R=0.5
     let input_l: Vec<f32> = (0..100).map(|i| i as f32 * 0.01).collect();
     let input_r: Vec<f32> = (0..100).map(|i| (i as f32 * 0.01) + 0.5).collect();
-    let interleaved: Vec<f32> = input_l.iter().zip(&input_r).flat_map(|(&l, &r)| [l, r]).collect();
+    let interleaved: Vec<f32> = input_l
+        .iter()
+        .zip(&input_r)
+        .flat_map(|(&l, &r)| [l, r])
+        .collect();
 
     let buf = SamplesBuffer::new(2, 44100, interleaved);
     let out: Vec<f32> = BalanceSource::new(buf, Arc::clone(&shared)).collect();
@@ -135,11 +167,19 @@ fn stereo_balance_scales_channels_independently() {
         if i % 2 == 0 {
             // Left channel: full gain
             let expected = (i / 2) as f32 * 0.01;
-            assert!((s - expected).abs() < 1e-5, "L[{}] got {s}, expected {expected}", i / 2);
+            assert!(
+                (s - expected).abs() < 1e-5,
+                "L[{}] got {s}, expected {expected}",
+                i / 2
+            );
         } else {
             // Right channel: 0.5 gain
             let expected = ((i / 2) as f32 * 0.01 + 0.5) * 0.5;
-            assert!((s - expected).abs() < 1e-5, "R[{}] got {s}, expected {expected}", i / 2);
+            assert!(
+                (s - expected).abs() < 1e-5,
+                "R[{}] got {s}, expected {expected}",
+                i / 2
+            );
         }
     }
 }
@@ -147,7 +187,12 @@ fn stereo_balance_scales_channels_independently() {
 #[test]
 fn balance_change_mid_stream_takes_effect_live() {
     let shared = Arc::new(RwLock::new(0.0f32));
-    let src = TestSrc { sr: 44100, channels: 1, samples: vec![1.0; 200], pos: 0 };
+    let src = TestSrc {
+        sr: 44100,
+        channels: 1,
+        samples: vec![1.0; 200],
+        pos: 0,
+    };
     let mut bal = BalanceSource::new(src, Arc::clone(&shared));
 
     // First half at center
@@ -162,7 +207,10 @@ fn balance_change_mid_stream_takes_effect_live() {
     // Even indices (L) = 1.0, odd indices (R) = 0.0
     for (i, &s) in second.iter().enumerate() {
         let expected = if i % 2 == 0 { 1.0 } else { 0.0 };
-        assert!((s - expected).abs() < 1e-5, "live change failed at {i}: {s} vs {expected}");
+        assert!(
+            (s - expected).abs() < 1e-5,
+            "live change failed at {i}: {s} vs {expected}"
+        );
     }
 }
 
@@ -187,6 +235,12 @@ fn try_seek_forwards_and_clears_half_frame() {
     // Next output should be the sample at 1s (L=88200, R=88201) scaled by balance 0 = (1,1)
     let l = bal.next().unwrap();
     let r = bal.next().unwrap();
-    assert!((l - 88200.0).abs() < 1e-3, "seek L landing: got {l}, expected 88200");
-    assert!((r - 88201.0).abs() < 1e-3, "seek R landing: got {r}, expected 88201");
+    assert!(
+        (l - 88200.0).abs() < 1e-3,
+        "seek L landing: got {l}, expected 88200"
+    );
+    assert!(
+        (r - 88201.0).abs() < 1e-3,
+        "seek R landing: got {r}, expected 88201"
+    );
 }

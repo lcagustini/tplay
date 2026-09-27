@@ -7,9 +7,9 @@
 //! attack/release for the "WMP bars" feel.
 
 use rodio::Source;
-use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
 use std::f32::consts::PI;
+use std::sync::{Arc, Mutex};
 
 /// Cap for the ring buffer (mono samples). 4096 @ 44.1 kHz ≈ 93 ms.
 pub const VIZ_BUFFER_CAP: usize = 4096;
@@ -282,8 +282,8 @@ pub fn compute_bands(viz: &VizBuf, prev: &mut [f32; VIZ_BANDS], attack: f32, rel
 
     // Log-spaced band averaging (skip DC, start at bin 1)
     let max_bin = mag.len() - 1; // Nyquist
-    // 20 Hz .. Nyquist of the *source's* rate, not an assumed 44.1 kHz — the
-    // hardcoded version put every band edge ~9% off on a 48 kHz file.
+                                 // 20 Hz .. Nyquist of the *source's* rate, not an assumed 44.1 kHz — the
+                                 // hardcoded version put every band edge ~9% off on a 48 kHz file.
     let rate = viz.sample_rate() as f32;
     let log_min = 20.0f32.ln();
     let log_max = (rate / 2.0).ln();

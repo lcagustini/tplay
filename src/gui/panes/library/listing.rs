@@ -81,7 +81,11 @@ fn draw_dir_row(
         );
         text_x += s + 4.0;
     }
-    let text = if folder.is_none() { format!("📁  {name}") } else { name.to_string() };
+    let text = if folder.is_none() {
+        format!("📁  {name}")
+    } else {
+        name.to_string()
+    };
     ui.painter().text(
         egui::pos2(text_x, rect.center().y),
         egui::Align2::LEFT_CENTER,
@@ -96,7 +100,13 @@ fn draw_dir_row(
 /// A saved playlist row: full filename (extension visible) + a right-aligned
 /// "Playlist" tag — no tag cells, no `+`. Click loads it (the caller adds the
 /// replace-confirm).
-fn draw_playlist_row(ui: &mut egui::Ui, theme: &theme::Theme, row_h: f32, i: usize, path: &Path) -> bool {
+fn draw_playlist_row(
+    ui: &mut egui::Ui,
+    theme: &theme::Theme,
+    row_h: f32,
+    i: usize,
+    path: &Path,
+) -> bool {
     let p = theme.palette;
     let (rect, mut row) = theme::row(ui, i, false, row_h, theme);
     row.spacing_mut().item_spacing.x = 4.0;
@@ -109,17 +119,17 @@ fn draw_playlist_row(ui: &mut egui::Ui, theme: &theme::Theme, row_h: f32, i: usi
     let title_resp = row
         .add_sized(
             egui::vec2((rect.width() - ROW_FIXED_W - 6.0).max(40.0), row_h),
-            egui::Label::new(
-                egui::RichText::new(&name).color(p.text_primary.gamma_multiply(0.85)),
-            )
-            .truncate()
-            .sense(egui::Sense::click()),
+            egui::Label::new(egui::RichText::new(&name).color(p.text_primary.gamma_multiply(0.85)))
+                .truncate()
+                .sense(egui::Sense::click()),
         )
         .on_hover_text_at_pointer("Load playlist");
 
     // Tag sits right after the name (left-of-center), not floated to the
     // row's far right past the empty tag cells.
-    row.add(egui::Label::new(egui::RichText::new("Playlist").small().color(p.accent)));
+    row.add(egui::Label::new(
+        egui::RichText::new("Playlist").small().color(p.accent),
+    ));
 
     title_resp.clicked()
 }
@@ -179,9 +189,11 @@ fn draw_file_row(
     let title_resp = row
         .add_sized(
             egui::vec2(title_w, row_h),
-            egui::Label::new(
-                egui::RichText::new(&display).color(if is_current { p.text_primary } else { p.text_primary.gamma_multiply(0.85) }),
-            )
+            egui::Label::new(egui::RichText::new(&display).color(if is_current {
+                p.text_primary
+            } else {
+                p.text_primary.gamma_multiply(0.85)
+            }))
             .truncate()
             .sense(egui::Sense::click()),
         )
@@ -200,7 +212,10 @@ fn draw_file_row(
         egui::Label::new(
             egui::RichText::new(TPlayApp::fmt_duration(dur))
                 .color(p.text_secondary)
-                .font(egui::FontId::new(layout.text_meta, theme.metadata_font.clone())),
+                .font(egui::FontId::new(
+                    layout.text_meta,
+                    theme.metadata_font.clone(),
+                )),
         ),
     );
     let add_clicked = row
@@ -254,18 +269,25 @@ fn file_list_ui(
 
     // Search box. State is the one `LIB_QUERY` key, so the query deliberately
     // survives a trip between the local and share browsers.
-    let mut q = ui
-        .ctx()
-        .memory_mut(|m| m.data.get_temp::<String>(egui::Id::new(LIB_QUERY)).unwrap_or_default());
+    let mut q = ui.ctx().memory_mut(|m| {
+        m.data
+            .get_temp::<String>(egui::Id::new(LIB_QUERY))
+            .unwrap_or_default()
+    });
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("Search").small().color(p.text_secondary));
+        ui.label(
+            egui::RichText::new("Search")
+                .small()
+                .color(p.text_secondary),
+        );
         ui.add(
             egui::TextEdit::singleline(&mut q)
                 .hint_text("title, artist, album…")
                 .desired_width(220.0),
         );
     });
-    ui.ctx().memory_mut(|m| m.data.insert_temp(egui::Id::new(LIB_QUERY), q.clone()));
+    ui.ctx()
+        .memory_mut(|m| m.data.insert_temp(egui::Id::new(LIB_QUERY), q.clone()));
     let query = q.trim().to_lowercase();
     ui.add_space(4.0);
 
@@ -279,14 +301,15 @@ fn file_list_ui(
         let asc_tex = themes.icon(theme::Icon::SortAsc).cloned();
         let desc_tex = themes.icon(theme::Icon::SortDesc).cloned();
         ui.horizontal(|ui| {
-            let (head, _) = ui.allocate_exact_size(
-                egui::vec2(ui.available_width(), 22.0),
-                egui::Sense::hover(),
-            );
+            let (head, _) = ui
+                .allocate_exact_size(egui::vec2(ui.available_width(), 22.0), egui::Sense::hover());
             ui.painter().rect_filled(head, 0.0, p.row_odd);
             let mut h = ui.new_child(
                 egui::UiBuilder::new()
-                    .max_rect(egui::Rect::from_min_max(head.min + egui::vec2(6.0, 0.0), head.max))
+                    .max_rect(egui::Rect::from_min_max(
+                        head.min + egui::vec2(6.0, 0.0),
+                        head.max,
+                    ))
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
             );
             h.spacing_mut().item_spacing.x = 4.0;
@@ -297,7 +320,11 @@ fn file_list_ui(
                     CELL_WIDTHS[key]
                 };
                 let arrow = if key == cur {
-                    if asc { asc_tex.as_ref() } else { desc_tex.as_ref() }
+                    if asc {
+                        asc_tex.as_ref()
+                    } else {
+                        desc_tex.as_ref()
+                    }
                 } else {
                     None
                 };
@@ -378,7 +405,11 @@ fn file_list_ui(
                 i += 1;
             }
             if i == 0 {
-                ui.label(egui::RichText::new("No files").small().color(p.text_secondary));
+                ui.label(
+                    egui::RichText::new("No files")
+                        .small()
+                        .color(p.text_secondary),
+                );
             }
             if action.is_some() {
                 out = action;
@@ -393,7 +424,12 @@ fn file_list_ui(
 /// The local folder browser's main column: composition counts + Add All, then
 /// the shared file list. `remote_list_ui` is the same two steps with
 /// `browse_open` behind `Nav`, which is why both end in `file_list_ui`.
-pub fn local_list_ui(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui, theme: &theme::Theme) {
+pub fn local_list_ui(
+    app: &mut TPlayApp,
+    themes: &ThemeState,
+    ui: &mut egui::Ui,
+    theme: &theme::Theme,
+) {
     let entries = app.library().entries().to_vec();
     list_header_right(app, ui, theme.palette, &entries);
     ui.add_space(4.0);
@@ -502,7 +538,11 @@ pub fn remote_list_ui(
     if browse.busy {
         ui.horizontal(|ui| {
             ui.spinner();
-            ui.label(egui::RichText::new("Connecting…").small().color(p.text_secondary));
+            ui.label(
+                egui::RichText::new("Connecting…")
+                    .small()
+                    .color(p.text_secondary),
+            );
         });
         return;
     }
@@ -515,9 +555,11 @@ pub fn remote_list_ui(
         } else {
             ui.label(egui::RichText::new(err).small().color(p.text_secondary));
             ui.label(
-                egui::RichText::new("Check the address, username/password, and that the share allows access.")
-                    .small()
-                    .color(p.text_secondary),
+                egui::RichText::new(
+                    "Check the address, username/password, and that the share allows access.",
+                )
+                .small()
+                .color(p.text_secondary),
             );
         }
         return;
@@ -541,7 +583,11 @@ pub fn remote_list_ui(
             i += 1;
         }
         if i == 0 {
-            ui.label(egui::RichText::new("No shares").small().color(p.text_secondary));
+            ui.label(
+                egui::RichText::new("No shares")
+                    .small()
+                    .color(p.text_secondary),
+            );
         }
         if let Some(share) = share_name {
             app.network_mut().browse_open(
@@ -563,13 +609,22 @@ pub fn remote_list_ui(
     let mut entries: Vec<library::Entry> = browse
         .entries
         .iter()
-        .filter(|e| e.is_dir || library::is_audio(Path::new(&e.name)) || library::is_playlist(Path::new(&e.name)))
+        .filter(|e| {
+            e.is_dir
+                || library::is_audio(Path::new(&e.name))
+                || library::is_playlist(Path::new(&e.name))
+        })
         .map(|e| library::Entry {
             path: PathBuf::from(network::child_uri(&dir, &e.name)),
             is_dir: e.is_dir,
         })
         .collect();
-    library::sort_entries(&mut entries, app.tag_cache(), app.library().sort(), app.library().sort_asc());
+    library::sort_entries(
+        &mut entries,
+        app.tag_cache(),
+        app.library().sort(),
+        app.library().sort_asc(),
+    );
 
     // Ask for the tags of everything on screen that isn't cached yet. Safe to
     // do every frame: `ensure_tags` skips cached paths, and the network side
@@ -629,7 +684,12 @@ pub fn remote_list_ui(
 /// Deliberately in the **main** pane, not the sidebar: the address is already
 /// known and saved, so only the login should ever need retyping. The username is
 /// persisted with the server; the password stays in the session map only.
-fn login_form_ui(app: &mut TPlayApp, ui: &mut egui::Ui, theme: &theme::Theme, browse: &network::NetworkBrowse) {
+fn login_form_ui(
+    app: &mut TPlayApp,
+    ui: &mut egui::Ui,
+    theme: &theme::Theme,
+    browse: &network::NetworkBrowse,
+) {
     let host = browse.host.clone();
     let p = theme.palette;
     // Keyed per host, so each saved server keeps the username it was given and

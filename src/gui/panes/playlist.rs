@@ -24,8 +24,16 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
     let drag_hover_id = egui::Id::new("tplay.drag_hover");
 
     // Drag state persists across frames via egui memory
-    let mut drag_from = ui.ctx().memory_mut(|m| m.data.get_temp::<Option<usize>>(drag_from_id).unwrap_or(None));
-    let mut drag_hover = ui.ctx().memory_mut(|m| m.data.get_temp::<Option<usize>>(drag_hover_id).unwrap_or(None));
+    let mut drag_from = ui.ctx().memory_mut(|m| {
+        m.data
+            .get_temp::<Option<usize>>(drag_from_id)
+            .unwrap_or(None)
+    });
+    let mut drag_hover = ui.ctx().memory_mut(|m| {
+        m.data
+            .get_temp::<Option<usize>>(drag_hover_id)
+            .unwrap_or(None)
+    });
 
     // The inner ScrollArea would otherwise take every free pixel
     // (auto_shrink(false, false) sizes to the full available rect), leaving
@@ -67,22 +75,28 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
 
                 // Fixed-height row rect; background, full-row highlight and the
                 // accent stripe all go under the widgets. Drag hover too.
-                let (rect, mut row) = theme::row(ui, i, is_current || drag_hover == Some(i), row_h, &theme);
+                let (rect, mut row) =
+                    theme::row(ui, i, is_current || drag_hover == Some(i), row_h, &theme);
                 row.spacing_mut().item_spacing.x = 8.0;
 
                 row.label(
                     egui::RichText::new(format!("{:>2}.", i + 1))
                         .color(p.text_secondary)
-                        .font(egui::FontId::new(layout.text_meta, theme.metadata_font.clone())),
+                        .font(egui::FontId::new(
+                            layout.text_meta,
+                            theme.metadata_font.clone(),
+                        )),
                 );
 
                 // Title fills the remaining width (meta + fmt + ✕ right-aligned).
                 let right_w = 130.0 + if meta.is_empty() { 0.0 } else { 158.0 };
                 let title_resp = row.add_sized(
                     egui::vec2((rect.width() - right_w).max(40.0), row_h),
-                    egui::Label::new(
-                        egui::RichText::new(&name).color(if is_current { p.text_primary } else { p.text_primary.gamma_multiply(0.85) })
-                    )
+                    egui::Label::new(egui::RichText::new(&name).color(if is_current {
+                        p.text_primary
+                    } else {
+                        p.text_primary.gamma_multiply(0.85)
+                    }))
                     .truncate()
                     .sense(egui::Sense::click_and_drag()),
                 );
@@ -107,20 +121,35 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
                 }
 
                 row.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if theme::icon_button(ui, themes.icon(Icon::Remove), Icon::Remove, 13.0, true, false).clicked() {
+                    if theme::icon_button(
+                        ui,
+                        themes.icon(Icon::Remove),
+                        Icon::Remove,
+                        13.0,
+                        true,
+                        false,
+                    )
+                    .clicked()
+                    {
                         to_delete = Some(i);
                     }
                     if !fmt.is_empty() {
                         ui.label(
                             egui::RichText::new(fmt.clone())
                                 .color(p.text_secondary)
-                                .font(egui::FontId::new(layout.text_meta, theme.metadata_font.clone())),
+                                .font(egui::FontId::new(
+                                    layout.text_meta,
+                                    theme.metadata_font.clone(),
+                                )),
                         );
                     }
                     if !meta.is_empty() {
                         ui.add_sized(
                             egui::vec2(150.0, row_h),
-                            egui::Label::new(egui::RichText::new(meta.clone()).color(p.text_secondary)).truncate(),
+                            egui::Label::new(
+                                egui::RichText::new(meta.clone()).color(p.text_secondary),
+                            )
+                            .truncate(),
                         );
                     }
                 });
@@ -194,7 +223,11 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
             .playlist_file()
             .map(|p| format!("Overwrite playlist: {}", p.display()))
             .unwrap_or_else(|| "Save the playlist to a .tplay file".into());
-        if ui.button("Save Playlist").on_hover_text(save_hover).clicked() {
+        if ui
+            .button("Save Playlist")
+            .on_hover_text(save_hover)
+            .clicked()
+        {
             if let Some(path) = app.playlist_file().map(PathBuf::from) {
                 // Tracked file: overwrite, no prompt. An smb:// URI overwrites
                 // on the server.

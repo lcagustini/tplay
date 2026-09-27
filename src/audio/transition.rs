@@ -9,9 +9,9 @@
 //! of values and returns what to apply, so every guard below is reachable from
 //! a plain `#[test]`.
 
-use crate::audio::eq::{EqSource, EqShared};
-use crate::audio::viz::{TapSource, VizBuf};
 use crate::audio::balance::BalanceSource;
+use crate::audio::eq::{EqShared, EqSource};
+use crate::audio::viz::{TapSource, VizBuf};
 use rodio::{Decoder, Source};
 use std::fs::File;
 use std::io::BufReader;
@@ -99,20 +99,33 @@ pub fn arm_plan(input: &ArmInput) -> Option<Armed> {
     if !input.next_ready {
         return None;
     }
-    let hold = if input.crossfade { cf } else { Duration::from_secs_f32(remaining_secs) };
+    let hold = if input.crossfade {
+        cf
+    } else {
+        Duration::from_secs_f32(remaining_secs)
+    };
     if input.next_duration.is_some_and(|d| d < hold) {
         return None;
     }
-    Some(Armed { index, track: track.to_path_buf(), out_total: total })
+    Some(Armed {
+        index,
+        track: track.to_path_buf(),
+        out_total: total,
+    })
 }
 
 /// Seek a `Decoder<BufReader<File>>` to `target`, falling back to `skip_duration`
 /// (eager decode) if the source reports NotSupported. Returns the (possibly
 /// wrapped) source positioned at `target`.
-pub fn seek_or_skip(mut decoder: Decoder<BufReader<File>>, target: Duration) -> Box<dyn Source<Item = f32> + Send + 'static> {
+pub fn seek_or_skip(
+    mut decoder: Decoder<BufReader<File>>,
+    target: Duration,
+) -> Box<dyn Source<Item = f32> + Send + 'static> {
     match decoder.try_seek(target) {
         Ok(()) => Box::new(decoder),
-        Err(rodio::source::SeekError::NotSupported { .. }) => Box::new(decoder.skip_duration(target)),
+        Err(rodio::source::SeekError::NotSupported { .. }) => {
+            Box::new(decoder.skip_duration(target))
+        }
         Err(e) => {
             // Any other error: best-effort fallback to skip.
             eprintln!("tplay: seek error {e:?}, falling back to skip");
@@ -155,7 +168,11 @@ pub fn xf_gains(remaining: Duration, crossfade: bool, crossfade_secs: f32) -> (f
     if !crossfade {
         return (1.0, 0.0);
     }
-    let p = if crossfade_secs > 0.0 { 1.0 - remaining.as_secs_f32() / crossfade_secs } else { 1.0 };
+    let p = if crossfade_secs > 0.0 {
+        1.0 - remaining.as_secs_f32() / crossfade_secs
+    } else {
+        1.0
+    };
     fade_gains(p)
 }
 

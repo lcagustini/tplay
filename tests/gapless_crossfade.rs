@@ -5,15 +5,17 @@
 
 mod common;
 
-use tplay::audio::transition::{arm_plan, build_gapless_next, fade_gains, xf_gains, ArmInput, PREROLL_SECS};
-use tplay::audio::eq::{EqShared, EqSource, EQ_FREQUENCIES};
-use tplay::audio::viz::{TapSource, VizBuf};
-use tplay::audio::balance::{BalanceSource, balance_gains};
 use rodio::buffer::SamplesBuffer;
 use rodio::Source;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+use tplay::audio::balance::{balance_gains, BalanceSource};
+use tplay::audio::eq::{EqShared, EqSource, EQ_FREQUENCIES};
+use tplay::audio::transition::{
+    arm_plan, build_gapless_next, fade_gains, xf_gains, ArmInput, PREROLL_SECS,
+};
+use tplay::audio::viz::{TapSource, VizBuf};
 
 fn dummy_shared() -> (Arc<RwLock<EqShared>>, Arc<RwLock<f32>>, VizBuf) {
     let eq_shared = Arc::new(RwLock::new(EqShared {
@@ -39,9 +41,15 @@ fn fade_gains_constant_power() {
 #[test]
 fn fade_gains_endpoints() {
     let (o0, i0) = fade_gains(0.0);
-    assert!((o0 - 1.0).abs() < 1e-6 && i0.abs() < 1e-6, "p=0 should be (1, 0)");
+    assert!(
+        (o0 - 1.0).abs() < 1e-6 && i0.abs() < 1e-6,
+        "p=0 should be (1, 0)"
+    );
     let (o1, i1) = fade_gains(1.0);
-    assert!(o1.abs() < 1e-6 && (i1 - 1.0).abs() < 1e-6, "p=1 should be (0, 1)");
+    assert!(
+        o1.abs() < 1e-6 && (i1 - 1.0).abs() < 1e-6,
+        "p=1 should be (0, 1)"
+    );
 }
 
 #[test]
@@ -83,8 +91,7 @@ fn build_gapless_next_produces_full_track_source() {
     common::write_wav(&wav);
     let (eq_shared, balance, viz) = dummy_shared();
 
-    let mut src = build_gapless_next(&wav, eq_shared, balance, viz)
-        .expect("a real wav must build");
+    let mut src = build_gapless_next(&wav, eq_shared, balance, viz).expect("a real wav must build");
     assert_eq!(src.channels(), 2); // BalanceSource upmixes mono → stereo
     assert_eq!(src.sample_rate(), 8000);
     common::assert_duration_approx(src.total_duration(), Duration::from_secs(1), "wav duration");
@@ -94,7 +101,10 @@ fn build_gapless_next_produces_full_track_source() {
     while src.next().is_some() && count < 100_000 {
         count += 1;
     }
-    assert!(count >= 15_998, "full track must drain ~16000 stereo samples, got {count}");
+    assert!(
+        count >= 15_998,
+        "full track must drain ~16000 stereo samples, got {count}"
+    );
 }
 
 /// A build failure must cost a gap, not the app.
@@ -131,7 +141,13 @@ fn build_gapless_next_fails_instead_of_panicking() {
     // the result is a skipped crossfade, not a dead app.
     let (eq_shared, balance, viz) = dummy_shared();
     assert!(
-        build_gapless_next(Path::new("smb://nas/media/song.mp3"), eq_shared, balance, viz).is_none(),
+        build_gapless_next(
+            Path::new("smb://nas/media/song.mp3"),
+            eq_shared,
+            balance,
+            viz
+        )
+        .is_none(),
         "an smb:// URI is not a file — must return None, not panic"
     );
 
@@ -146,18 +162,23 @@ fn build_gapless_next_identity_when_flags_nominal() {
     common::write_wav(&wav);
     let (eq_shared, balance, viz) = dummy_shared();
 
-    let mut src = build_gapless_next(&wav, eq_shared, balance, viz)
-        .expect("a real wav must build");
+    let mut src = build_gapless_next(&wav, eq_shared, balance, viz).expect("a real wav must build");
     let first = src.next().expect("sample");
     // write_wav's first sample is i16 value 0.
-    assert!(first.abs() < 1e-4, "first sample should be silence, got {first}");
+    assert!(
+        first.abs() < 1e-4,
+        "first sample should be silence, got {first}"
+    );
     // Pull 4000 stereo frames (8000 samples) — the 4000th frame's mono sample
     // is i16 4000, duplicated to L and R by the balance upmix.
     for _ in 0..4000 * 2 {
         let _ = src.next();
     }
     let s4k = src.next().expect("sample");
-    assert!((s4k - 4000.0 / 32768.0).abs() < 5e-3, "frame 4000 should be 4000/32768, got {s4k}");
+    assert!(
+        (s4k - 4000.0 / 32768.0).abs() < 5e-3,
+        "frame 4000 should be 4000/32768, got {s4k}"
+    );
 }
 
 /// The wrapper chain preserves stereo (balance outputs stereo from mono) —
@@ -165,7 +186,9 @@ fn build_gapless_next_identity_when_flags_nominal() {
 #[test]
 fn source_chain_stereo_output() {
     let (eq_shared, balance, viz) = dummy_shared();
-    let interleaved: Vec<f32> = (0..100).flat_map(|i| [i as f32 * 0.01, i as f32 * 0.01 + 0.5]).collect();
+    let interleaved: Vec<f32> = (0..100)
+        .flat_map(|i| [i as f32 * 0.01, i as f32 * 0.01 + 0.5])
+        .collect();
     let buf = SamplesBuffer::new(2, 44100, interleaved);
     let eq = EqSource::new(buf, eq_shared);
     let tap = TapSource::new(eq, viz);
@@ -205,21 +228,39 @@ fn xf_gains_starts_silent_and_ends_full() {
     // A full window still to go: the outgoing track is untouched, the incoming
     // one has not started.
     let (out, inc) = xf_gains(Duration::from_secs_f32(CF), true, CF);
-    assert!((out - 1.0).abs() < 1e-6, "out should be full at the window edge, got {out}");
-    assert!(inc.abs() < 1e-6, "in should be silent at the window edge, got {inc}");
+    assert!(
+        (out - 1.0).abs() < 1e-6,
+        "out should be full at the window edge, got {out}"
+    );
+    assert!(
+        inc.abs() < 1e-6,
+        "in should be silent at the window edge, got {inc}"
+    );
 
     // The outgoing track has ended: fully handed over. `out` is -4.37e-8 rather
     // than 0 — see `xf_gains_advances_monotonically` for why.
     let (out, inc) = xf_gains(Duration::ZERO, true, CF);
-    assert!(out.abs() < 1e-6, "out should be silent at the end, got {out}");
-    assert!((inc - 1.0).abs() < 1e-6, "in should be full at the end, got {inc}");
+    assert!(
+        out.abs() < 1e-6,
+        "out should be silent at the end, got {out}"
+    );
+    assert!(
+        (inc - 1.0).abs() < 1e-6,
+        "in should be full at the end, got {inc}"
+    );
 }
 
 #[test]
 fn xf_gains_midpoint_is_equal_power() {
     let (out, inc) = xf_gains(Duration::from_secs_f32(CF / 2.0), true, CF);
-    assert!((out - inc).abs() < 1e-5, "midpoint should be symmetric, got {out}/{inc}");
-    assert!((out * out + inc * inc - 1.0).abs() < 1e-5, "midpoint should not dip");
+    assert!(
+        (out - inc).abs() < 1e-5,
+        "midpoint should be symmetric, got {out}/{inc}"
+    );
+    assert!(
+        (out * out + inc * inc - 1.0).abs() < 1e-5,
+        "midpoint should not dip"
+    );
 }
 
 /// Progress is linear in *remaining time*, so a probe that overshoots the track
@@ -230,8 +271,14 @@ fn xf_gains_clamps_past_the_window() {
     // remaining > crossfade window: the clamp pins p at 0 rather than going
     // negative, which would have swapped the gains and faded the wrong way.
     let (out, inc) = xf_gains(Duration::from_secs_f32(CF * 2.0), true, CF);
-    assert!((out - 1.0).abs() < 1e-6, "overshoot must stay at the start, got {out}");
-    assert!(inc.abs() < 1e-6, "overshoot must stay at the start, got {inc}");
+    assert!(
+        (out - 1.0).abs() < 1e-6,
+        "overshoot must stay at the start, got {out}"
+    );
+    assert!(
+        inc.abs() < 1e-6,
+        "overshoot must stay at the start, got {inc}"
+    );
 }
 
 /// Progress advances monotonically as the track plays out, and stays within
@@ -249,12 +296,18 @@ fn xf_gains_advances_monotonically() {
     for i in (0..=300).rev() {
         let remaining = Duration::from_secs_f32(CF * i as f32 / 300.0);
         let (out, inc) = xf_gains(remaining, true, CF);
-        assert!(out.is_finite() && inc.is_finite(), "i={i}: non-finite gain {out}/{inc}");
+        assert!(
+            out.is_finite() && inc.is_finite(),
+            "i={i}: non-finite gain {out}/{inc}"
+        );
         assert!(
             (-EPS..=1.0 + EPS).contains(&out) && (-EPS..=1.0 + EPS).contains(&inc),
             "i={i}: gain out of range: {out}/{inc}"
         );
-        assert!(out <= prev_out + EPS, "i={i}: outgoing gain must fall, {out} > {prev_out}");
+        assert!(
+            out <= prev_out + EPS,
+            "i={i}: outgoing gain must fall, {out} > {prev_out}"
+        );
         prev_out = out;
     }
 }
@@ -268,7 +321,11 @@ fn xf_gains_holds_silence_for_gapless() {
     for i in 0..=10 {
         let remaining = Duration::from_secs_f32(CF * i as f32 / 10.0);
         let (out, inc) = xf_gains(remaining, false, CF);
-        assert_eq!((out, inc), (1.0, 0.0), "gapless must hold at {remaining:?} left");
+        assert_eq!(
+            (out, inc),
+            (1.0, 0.0),
+            "gapless must hold at {remaining:?} left"
+        );
     }
     // Including the degenerate window: a zero-length crossfade must not divide
     // by zero on the crossfade path, and gapless never looks at cf at all.
@@ -282,9 +339,16 @@ fn xf_gains_holds_silence_for_gapless() {
 #[test]
 fn xf_gains_is_finite_for_a_zero_length_crossfade() {
     let end = fade_gains(1.0);
-    for remaining in [Duration::ZERO, Duration::from_millis(1), Duration::from_secs(3)] {
+    for remaining in [
+        Duration::ZERO,
+        Duration::from_millis(1),
+        Duration::from_secs(3),
+    ] {
         let (out, inc) = xf_gains(remaining, true, 0.0);
-        assert!(out.is_finite() && inc.is_finite(), "{remaining:?} left gave ({out}, {inc})");
+        assert!(
+            out.is_finite() && inc.is_finite(),
+            "{remaining:?} left gave ({out}, {inc})"
+        );
         assert_eq!((out, inc), end, "{remaining:?} left");
     }
 }
@@ -352,12 +416,18 @@ fn arm_needs_a_known_outgoing_length() {
     // its very first frame.
     i.crossfade = false;
     i.gapless = true;
-    assert!(arm_plan(&i).is_none(), "unknown duration, gapless → never arm");
+    assert!(
+        arm_plan(&i).is_none(),
+        "unknown duration, gapless → never arm"
+    );
 }
 
 #[test]
 fn arm_needs_a_candidate() {
-    assert!(arm_plan(&armable(None)).is_none(), "no next track → never arm");
+    assert!(
+        arm_plan(&armable(None)).is_none(),
+        "no next track → never arm"
+    );
 }
 
 #[test]
@@ -386,13 +456,19 @@ fn a_track_shorter_than_the_fade_never_arms() {
         "a track exactly as long as the fade window has nothing to overlap — never arm"
     );
     i.total = Some(Duration::from_millis(2_900));
-    assert!(arm_plan(&i).is_none(), "a track shorter than the fade window — never arm");
+    assert!(
+        arm_plan(&i).is_none(),
+        "a track shorter than the fade window — never arm"
+    );
 
     // One frame longer and it is worth pre-buffering (1s in, so 2.1s left —
     // inside the window, and the track outlasts the window).
     i.total = Some(Duration::from_millis(3_100));
     i.pos = Duration::from_secs(1);
-    assert!(arm_plan(&i).is_some(), "a track longer than the window arms");
+    assert!(
+        arm_plan(&i).is_some(),
+        "a track longer than the window arms"
+    );
 }
 
 /// Gapless arms on `PREROLL_SECS`, not on the crossfade window. The premise
@@ -437,14 +513,23 @@ fn a_short_incoming_track_is_skipped_but_an_untagged_one_is_not() {
     let mut i = armable(Some((1, Path::new(NEXT))));
 
     i.next_duration = Some(Duration::from_secs(2));
-    assert!(arm_plan(&i).is_none(), "2s track under a 3s fade window → skip");
+    assert!(
+        arm_plan(&i).is_none(),
+        "2s track under a 3s fade window → skip"
+    );
 
     // Exactly the window is not "shorter than" it, so it arms.
     i.next_duration = Some(Duration::from_secs(3));
-    assert!(arm_plan(&i).is_some(), "a track exactly as long as the window arms");
+    assert!(
+        arm_plan(&i).is_some(),
+        "a track exactly as long as the window arms"
+    );
 
     i.next_duration = None;
-    assert!(arm_plan(&i).is_some(), "an untagged track has no known length — allow it");
+    assert!(
+        arm_plan(&i).is_some(),
+        "an untagged track has no known length — allow it"
+    );
 }
 
 /// The hold gapless measures against is the *remaining* time, not the crossfade
@@ -458,9 +543,15 @@ fn the_gapless_hold_is_the_remaining_time_not_the_crossfade_window() {
     i.next_duration = Some(Duration::from_secs(2));
     // remaining is 2.0s (the default fixture), so hold = 2.0s and a 2s track
     // is not shorter than it.
-    assert!(arm_plan(&i).is_some(), "hold = remaining = 2s, track is 2s → arm");
+    assert!(
+        arm_plan(&i).is_some(),
+        "hold = remaining = 2s, track is 2s → arm"
+    );
 
     // One frame earlier the hold is smaller still, so the same track is fine.
     i.pos = Duration::from_millis(180_000 - 1_500);
-    assert!(arm_plan(&i).is_some(), "hold shrinks with remaining → still arm");
+    assert!(
+        arm_plan(&i).is_some(),
+        "hold shrinks with remaining → still arm"
+    );
 }

@@ -21,8 +21,8 @@ mod common;
 use eframe::egui;
 use tplay::audio::eq::{EqSettings, EQ_FREQUENCIES, EQ_PRESETS};
 use tplay::config::{Config, Prefs, MAX_CROSSFADE_SECS};
-use tplay::library::{LibraryState, TagCache, TrackInfo};
 use tplay::gui::theme::{ThemeState, Themes, DEFAULT_THEME_ID};
+use tplay::library::{LibraryState, TagCache, TrackInfo};
 
 // ── config::Prefs ────────────────────────────────────────────────────────────
 
@@ -42,7 +42,10 @@ fn prefs_writes_are_idempotent() {
     p.set_remaining(true);
     assert!(p.remaining());
     p.set_remaining(true);
-    assert!(p.remaining(), "writing the same value again changes nothing");
+    assert!(
+        p.remaining(),
+        "writing the same value again changes nothing"
+    );
     p.set_remaining(false);
     assert!(!p.remaining(), "flipping back is a write");
 
@@ -56,15 +59,29 @@ fn prefs_clamps_what_the_ui_offers() {
     let mut p = prefs();
     // Crossfade duration: 0..MAX, and a hand-edited config is clamped on load.
     p.set_crossfade_secs(-5.0);
-    assert_eq!(p.crossfade_secs(), 0.0, "a negative crossfade must clamp to 0");
+    assert_eq!(
+        p.crossfade_secs(),
+        0.0,
+        "a negative crossfade must clamp to 0"
+    );
     p.set_crossfade_secs(900.0);
-    assert_eq!(p.crossfade_secs(), MAX_CROSSFADE_SECS, "must clamp to the UI maximum");
+    assert_eq!(
+        p.crossfade_secs(),
+        MAX_CROSSFADE_SECS,
+        "must clamp to the UI maximum"
+    );
     p.set_crossfade_secs(3.0);
     assert_eq!(p.crossfade_secs(), 3.0);
 
     // A config.json edited to 900s must not reach the fade math.
-    let edited = Config { crossfade_secs: 900.0, ..Default::default() };
-    assert_eq!(Prefs::from_config(&edited).crossfade_secs(), MAX_CROSSFADE_SECS);
+    let edited = Config {
+        crossfade_secs: 900.0,
+        ..Default::default()
+    };
+    assert_eq!(
+        Prefs::from_config(&edited).crossfade_secs(),
+        MAX_CROSSFADE_SECS
+    );
 
     // Balance: the full -1..=1 stereo range.
     p.set_balance(-9.0);
@@ -83,9 +100,17 @@ fn prefs_balance_handle_is_the_live_value() {
     let mut p = prefs();
     let handle = p.balance_shared();
     p.set_balance(0.5);
-    assert_eq!(*handle.read().unwrap(), 0.5, "the source must see the new value");
+    assert_eq!(
+        *handle.read().unwrap(),
+        0.5,
+        "the source must see the new value"
+    );
     *handle.write().unwrap() = -0.25; // as a source-side write would not do, but proves sharing
-    assert_eq!(p.balance(), -0.25, "the getter and the handle are one value");
+    assert_eq!(
+        p.balance(),
+        -0.25,
+        "the getter and the handle are one value"
+    );
 }
 
 /// Round-trip through `Config`: everything `from_config` reads must be a field
@@ -134,7 +159,10 @@ fn eq_settings_clamps_bands_to_the_ui_range() {
 #[test]
 fn eq_settings_ignores_an_out_of_range_band() {
     let eq = EqSettings::new(false, [0.0; 10]);
-    assert!(!eq.set_band(EQ_FREQUENCIES.len(), 3.0), "no such band, no change");
+    assert!(
+        !eq.set_band(EQ_FREQUENCIES.len(), 3.0),
+        "no such band, no change"
+    );
     assert!(!eq.set_band(99, 3.0));
     assert_eq!(eq.gains(), [0.0; 10], "nothing was written");
 }
@@ -143,7 +171,10 @@ fn eq_settings_ignores_an_out_of_range_band() {
 fn eq_settings_reports_no_change_for_the_same_gain() {
     let eq = EqSettings::new(false, [0.0; 10]);
     assert!(eq.set_band(3, 4.0));
-    assert!(!eq.set_band(3, 4.0), "same gain again must not dirty the config");
+    assert!(
+        !eq.set_band(3, 4.0),
+        "same gain again must not dirty the config"
+    );
     assert!(eq.set_band(3, 4.001), "a real nudge counts");
 }
 
@@ -164,7 +195,10 @@ fn eq_settings_derives_the_preset_name_from_the_gains() {
 #[test]
 fn eq_settings_preset_none_and_unknown_names_are_no_ops() {
     let eq = EqSettings::new(false, [1.0; 10]);
-    assert!(!eq.set_preset(None), "None is the ComboBox's Custom label, not an edit");
+    assert!(
+        !eq.set_preset(None),
+        "None is the ComboBox's Custom label, not an edit"
+    );
     assert!(!eq.set_preset(Some("No Such Preset")));
     assert_eq!(eq.gains(), [1.0; 10], "gains untouched");
     // Re-applying the preset already loaded is not a change.
@@ -181,7 +215,10 @@ fn eq_settings_handle_is_shared_with_the_source() {
     eq.set_band(5, 6.0);
     assert_eq!(handle.read().unwrap().gains[5], 6.0);
     handle.write().unwrap().enabled = true;
-    assert!(eq.enabled(), "a write through the handle is visible to the settings");
+    assert!(
+        eq.enabled(),
+        "a write through the handle is visible to the settings"
+    );
 }
 
 #[test]
@@ -263,12 +300,22 @@ fn theme_state_set_switches_once_and_is_idempotent() {
     let mut ts = ThemeState::load(&ctx, known_themes(&root), "alpha");
     assert_eq!(ts.current().id, "alpha");
 
-    assert!(!ts.set(&ctx, "alpha"), "re-selecting the current theme changes nothing");
+    assert!(
+        !ts.set(&ctx, "alpha"),
+        "re-selecting the current theme changes nothing"
+    );
     assert!(ts.set(&ctx, "beta"), "a different theme is a change");
     assert_eq!(ts.current().id, "beta");
     assert!(!ts.set(&ctx, "beta"), "and is idempotent once applied");
-    assert!(!ts.set(&ctx, "nope"), "an unknown id is refused, not a silent no-op");
-    assert_eq!(ts.current().id, "beta", "a refused switch must not move the theme");
+    assert!(
+        !ts.set(&ctx, "nope"),
+        "an unknown id is refused, not a silent no-op"
+    );
+    assert_eq!(
+        ts.current().id,
+        "beta",
+        "a refused switch must not move the theme"
+    );
 
     std::fs::remove_dir_all(&root).ok();
 }
@@ -279,7 +326,10 @@ fn theme_state_lists_every_loadable_theme() {
     let ctx = egui::Context::default();
     let ts = ThemeState::load(&ctx, known_themes(&root), "alpha");
     let ids: Vec<&str> = ts.list().iter().map(|t| t.id.as_str()).collect();
-    assert!(ids.contains(&"alpha") && ids.contains(&"beta"), "got {ids:?}");
+    assert!(
+        ids.contains(&"alpha") && ids.contains(&"beta"),
+        "got {ids:?}"
+    );
     std::fs::remove_dir_all(&root).ok();
 }
 
@@ -292,7 +342,11 @@ fn theme_state_icons_are_none_without_pngs() {
     let ctx = egui::Context::default();
     let ts = ThemeState::load(&ctx, known_themes(&root), "alpha");
     for icon in tplay::gui::theme::Icon::ALL {
-        assert!(ts.icon(icon).is_none(), "{:?} has no PNG in the fixture", icon);
+        assert!(
+            ts.icon(icon).is_none(),
+            "{:?} has no PNG in the fixture",
+            icon
+        );
     }
     std::fs::remove_dir_all(&root).ok();
 }
@@ -311,7 +365,9 @@ fn library_state_open_lists_a_folder_and_asks_for_the_audio() {
     std::fs::write(dir.join("list.tplay"), b"{}").unwrap();
 
     let mut lib = LibraryState::new(dir.clone(), vec![], false);
-    let scan = lib.open(dir.clone(), &tag_cache()).expect("a real dir must open");
+    let scan = lib
+        .open(dir.clone(), &tag_cache())
+        .expect("a real dir must open");
 
     // The scan covers audio only: not the subfolder (a folder has no tags of
     // its own) and not the .tplay (a playlist file is not audio) — even though
@@ -329,7 +385,10 @@ fn library_state_open_refuses_a_non_directory() {
     std::fs::write(&dir, b"x").unwrap();
     let mut lib = LibraryState::new(dir.clone(), vec![], false);
     assert!(lib.open(dir.clone(), &tag_cache()).is_none());
-    assert!(lib.entries().is_empty(), "a refused open must not touch the rows");
+    assert!(
+        lib.entries().is_empty(),
+        "a refused open must not touch the rows"
+    );
     std::fs::remove_file(&dir).ok();
 }
 
@@ -344,7 +403,10 @@ fn library_state_hidden_folders_are_opt_in() {
     assert_eq!(lib.entries().len(), 1, "dot-folders are hidden by default");
 
     assert!(lib.set_show_hidden(true), "a real change");
-    assert!(!lib.set_show_hidden(true), "same value again is not a change");
+    assert!(
+        !lib.set_show_hidden(true),
+        "same value again is not a change"
+    );
     lib.open(dir.clone(), &tag_cache()).unwrap();
     assert_eq!(lib.entries().len(), 2, "now the dot-folder is listed");
 
@@ -357,11 +419,17 @@ fn library_state_sort_picks_then_flips() {
     let mut cache = tag_cache();
     cache.insert(
         PathBuf::from("/tmp/b.mp3"),
-        TrackInfo { title: "B".into(), ..Default::default() },
+        TrackInfo {
+            title: "B".into(),
+            ..Default::default()
+        },
     );
     cache.insert(
         PathBuf::from("/tmp/a.mp3"),
-        TrackInfo { title: "A".into(), ..Default::default() },
+        TrackInfo {
+            title: "A".into(),
+            ..Default::default()
+        },
     );
 
     // The default sort is already column 0 (Title), so selecting it *flips*
@@ -373,10 +441,16 @@ fn library_state_sort_picks_then_flips() {
     assert_eq!(lib.sort(), 1);
     assert!(lib.sort_asc(), "a new column starts ascending");
 
-    assert!(lib.set_sort(1, &cache), "clicking the active column is still a change");
+    assert!(
+        lib.set_sort(1, &cache),
+        "clicking the active column is still a change"
+    );
     assert!(!lib.sort_asc(), "and it flips the direction");
 
-    assert!(!lib.set_sort(999, &cache), "an out-of-range column is refused");
+    assert!(
+        !lib.set_sort(999, &cache),
+        "an out-of-range column is refused"
+    );
     assert_eq!(lib.sort(), 1, "and must not disturb the current sort");
 }
 
@@ -384,11 +458,17 @@ fn library_state_sort_picks_then_flips() {
 fn library_state_toggle_favorite_reports_the_new_state() {
     let mut lib = LibraryState::new(PathBuf::from("/tmp"), vec![], false);
     assert!(!lib.is_favorite(Path::new("/tmp/music")));
-    assert!(lib.toggle_favorite(PathBuf::from("/tmp/music")), "now bookmarked");
+    assert!(
+        lib.toggle_favorite(PathBuf::from("/tmp/music")),
+        "now bookmarked"
+    );
     assert!(lib.is_favorite(Path::new("/tmp/music")));
     assert_eq!(lib.favorites(), &[PathBuf::from("/tmp/music")]);
 
-    assert!(!lib.toggle_favorite(PathBuf::from("/tmp/music")), "now un-bookmarked");
+    assert!(
+        !lib.toggle_favorite(PathBuf::from("/tmp/music")),
+        "now un-bookmarked"
+    );
     assert!(!lib.is_favorite(Path::new("/tmp/music")));
     assert!(lib.favorites().is_empty());
 }

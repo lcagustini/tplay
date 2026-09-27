@@ -17,12 +17,12 @@
 //!   local one. That is the regression guard for the crossfade crash: the arm
 //!   used to hand an `smb://` URI to `File::open`, which panicked.
 
-use tplay::library::TrackInfo;
-use tplay::network::{self, Network};
-use tplay::tracks::{self, TagReader};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use tplay::library::TrackInfo;
+use tplay::network::{self, Network};
+use tplay::tracks::{self, TagReader};
 #[path = "common.rs"]
 mod common;
 
@@ -38,7 +38,11 @@ fn local_file_resolves_remote_tracks_to_the_spool_cache() {
 
     let uri = "smb://nas/media/song.mp3";
     let cached = network::cache_path_in(uri, &dir);
-    assert_eq!(cached.parent().unwrap(), dir, "premise: cache file lands in the dir");
+    assert_eq!(
+        cached.parent().unwrap(),
+        dir,
+        "premise: cache file lands in the dir"
+    );
 
     // Remote, not spooled yet -> nothing local to read.
     assert_eq!(tracks::local_file_in(Path::new(uri), &dir), None);
@@ -46,7 +50,10 @@ fn local_file_resolves_remote_tracks_to_the_spool_cache() {
     // Remote, spooled -> the cache copy, extension preserved so lofty can read
     // the embedded picture.
     std::fs::write(&cached, b"not really audio").unwrap();
-    assert_eq!(tracks::local_file_in(Path::new(uri), &dir), Some(cached.clone()));
+    assert_eq!(
+        tracks::local_file_in(Path::new(uri), &dir),
+        Some(cached.clone())
+    );
     assert_eq!(cached.extension().unwrap(), "mp3");
 
     // A local path comes back unchanged, and does NOT require the file to
@@ -54,9 +61,15 @@ fn local_file_resolves_remote_tracks_to_the_spool_cache() {
     // requiring existence here would silently blank art for a track that is
     // mid-load.
     let local = Path::new("/music/local.flac");
-    assert_eq!(tracks::local_file_in(local, &dir), Some(local.to_path_buf()));
+    assert_eq!(
+        tracks::local_file_in(local, &dir),
+        Some(local.to_path_buf())
+    );
     let missing = Path::new("/music/gone.flac");
-    assert_eq!(tracks::local_file_in(missing, &dir), Some(missing.to_path_buf()));
+    assert_eq!(
+        tracks::local_file_in(missing, &dir),
+        Some(missing.to_path_buf())
+    );
 
     // Extensionless URIs still resolve, by key.
     let no_ext = "smb://nas/media/track";
@@ -150,7 +163,10 @@ fn normalize_keeps_remote_uris_verbatim_and_drops_missing_local_paths() {
 
     // Local, present: canonicalized, so `dir/./x` and `dir/x` are one entry.
     let messy = dir.join(".").join("present.wav");
-    assert_eq!(tracks::normalize(messy.clone()), Some(present.canonicalize().unwrap()));
+    assert_eq!(
+        tracks::normalize(messy.clone()),
+        Some(present.canonicalize().unwrap())
+    );
 
     // Local, missing: dropped — a playlist must not resurrect a deleted file.
     assert_eq!(tracks::normalize(dir.join("gone.wav")), None);
@@ -190,7 +206,11 @@ fn split_for_tags_splits_a_mixed_batch() {
     let (local, remote) = tracks::split_for_tags(batch);
     assert_eq!(
         local,
-        vec![PathBuf::from("/music/a.wav"), PathBuf::from("/music/c.flac"), PathBuf::from("/music/e.wav")],
+        vec![
+            PathBuf::from("/music/a.wav"),
+            PathBuf::from("/music/c.flac"),
+            PathBuf::from("/music/e.wav")
+        ],
         "local batch keeps its order"
     );
     assert_eq!(
@@ -232,13 +252,21 @@ fn tag_reader_requests_then_drains_and_clears() {
     assert!(!reader.request(&cache, &mut net, &[]));
 
     // A real request starts a local scan.
-    assert!(reader.request(&cache, &mut net, &paths), "a local scan must be started");
+    assert!(
+        reader.request(&cache, &mut net, &paths),
+        "a local scan must be started"
+    );
 
     // Drain until every result lands, bounded so a regression fails the test
     // instead of hanging the suite.
     let deadline = Instant::now() + Duration::from_secs(20);
     while cache.len() < paths.len() {
-        assert!(Instant::now() < deadline, "timed out waiting for {} of {}", cache.len(), paths.len());
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {} of {}",
+            cache.len(),
+            paths.len()
+        );
         reader.drain_into(&mut cache);
         std::thread::yield_now();
     }
@@ -256,7 +284,10 @@ fn tag_reader_requests_then_drains_and_clears() {
     // off this, so this is about the receiver being released, not the label.)
     let deadline = Instant::now() + Duration::from_secs(20);
     while reader.drain_into(&mut cache) {
-        assert!(Instant::now() < deadline, "reader kept reporting changes after every result landed");
+        assert!(
+            Instant::now() < deadline,
+            "reader kept reporting changes after every result landed"
+        );
         std::thread::yield_now();
     }
     assert!(
@@ -265,7 +296,10 @@ fn tag_reader_requests_then_drains_and_clears() {
     );
 
     // A cached track is never re-requested, so this must not start a scan.
-    assert!(!reader.request(&cache, &mut net, &paths), "cached tracks must be skipped");
+    assert!(
+        !reader.request(&cache, &mut net, &paths),
+        "cached tracks must be skipped"
+    );
 
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -289,16 +323,28 @@ fn readers_work_on_a_remote_track_id() {
     // the decode is the caller's `Decoder::try_from` job. The readers that must
     // parse bytes report the failure themselves, rather than the caller finding
     // out by handing an `smb://` URI to something that opens a path.
-    assert!(tracks::open_in(track, &dir).is_some(), "open resolves to the cache copy, decode is separate");
-    assert!(tracks::info_in(track, &dir).is_none(), "undecodable bytes yield no tags");
-    assert!(tracks::probe_in(track, &dir).is_none(), "undecodable bytes yield no duration");
+    assert!(
+        tracks::open_in(track, &dir).is_some(),
+        "open resolves to the cache copy, decode is separate"
+    );
+    assert!(
+        tracks::info_in(track, &dir).is_none(),
+        "undecodable bytes yield no tags"
+    );
+    assert!(
+        tracks::probe_in(track, &dir).is_none(),
+        "undecodable bytes yield no duration"
+    );
 
     // Now put a real WAV where the cache says it should be.
     let real = dir.join("real.wav");
     common::write_wav(&real);
     std::fs::copy(&real, &cached).unwrap();
 
-    assert!(tracks::open_in(track, &dir).is_some(), "a cached remote track must open");
+    assert!(
+        tracks::open_in(track, &dir).is_some(),
+        "a cached remote track must open"
+    );
     assert_eq!(
         tracks::probe_in(track, &dir),
         Some(Duration::from_secs(1)),
@@ -325,11 +371,20 @@ fn readiness_is_about_availability_not_source() {
     let present = dir.join("present.wav");
     common::write_wav(&present);
 
-    assert!(tracks::local_file_now_in(&present, &dir).is_some(), "a present local file is ready");
-    assert!(tracks::local_file_now_in(&dir.join("gone.wav"), &dir).is_none(), "a missing one is not");
+    assert!(
+        tracks::local_file_now_in(&present, &dir).is_some(),
+        "a present local file is ready"
+    );
+    assert!(
+        tracks::local_file_now_in(&dir.join("gone.wav"), &dir).is_none(),
+        "a missing one is not"
+    );
 
     let uri = "smb://nas/media/song.wav";
-    assert!(tracks::local_file_now_in(Path::new(uri), &dir).is_none(), "uncached is not ready");
+    assert!(
+        tracks::local_file_now_in(Path::new(uri), &dir).is_none(),
+        "uncached is not ready"
+    );
     std::fs::write(network::cache_path_in(uri, &dir), b"audio").unwrap();
     assert!(
         tracks::local_file_now_in(Path::new(uri), &dir).is_some(),
@@ -355,20 +410,36 @@ fn tag_reader_absorb_caches_ok_and_leaves_err_retryable() {
     reader.absorb(
         &mut cache,
         vec![
-            (blank.to_string_lossy().into_owned(), Ok(TrackInfo::default())),
+            (
+                blank.to_string_lossy().into_owned(),
+                Ok(TrackInfo::default()),
+            ),
             (
                 real.to_string_lossy().into_owned(),
-                Ok(TrackInfo { title: "Real Title".into(), ..Default::default() }),
+                Ok(TrackInfo {
+                    title: "Real Title".into(),
+                    ..Default::default()
+                }),
             ),
         ],
     );
-    assert_eq!(cache.len(), 2, "both successes cached, including the blank one");
+    assert_eq!(
+        cache.len(),
+        2,
+        "both successes cached, including the blank one"
+    );
     // `TrackInfo` has no PartialEq, and the fields are the point: the blank read
     // really is empty, which is what makes it a final answer rather than a
     // missing one.
     let blank_info = &cache[&blank];
-    assert!(blank_info.title.is_empty() && blank_info.artist.is_empty(), "a blank read is empty");
-    assert_eq!(blank_info.duration, None, "a blank read has no duration either");
+    assert!(
+        blank_info.title.is_empty() && blank_info.artist.is_empty(),
+        "a blank read is empty"
+    );
+    assert_eq!(
+        blank_info.duration, None,
+        "a blank read has no duration either"
+    );
     assert_eq!(cache[&real].title, "Real Title");
 
     // A failure says nothing about the file's tags, so it must NOT be cached:
@@ -379,10 +450,23 @@ fn tag_reader_absorb_caches_ok_and_leaves_err_retryable() {
     reader.absorb(
         &mut cache2,
         vec![
-            (failed.to_string_lossy().into_owned(), Err("connection reset".to_string())),
-            (real.to_string_lossy().into_owned(), Ok(TrackInfo::default())),
+            (
+                failed.to_string_lossy().into_owned(),
+                Err("connection reset".to_string()),
+            ),
+            (
+                real.to_string_lossy().into_owned(),
+                Ok(TrackInfo::default()),
+            ),
         ],
     );
-    assert!(!cache2.contains_key(&failed), "a failed transfer must stay retryable");
-    assert_eq!(cache2.len(), 1, "the successful half of the same batch still lands");
+    assert!(
+        !cache2.contains_key(&failed),
+        "a failed transfer must stay retryable"
+    );
+    assert_eq!(
+        cache2.len(),
+        1,
+        "the successful half of the same batch still lands"
+    );
 }

@@ -3,10 +3,10 @@
 //! (`config::should_flush`). `TPlayApp::save_config` writes this file; the
 //! on-disk contract and the decision of *when* to write are what's pinned here.
 
+use std::path::PathBuf;
 use tplay::app::{Config, EqData, LibraryData, VizView};
 use tplay::config::{load_from, should_flush, CONFIG_SAVE_DEBOUNCE_SECS};
 use tplay::network::ServerCfg;
-use std::path::PathBuf;
 
 // ── Reading a damaged file ──────────────────────────────────────────────────
 
@@ -18,7 +18,10 @@ use std::path::PathBuf;
 fn a_missing_config_agrees_with_one_whose_fields_are_absent() {
     let from_default = Config::default();
     let from_serde: Config = serde_json::from_str("{}").unwrap();
-    assert_eq!(from_serde.volume, 1.0, "absent field takes its serde default");
+    assert_eq!(
+        from_serde.volume, 1.0,
+        "absent field takes its serde default"
+    );
     assert_eq!(from_default.volume, 1.0, "and so must a missing file");
     assert_eq!(
         serde_json::to_string(&from_default).unwrap(),
@@ -49,7 +52,11 @@ fn a_malformed_config_is_kept_before_defaults_can_overwrite_it() {
     assert_eq!(loaded.volume, 1.0, "defaults, so the app runs");
 
     let kept = dir.join("config.json.broken");
-    assert_eq!(std::fs::read_to_string(&kept).unwrap(), original, "original bytes preserved");
+    assert_eq!(
+        std::fs::read_to_string(&kept).unwrap(),
+        original,
+        "original bytes preserved"
+    );
 
     // A missing file is a fresh install, not damage: nothing to keep.
     std::fs::remove_file(&kept).unwrap();
@@ -57,7 +64,10 @@ fn a_malformed_config_is_kept_before_defaults_can_overwrite_it() {
     assert!(!kept.exists(), "a missing file is not a malformed one");
 
     // A good file round-trips and leaves no `.broken` behind.
-    let good = Config { volume: 0.25, ..Config::default() };
+    let good = Config {
+        volume: 0.25,
+        ..Config::default()
+    };
     std::fs::write(&path, serde_json::to_string(&good).unwrap()).unwrap();
     assert_eq!(load_from(Some(&path)).volume, 0.25);
     assert!(!kept.exists());
@@ -118,8 +128,14 @@ fn a_drag_cannot_write_more_often_than_the_window() {
             writes += 1;
         }
     }
-    assert!(writes >= 3, "2s of dragging must still get written: {writes} writes");
-    assert!(writes < 10, "120 frames must coalesce into a handful of writes, got {writes}");
+    assert!(
+        writes >= 3,
+        "2s of dragging must still get written: {writes} writes"
+    );
+    assert!(
+        writes < 10,
+        "120 frames must coalesce into a handful of writes, got {writes}"
+    );
     assert!(
         gaps.iter().all(|g| *g >= CONFIG_SAVE_DEBOUNCE_SECS),
         "every write must be at least one window after the last: {gaps:?}"
@@ -138,7 +154,10 @@ fn a_drag_cannot_write_more_often_than_the_window() {
 fn equal_configs_serialize_identically() {
     let build = || Config {
         theme: "neon".into(),
-        eq: EqData { enabled: true, gains: [1.0; 10] },
+        eq: EqData {
+            enabled: true,
+            gains: [1.0; 10],
+        },
         shuffle: true,
         repeat: true,
         viz_view: VizView::Wave,
@@ -156,7 +175,10 @@ fn equal_configs_serialize_identically() {
         gapless: true,
         crossfade: true,
         crossfade_secs: 3.0,
-        servers: vec![ServerCfg { host: "10.0.0.1".into(), username: "guest".into() }],
+        servers: vec![ServerCfg {
+            host: "10.0.0.1".into(),
+            username: "guest".into(),
+        }],
     };
     let a = serde_json::to_string_pretty(&build()).unwrap();
     let b = serde_json::to_string_pretty(&build()).unwrap();
@@ -172,7 +194,10 @@ fn equal_configs_serialize_identically() {
 fn config_round_trip_preserves_every_field() {
     let c = Config {
         theme: "neon".into(),
-        eq: EqData { enabled: true, gains: [1.0; 10] },
+        eq: EqData {
+            enabled: true,
+            gains: [1.0; 10],
+        },
         shuffle: true,
         repeat: true,
         viz_view: VizView::Wave,
@@ -191,8 +216,14 @@ fn config_round_trip_preserves_every_field() {
         crossfade: true,
         crossfade_secs: 5.0,
         servers: vec![
-            ServerCfg { host: "192.168.1.50".into(), username: "lucas".into() },
-            ServerCfg { host: "box".into(), username: String::new() },
+            ServerCfg {
+                host: "192.168.1.50".into(),
+                username: "lucas".into(),
+            },
+            ServerCfg {
+                host: "box".into(),
+                username: String::new(),
+            },
         ],
     };
 
@@ -220,8 +251,14 @@ fn config_round_trip_preserves_every_field() {
     assert_eq!(
         back.servers,
         vec![
-            ServerCfg { host: "192.168.1.50".into(), username: "lucas".into() },
-            ServerCfg { host: "box".into(), username: String::new() },
+            ServerCfg {
+                host: "192.168.1.50".into(),
+                username: "lucas".into()
+            },
+            ServerCfg {
+                host: "box".into(),
+                username: String::new()
+            },
         ]
     );
 }
@@ -266,8 +303,7 @@ fn config_keeps_unknown_theme_id() {
 #[test]
 fn config_json_shape_has_expected_keys() {
     let c = Config::default();
-    let v: serde_json::Value =
-        serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
 
     assert!(v.get("theme").is_some());
     assert!(v.get("shuffle").is_some());
@@ -279,7 +315,10 @@ fn config_json_shape_has_expected_keys() {
     assert!(v.get("last_playlist").is_some());
     let eq = v.get("eq").expect("eq object");
     assert!(eq.get("enabled").is_some());
-    assert_eq!(eq.get("gains").and_then(|g| g.as_array()).map(Vec::len), Some(10));
+    assert_eq!(
+        eq.get("gains").and_then(|g| g.as_array()).map(Vec::len),
+        Some(10)
+    );
     let lib = v.get("library").expect("library object");
     assert!(lib.get("favorites").is_some());
     assert!(lib.get("last_dir").is_some());

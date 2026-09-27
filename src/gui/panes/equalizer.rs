@@ -81,7 +81,8 @@ pub fn equalizer_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui
     // Bands with fixed inter-band spacing, centered in the pane: the gap
     // between sliders is constant, and the margins to the pane edges absorb all
     // leftover width equally (dynamic centering).
-    let slider_h = (ui.available_height() - 30.0).clamp(layout.eq_slider_min_h, layout.eq_slider_max_h);
+    let slider_h =
+        (ui.available_height() - 30.0).clamp(layout.eq_slider_min_h, layout.eq_slider_max_h);
     // Fixed band width and spacing normally; shrink to fit narrow panes.
     let min_spacing = ui.spacing().item_spacing.x;
     let avail_w = ui.available_width();
@@ -128,7 +129,10 @@ pub fn equalizer_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui
                     ui.label(
                         egui::RichText::new(TPlayApp::format_freq(EQ_FREQUENCIES[i]))
                             .color(p.text_secondary)
-                            .font(egui::FontId::new(layout.text_meta, theme.metadata_font.clone())),
+                            .font(egui::FontId::new(
+                                layout.text_meta,
+                                theme.metadata_font.clone(),
+                            )),
                     );
                 });
             });

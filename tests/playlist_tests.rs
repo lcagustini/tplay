@@ -1,11 +1,11 @@
 //! Playlist logic tests — shuffle, repeat, add/remove/move, navigation.
 
+use std::path::{Path, PathBuf};
+use tplay::audio::eq::EQ_PRESETS;
 use tplay::library::{
     default_playlist_name, playlist_file_name, playlist_json, read_playlist, write_playlist,
     DEFAULT_PLAYLIST_NAME,
 };
-use tplay::audio::eq::EQ_PRESETS;
-use std::path::{Path, PathBuf};
 #[path = "common.rs"]
 mod common;
 use crate::common::test_dir;
@@ -15,10 +15,7 @@ fn playlist_write_read_roundtrip() {
     let dir = test_dir("playlist_write_read_roundtrip");
     let file = dir.join("test.tplay");
 
-    let tracks = vec![
-        dir.join("track1.mp3"),
-        PathBuf::from("relative/track2.ogg"),
-    ];
+    let tracks = vec![dir.join("track1.mp3"), PathBuf::from("relative/track2.ogg")];
 
     write_playlist(&file, &tracks).unwrap();
     let back = read_playlist(&file, &dir).unwrap();
@@ -50,10 +47,7 @@ fn playlist_relative_paths_resolve_against_playlist_dir() {
     std::fs::create_dir_all(&subdir).unwrap();
     let file = subdir.join("playlist.tplay");
 
-    let tracks = vec![
-        PathBuf::from("track1.mp3"),
-        PathBuf::from("../track2.flac"),
-    ];
+    let tracks = vec![PathBuf::from("track1.mp3"), PathBuf::from("../track2.flac")];
 
     write_playlist(&file, &tracks).unwrap();
     let back = read_playlist(&file, &subdir).unwrap();
@@ -87,7 +81,11 @@ fn smb_uris_are_not_joined_onto_the_base() {
 
     assert_eq!(back[0], tracks[0], "smb URI must survive verbatim");
     assert_eq!(back[1], tracks[1], "smb URI on another share must survive");
-    assert_eq!(back[2], dir.join("local.wav"), "absolute local path untouched");
+    assert_eq!(
+        back[2],
+        dir.join("local.wav"),
+        "absolute local path untouched"
+    );
 
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -101,11 +99,18 @@ fn relative_entries_resolve_against_a_share_uri_base() {
     let cache_copy = dir.join("spool-cache-copy.tplay");
     let share_dir = "smb://nas/media/albums";
 
-    write_playlist(&cache_copy, &[PathBuf::from("01.mp3"), PathBuf::from("sub/02.mp3")]).unwrap();
+    write_playlist(
+        &cache_copy,
+        &[PathBuf::from("01.mp3"), PathBuf::from("sub/02.mp3")],
+    )
+    .unwrap();
 
     // The WRONG base (the cache file's own directory) would yield local paths.
     let wrong = read_playlist(&cache_copy, cache_copy.parent().unwrap()).unwrap();
-    assert!(wrong[0].starts_with(dir.to_str().unwrap()), "premise: cache-dir base is wrong");
+    assert!(
+        wrong[0].starts_with(dir.to_str().unwrap()),
+        "premise: cache-dir base is wrong"
+    );
 
     // The right base — the share directory the playlist was browsed at.
     let back = read_playlist(&cache_copy, Path::new(share_dir)).unwrap();
@@ -127,11 +132,17 @@ fn mixed_playlist_roundtrips_through_json() {
     ];
 
     let json = playlist_json(&tracks).unwrap();
-    assert!(json.contains("smb://nas/share/remote.mp3"), "URIs are stored in full");
+    assert!(
+        json.contains("smb://nas/share/remote.mp3"),
+        "URIs are stored in full"
+    );
 
     std::fs::write(&file, &json).unwrap();
     let back = read_playlist(&file, &dir).unwrap();
-    assert_eq!(back, tracks, "mixed playlist must survive a save/load cycle");
+    assert_eq!(
+        back, tracks,
+        "mixed playlist must survive a save/load cycle"
+    );
 
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -139,7 +150,10 @@ fn mixed_playlist_roundtrips_through_json() {
 #[test]
 fn default_playlist_name_keeps_the_tracked_stem() {
     // A loaded playlist keeps its name when saved somewhere new.
-    assert_eq!(default_playlist_name(Some(Path::new("/music/road.trip.tplay"))), "road.trip.tplay");
+    assert_eq!(
+        default_playlist_name(Some(Path::new("/music/road.trip.tplay"))),
+        "road.trip.tplay"
+    );
     // Remote targets parse too — only the last segment matters.
     assert_eq!(
         default_playlist_name(Some(Path::new("smb://nas/share/mix.tplay"))),
@@ -147,7 +161,10 @@ fn default_playlist_name_keeps_the_tracked_stem() {
     );
     // No tracked file, or a name with no stem to carry over.
     assert_eq!(default_playlist_name(None), DEFAULT_PLAYLIST_NAME);
-    assert_eq!(default_playlist_name(Some(Path::new(".tplay"))), DEFAULT_PLAYLIST_NAME);
+    assert_eq!(
+        default_playlist_name(Some(Path::new(".tplay"))),
+        DEFAULT_PLAYLIST_NAME
+    );
 }
 
 #[test]
@@ -155,9 +172,15 @@ fn playlist_file_name_appends_the_extension_and_strips_separators() {
     // The extension is implied — users type a bare name.
     assert_eq!(playlist_file_name("mix").as_deref(), Some("mix.tplay"));
     // Already correct, left alone.
-    assert_eq!(playlist_file_name("mix.tplay").as_deref(), Some("mix.tplay"));
+    assert_eq!(
+        playlist_file_name("mix.tplay").as_deref(),
+        Some("mix.tplay")
+    );
     // Case-insensitive: the extension check follows is_playlist.
-    assert_eq!(playlist_file_name("mix.TPLAY").as_deref(), Some("mix.TPLAY"));
+    assert_eq!(
+        playlist_file_name("mix.TPLAY").as_deref(),
+        Some("mix.TPLAY")
+    );
     // A typed path is sanitized, not sent to the server as a bogus path.
     assert_eq!(playlist_file_name("a/b").as_deref(), Some("a_b.tplay"));
     assert_eq!(playlist_file_name("a\\b").as_deref(), Some("a_b.tplay"));
@@ -165,7 +188,10 @@ fn playlist_file_name_appends_the_extension_and_strips_separators() {
     assert_eq!(playlist_file_name(""), None);
     assert_eq!(playlist_file_name("   "), None);
     // A name that is only an extension would be a stemless hidden file.
-    assert_eq!(playlist_file_name(".tplay").as_deref(), Some(DEFAULT_PLAYLIST_NAME));
+    assert_eq!(
+        playlist_file_name(".tplay").as_deref(),
+        Some(DEFAULT_PLAYLIST_NAME)
+    );
 }
 
 // ── Shuffle logic tests ────────────────────────────────────────────────
@@ -173,9 +199,18 @@ fn playlist_file_name_appends_the_extension_and_strips_separators() {
 /// Replicates TPlayApp::next_track_index shuffle logic for testing. That is
 /// `peek_next_index` + `commit_next_index` composed — the split itself, and the
 /// guarantee that a peek mutates nothing, are pinned in playlist_shuffle.rs.
-fn shuffle_next(len: usize, played: &mut Vec<usize>, rng_state: &mut u64, repeat: bool) -> Option<usize> {
-    if len == 0 { return None; }
-    if len == 1 { return repeat.then_some(0); }
+fn shuffle_next(
+    len: usize,
+    played: &mut Vec<usize>,
+    rng_state: &mut u64,
+    repeat: bool,
+) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    if len == 1 {
+        return repeat.then_some(0);
+    }
 
     let unplayed: Vec<usize> = (0..len).filter(|i| !played.contains(i)).collect();
     if unplayed.is_empty() {
@@ -196,8 +231,12 @@ fn shuffle_next(len: usize, played: &mut Vec<usize>, rng_state: &mut u64, repeat
 /// `peek_prev_index` + `commit_prev` composed; the split, the idempotence it
 /// buys and the empty-history case it fixes are pinned in playlist_shuffle.rs.
 fn shuffle_prev(len: usize, played: &mut Vec<usize>, repeat: bool) -> Option<usize> {
-    if len == 0 { return None; }
-    if len == 1 { return repeat.then_some(0); }
+    if len == 0 {
+        return None;
+    }
+    if len == 1 {
+        return repeat.then_some(0);
+    }
 
     let idx = if played.len() > 1 {
         played.get(played.len() - 2).copied()
@@ -229,7 +268,11 @@ fn shuffle_plays_each_track_once_before_repeat() {
 
     for _ in 0..len {
         let idx = shuffle_next(len, &mut played, &mut rng, false).unwrap();
-        assert!(!seen.contains(&idx), "duplicate in shuffle cycle: {:?}", played);
+        assert!(
+            !seen.contains(&idx),
+            "duplicate in shuffle cycle: {:?}",
+            played
+        );
         seen.push(idx);
     }
     assert_eq!(seen.len(), len);
@@ -304,8 +347,12 @@ fn shuffle_prev_loops_with_repeat() {
 // ── Sequential (non-shuffle) navigation tests ────────────────────────
 
 fn sequential_next(len: usize, current: Option<usize>, repeat: bool) -> Option<usize> {
-    if len == 0 { return None; }
-    if len == 1 { return repeat.then_some(0); }
+    if len == 0 {
+        return None;
+    }
+    if len == 1 {
+        return repeat.then_some(0);
+    }
 
     match (repeat, current) {
         (false, Some(i)) if i + 1 < len => Some(i + 1),
@@ -316,8 +363,12 @@ fn sequential_next(len: usize, current: Option<usize>, repeat: bool) -> Option<u
 }
 
 fn sequential_prev(len: usize, current: Option<usize>, repeat: bool) -> Option<usize> {
-    if len == 0 { return None; }
-    if len == 1 { return repeat.then_some(0); }
+    if len == 0 {
+        return None;
+    }
+    if len == 1 {
+        return repeat.then_some(0);
+    }
 
     match (repeat, current) {
         (false, Some(i)) if i > 0 => Some(i - 1),
@@ -372,15 +423,21 @@ fn remove_track_adjusts_current_index() {
 
     // Remove track before current
     playlist.remove(0);
-    if current_index == Some(0) { current_index = None; }
-    else if current_index.unwrap() > 0 { current_index = Some(current_index.unwrap() - 1); }
+    if current_index == Some(0) {
+        current_index = None;
+    } else if current_index.unwrap() > 0 {
+        current_index = Some(current_index.unwrap() - 1);
+    }
     assert_eq!(current_index, Some(0)); // now points to b.mp3 (was index 1)
     assert_eq!(playlist[0], PathBuf::from("b.mp3"));
 
     // Remove current track
     playlist.remove(0);
-    if current_index == Some(0) { current_index = None; }
-    else if current_index.unwrap() > 0 { current_index = Some(current_index.unwrap() - 1); }
+    if current_index == Some(0) {
+        current_index = None;
+    } else if current_index.unwrap() > 0 {
+        current_index = Some(current_index.unwrap() - 1);
+    }
     assert_eq!(current_index, None); // current track removed
     assert_eq!(playlist.len(), 1);
 }
@@ -398,15 +455,21 @@ fn move_track_adjusts_current_index() {
     // Move a (0) to after c (2) -> playlist: b, c, a, d
     let item = playlist.remove(0);
     playlist.insert(2, item);
-    if current_index == Some(0) { current_index = Some(2); }
-    else if 0 < current_index.unwrap() && current_index.unwrap() <= 2 { current_index = Some(current_index.unwrap() - 1); }
+    if current_index == Some(0) {
+        current_index = Some(2);
+    } else if 0 < current_index.unwrap() && current_index.unwrap() <= 2 {
+        current_index = Some(current_index.unwrap() - 1);
+    }
     assert_eq!(current_index, Some(0)); // b.mp3 now at index 0
 
     // Move d (3) to before b (0) -> playlist: d, b, c, a
     let item = playlist.remove(3);
     playlist.insert(0, item);
-    if current_index == Some(3) { current_index = Some(0); }
-    else if 0 <= current_index.unwrap() && current_index.unwrap() < 3 { current_index = Some(current_index.unwrap() + 1); }
+    if current_index == Some(3) {
+        current_index = Some(0);
+    } else if 0 <= current_index.unwrap() && current_index.unwrap() < 3 {
+        current_index = Some(current_index.unwrap() + 1);
+    }
     assert_eq!(current_index, Some(1)); // b.mp3 now at index 1
 }
 
@@ -417,7 +480,12 @@ fn eq_presets_have_correct_length() {
     for (name, gains) in EQ_PRESETS {
         assert_eq!(gains.len(), 10, "preset {} has wrong band count", name);
         for &g in &gains {
-            assert!((-12.0..=12.0).contains(&g), "preset {} gain {} out of range", name, g);
+            assert!(
+                (-12.0..=12.0).contains(&g),
+                "preset {} gain {} out of range",
+                name,
+                g
+            );
         }
     }
 }

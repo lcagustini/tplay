@@ -44,12 +44,22 @@ impl Iterator for RateSource {
 }
 
 impl tplay::rodio::Source for RateSource {
-    fn current_span_len(&self) -> Option<usize> { None }
-    fn channels(&self) -> u16 { 1 }
-    fn sample_rate(&self) -> u32 { self.rate }
-    fn total_duration(&self) -> Option<std::time::Duration> { None }
+    fn current_span_len(&self) -> Option<usize> {
+        None
+    }
+    fn channels(&self) -> u16 {
+        1
+    }
+    fn sample_rate(&self) -> u32 {
+        self.rate
+    }
+    fn total_duration(&self) -> Option<std::time::Duration> {
+        None
+    }
     fn try_seek(&mut self, _: std::time::Duration) -> Result<(), tplay::rodio::source::SeekError> {
-        Err(tplay::rodio::source::SeekError::NotSupported { underlying_source: "rate probe" })
+        Err(tplay::rodio::source::SeekError::NotSupported {
+            underlying_source: "rate probe",
+        })
     }
 }
 
@@ -61,14 +71,30 @@ fn the_tap_reports_the_sources_sample_rate() {
     use tplay::audio::viz::TapSource;
 
     let buf = VizBuf::new();
-    assert_eq!(buf.sample_rate(), 44100, "nothing playing: the default stands");
+    assert_eq!(
+        buf.sample_rate(),
+        44100,
+        "nothing playing: the default stands"
+    );
 
-    let mut tap = TapSource::new(RateSource { rate: 48000, left: 4 }, buf.clone());
+    let mut tap = TapSource::new(
+        RateSource {
+            rate: 48000,
+            left: 4,
+        },
+        buf.clone(),
+    );
     assert_eq!(buf.sample_rate(), 48000);
     while tap.next().is_some() {}
 
     // Explicitly: a non-44.1k rate survives, and a 96k one is not clamped.
-    TapSource::new(RateSource { rate: 96000, left: 1 }, buf.clone());
+    TapSource::new(
+        RateSource {
+            rate: 96000,
+            left: 1,
+        },
+        buf.clone(),
+    );
     assert_eq!(buf.sample_rate(), 96000);
 
     // `Default` must not hand out a zero rate, which would divide the bins to inf.
@@ -97,8 +123,17 @@ fn fft_sine_1khz() {
         input[i * 2] = (2.0 * PI * 1000.0 * i as f32 / 44100.0).sin();
     }
     let mag = fft_magnitude(&mut input);
-    let peak_bin = mag.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0;
-    assert!((peak_bin as i32 - 23).abs() <= 1, "peak at bin {}, expected ~23", peak_bin);
+    let peak_bin = mag
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .unwrap()
+        .0;
+    assert!(
+        (peak_bin as i32 - 23).abs() <= 1,
+        "peak at bin {}, expected ~23",
+        peak_bin
+    );
 }
 
 #[test]

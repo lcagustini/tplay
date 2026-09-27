@@ -92,30 +92,65 @@ pub struct ServerCfg {
 /// Commands sent to the worker thread.
 pub enum SmbCmd {
     /// Enumerate the server's disk shares. `host` is the bare hostname/IP.
-    ListShares { host: String, creds: SmbCreds, reply: Sender<SmbReply> },
+    ListShares {
+        host: String,
+        creds: SmbCreds,
+        reply: Sender<SmbReply>,
+    },
     /// List a share or directory. `uri` = `smb://host/share[/rel/dir]`.
-    ListDir { uri: String, creds: SmbCreds, reply: Sender<SmbReply> },
+    ListDir {
+        uri: String,
+        creds: SmbCreds,
+        reply: Sender<SmbReply>,
+    },
     /// Download `uri` into the spool cache, replying the local path. Used for
     /// playback AND for reading a remote `.tplay` off the server.
-    Spool { uri: String, creds: SmbCreds, reply: Sender<SmbReply> },
+    Spool {
+        uri: String,
+        creds: SmbCreds,
+        reply: Sender<SmbReply>,
+    },
     /// Upload `data` to `uri`, overwriting it if it exists.
-    Save { uri: String, data: Vec<u8>, creds: SmbCreds, reply: Sender<SmbReply> },
+    Save {
+        uri: String,
+        data: Vec<u8>,
+        creds: SmbCreds,
+        reply: Sender<SmbReply>,
+    },
     /// Spool many `smb://` tracks and read their tags from the copies. Batched
     /// because the tagger fires per directory listing or per playlist load.
-    Tags { uris: Vec<String>, creds: SmbCreds, reply: Sender<SmbReply> },
+    Tags {
+        uris: Vec<String>,
+        creds: SmbCreds,
+        reply: Sender<SmbReply>,
+    },
 }
 
 /// Replies routed back to the app (drained like the tag scan). The `uri`/
 /// `host` fields let the app drop stale replies (the user navigated away).
 pub enum SmbReply {
-    Shares { host: String, result: Result<Vec<RemoteEntry>, String> },
-    Dir { uri: String, result: Result<Vec<RemoteEntry>, String> },
-    Spooled { uri: String, result: Result<PathBuf, String> },
-    Saved { uri: String, result: Result<(), String> },
+    Shares {
+        host: String,
+        result: Result<Vec<RemoteEntry>, String>,
+    },
+    Dir {
+        uri: String,
+        result: Result<Vec<RemoteEntry>, String>,
+    },
+    Spooled {
+        uri: String,
+        result: Result<PathBuf, String>,
+    },
+    Saved {
+        uri: String,
+        result: Result<(), String>,
+    },
     /// One entry per requested URI, in request order. `Err` means the transfer
     /// or parse failed and is **retryable** — the app must not cache it as
     /// "this file has no tags".
-    Tags { results: Vec<(String, Result<TrackInfo, String>)> },
+    Tags {
+        results: Vec<(String, Result<TrackInfo, String>)>,
+    },
 }
 
 /// An event the app must act on, yielded by `Network::drain`. Browse replies
@@ -124,11 +159,20 @@ pub enum SmbReply {
 pub enum Event {
     /// A requested spool finished for the still-pending track. The app plays
     /// the local spooled copy in place of the `smb://` URI it was told to play.
-    Spooled { uri: String, result: Result<PathBuf, String> },
+    Spooled {
+        uri: String,
+        result: Result<PathBuf, String>,
+    },
     /// A remote `.tplay` finished downloading; `local` is its spooled copy.
-    Fetched { uri: String, result: Result<PathBuf, String> },
+    Fetched {
+        uri: String,
+        result: Result<PathBuf, String>,
+    },
     /// A playlist write to a share completed.
-    Saved { uri: String, result: Result<(), String> },
+    Saved {
+        uri: String,
+        result: Result<(), String>,
+    },
     /// Tags for a batch of remote tracks. `Ok` with an all-empty `TrackInfo` is
     /// the definitive "read it, it has no tags" answer and IS cacheable;
     /// `Err` is a failure and must stay uncached so it can be retried.
@@ -447,7 +491,9 @@ impl Network {
     pub fn fetch_tags(&mut self, uris: Vec<String>) {
         let mut by_host: HashMap<String, Vec<String>> = HashMap::new();
         for uri in uris {
-            let Some((host, _, _)) = split_uri(&uri) else { continue };
+            let Some((host, _, _)) = split_uri(&uri) else {
+                continue;
+            };
             if self.tagging.contains(&uri) {
                 continue;
             }
@@ -480,22 +526,36 @@ impl Network {
                         if b.host == host && b.share.is_none() {
                             b.busy = false;
                             match result {
-                                Ok(entries) => { b.entries = entries; b.error = None; }
-                                Err(e) => { b.entries = Vec::new(); b.error = Some(e); }
+                                Ok(entries) => {
+                                    b.entries = entries;
+                                    b.error = None;
+                                }
+                                Err(e) => {
+                                    b.entries = Vec::new();
+                                    b.error = Some(e);
+                                }
                             }
                         }
                     }
                 }
                 SmbReply::Dir { uri, result } => {
                     if let Some(b) = self.browse.as_mut() {
-                        let current = b.share.as_ref()
+                        let current = b
+                            .share
+                            .as_ref()
                             .map(|s| dir_uri(&b.host, s, &b.rel))
                             .unwrap_or_default();
                         if current == uri {
                             b.busy = false;
                             match result {
-                                Ok(entries) => { b.entries = entries; b.error = None; }
-                                Err(e) => { b.entries = Vec::new(); b.error = Some(e); }
+                                Ok(entries) => {
+                                    b.entries = entries;
+                                    b.error = None;
+                                }
+                                Err(e) => {
+                                    b.entries = Vec::new();
+                                    b.error = Some(e);
+                                }
                             }
                         }
                     }
@@ -560,7 +620,11 @@ pub fn split_uri(uri: &str) -> Option<(String, Option<String>, String)> {
         .split_once('/')
         .map(|(s, r)| (Some(s.to_string()), r.to_string()))
         .unwrap_or_else(|| {
-            if tail.is_empty() { (None, String::new()) } else { (Some(tail.to_string()), String::new()) }
+            if tail.is_empty() {
+                (None, String::new())
+            } else {
+                (Some(tail.to_string()), String::new())
+            }
         });
     Some((host.to_string(), share, rel))
 }
@@ -586,7 +650,11 @@ pub fn share_uri(host: &str, share: &str) -> String {
 /// `smb://host/share/rel` with `rel` optionally empty (share root).
 pub fn dir_uri(host: &str, share: &str, rel: &str) -> String {
     let base = share_uri(host, share);
-    if rel.is_empty() { base } else { format!("{base}/{rel}") }
+    if rel.is_empty() {
+        base
+    } else {
+        format!("{base}/{rel}")
+    }
 }
 
 /// `parent_uri/name` — descend one level from a share or directory URI.
@@ -604,13 +672,10 @@ pub fn child_uri(parent: &str, name: &str) -> String {
 /// to resolve against.
 pub fn uri_parent(uri: &str) -> &str {
     match uri.rsplit_once('/') {
-        Some((parent, _)) if parent.strip_prefix("smb://").is_some_and(|r| !r.is_empty()) => {
-            parent
-        }
+        Some((parent, _)) if parent.strip_prefix("smb://").is_some_and(|r| !r.is_empty()) => parent,
         _ => uri,
     }
 }
-
 
 // ── Spool cache ──────────────────────────────────────────────────────────────
 
@@ -643,7 +708,11 @@ pub fn spool_dir() -> PathBuf {
 /// is kept from the URI so rodio can sniff the format.
 pub fn cache_path_in(uri: &str, dir: &Path) -> PathBuf {
     let key = spool_key(uri);
-    match Path::new(uri).extension().and_then(|e| e.to_str()).filter(|e| !e.is_empty()) {
+    match Path::new(uri)
+        .extension()
+        .and_then(|e| e.to_str())
+        .filter(|e| !e.is_empty())
+    {
         Some(ext) => dir.join(format!("{key}.{ext}")),
         None => dir.join(key),
     }
@@ -660,7 +729,10 @@ pub fn cache_path(uri: &str) -> PathBuf {
 /// `Sender<SmbCmd>` (channel disconnect on `rx.recv()` error).
 fn spawn_worker(rx: Receiver<SmbCmd>) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
             Ok(rt) => rt,
             Err(e) => {
                 eprintln!("tplay: smb worker runtime failed: {e}");
@@ -684,7 +756,12 @@ fn spawn_worker(rx: Receiver<SmbCmd>) -> thread::JoinHandle<()> {
                         let res = run_spool(&uri, &creds).await;
                         let _ = reply.send(SmbReply::Spooled { uri, result: res });
                     }
-                    SmbCmd::Save { uri, data, creds, reply } => {
+                    SmbCmd::Save {
+                        uri,
+                        data,
+                        creds,
+                        reply,
+                    } => {
                         let res = run_save(&uri, &data, &creds).await;
                         let _ = reply.send(SmbReply::Saved { uri, result: res });
                     }
@@ -719,7 +796,11 @@ async fn run_list_shares(host: &str, creds: &SmbCreds) -> CmdResult<Vec<RemoteEn
     Ok(shares
         .into_iter()
         .filter(|s| s.share_type & 0x0000_FFFF == 0)
-        .map(|s| RemoteEntry { name: s.name, size: 0, is_dir: true })
+        .map(|s| RemoteEntry {
+            name: s.name,
+            size: 0,
+            is_dir: true,
+        })
         .collect())
 }
 
@@ -727,8 +808,14 @@ async fn run_list_dir(uri: &str, creds: &SmbCreds) -> CmdResult<Vec<RemoteEntry>
     let (host, share, rel) = split_uri(uri).ok_or_else(|| format!("bad uri: {uri}"))?;
     let share = share.ok_or_else(|| format!("no share in uri: {uri}"))?;
     let mut client = connect(&host, creds).await?;
-    let mut tree = client.connect_share(&share).await.map_err(|e| e.to_string())?;
-    let entries = client.list_directory(&mut tree, &rel).await.map_err(|e| e.to_string())?;
+    let mut tree = client
+        .connect_share(&share)
+        .await
+        .map_err(|e| e.to_string())?;
+    let entries = client
+        .list_directory(&mut tree, &rel)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(entries
         .into_iter()
         // Servers commonly include `.` and `..`. They are navigation artifacts,
@@ -737,7 +824,11 @@ async fn run_list_dir(uri: &str, creds: &SmbCreds) -> CmdResult<Vec<RemoteEntry>
         // `.` segment the server rejects. Dropped at the source so no consumer
         // has to know.
         .filter(|e| !is_self_or_parent(&e.name))
-        .map(|e| RemoteEntry { name: e.name, size: e.size, is_dir: e.is_directory })
+        .map(|e| RemoteEntry {
+            name: e.name,
+            size: e.size,
+            is_dir: e.is_directory,
+        })
         .collect())
 }
 
@@ -760,8 +851,14 @@ async fn run_spool(uri: &str, creds: &SmbCreds) -> CmdResult<PathBuf> {
     let (host, share, rel) = split_uri(uri).ok_or_else(|| format!("bad uri: {uri}"))?;
     let share = share.ok_or_else(|| format!("no share in uri: {uri}"))?;
     let mut client = connect(&host, creds).await?;
-    let mut tree = client.connect_share(&share).await.map_err(|e| e.to_string())?;
-    let bytes = client.read_file_pipelined(&mut tree, &rel).await.map_err(|e| e.to_string())?;
+    let mut tree = client
+        .connect_share(&share)
+        .await
+        .map_err(|e| e.to_string())?;
+    let bytes = client
+        .read_file_pipelined(&mut tree, &rel)
+        .await
+        .map_err(|e| e.to_string())?;
     if let Some(p) = dest.parent() {
         let _ = std::fs::create_dir_all(p);
     }
@@ -779,7 +876,10 @@ async fn run_save(uri: &str, data: &[u8], creds: &SmbCreds) -> CmdResult<()> {
     let (host, share, rel) = split_uri(uri).ok_or_else(|| format!("bad uri: {uri}"))?;
     let share = share.ok_or_else(|| format!("no share in uri: {uri}"))?;
     let mut client = connect(&host, creds).await?;
-    let mut tree = client.connect_share(&share).await.map_err(|e| e.to_string())?;
+    let mut tree = client
+        .connect_share(&share)
+        .await
+        .map_err(|e| e.to_string())?;
     client
         .write_file_pipelined(&mut tree, &rel, data)
         .await

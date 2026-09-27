@@ -1,13 +1,14 @@
 //! Equalizer logic tests — RBJ coefficients, biquad processing, EqSource behavior.
 
-use tplay::audio::eq::{peaking_eq_coeffs, Biquad, EQ_FREQUENCIES};
 use std::f32::consts::PI;
+use tplay::audio::eq::{peaking_eq_coeffs, Biquad, EQ_FREQUENCIES};
 
 #[test]
 fn eq_frequencies_match_reference_ui() {
-    assert_eq!(EQ_FREQUENCIES, [
-        20.0, 100.0, 300.0, 600.0, 1000.0, 3000.0, 5000.0, 8000.0, 12000.0, 16000.0,
-    ]);
+    assert_eq!(
+        EQ_FREQUENCIES,
+        [20.0, 100.0, 300.0, 600.0, 1000.0, 3000.0, 5000.0, 8000.0, 12000.0, 16000.0,]
+    );
 }
 
 #[test]
@@ -16,7 +17,7 @@ fn peaking_eq_zero_gain_is_allpass() {
     // The coefficients are NOT identity (b1 != 0), but the frequency response is flat.
     // We verify by checking that the filter passes a signal unchanged at steady state.
     let mut bq = Biquad::new(44100, 1000.0, 0.0);
-    
+
     // Feed a sine wave and verify output matches input at steady state
     let freq = 1000.0;
     let sr = 44100.0;
@@ -107,7 +108,12 @@ fn biquad_boost_magnitude_at_center() {
         }
     }
     // Steady-state magnitude should match expected (within tolerance)
-    assert!((max_out - expected_mag).abs() < 0.05, "magnitude {} vs expected {}", max_out, expected_mag);
+    assert!(
+        (max_out - expected_mag).abs() < 0.05,
+        "magnitude {} vs expected {}",
+        max_out,
+        expected_mag
+    );
 }
 
 #[test]
@@ -129,7 +135,12 @@ fn biquad_cut_magnitude_at_center() {
             max_out = max_out.max(out.abs());
         }
     }
-    assert!((max_out - expected_mag).abs() < 0.05, "magnitude {} vs expected {}", max_out, expected_mag);
+    assert!(
+        (max_out - expected_mag).abs() < 0.05,
+        "magnitude {} vs expected {}",
+        max_out,
+        expected_mag
+    );
 }
 
 // Coefficient formula verification against known reference (w3.org audio-eq-cookbook)

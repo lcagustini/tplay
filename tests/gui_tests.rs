@@ -1,15 +1,18 @@
 //! GUI tests — theme application, dock layout (headless egui).
 
-use tplay::gui::theme::{Themes, Base, Layout, Icon, DEFAULT_THEME_ID};
+use eframe::egui::{self, Color32, FontFamily};
+use std::path::Path;
 use tplay::app::Pane;
 use tplay::audio::eq::EqShared;
-use eframe::egui::{self, FontFamily, Color32};
-use std::path::Path;
+use tplay::gui::theme::{Base, Icon, Layout, Themes, DEFAULT_THEME_ID};
 
 #[test]
 fn themes_loads_builtin_dark_theme() {
     let themes = Themes::load();
-    assert!(!themes.list().is_empty(), "at least dark theme should exist");
+    assert!(
+        !themes.list().is_empty(),
+        "at least dark theme should exist"
+    );
     let dark = themes.get("dark").expect("dark theme missing");
     assert_eq!(dark.id, "dark");
     assert_eq!(dark.base, Base::Dark);
@@ -43,7 +46,7 @@ fn theme_metadata_font_values() {
     let themes = Themes::load();
     for theme in themes.list() {
         match theme.metadata_font {
-            FontFamily::Monospace | FontFamily::Proportional => {},
+            FontFamily::Monospace | FontFamily::Proportional => {}
             _ => panic!("unknown metadata_font variant"),
         }
     }
@@ -54,10 +57,10 @@ fn coordinator_applies_theme_visuals() {
     let ctx = egui::Context::default();
     let themes = Themes::load();
     let theme = themes.get("dark").unwrap();
-    
+
     // This should not panic
     tplay::gui::theme::apply(&ctx, theme);
-    
+
     // Visuals should be modified
     let visuals = ctx.style().visuals.clone();
     assert_ne!(visuals.panel_fill, egui::Color32::default());
@@ -66,7 +69,12 @@ fn coordinator_applies_theme_visuals() {
 #[test]
 fn pane_enum_serializes() {
     use serde_json;
-    let panes = [Pane::NowPlaying, Pane::Playlist, Pane::Equalizer, Pane::Library];
+    let panes = [
+        Pane::NowPlaying,
+        Pane::Playlist,
+        Pane::Equalizer,
+        Pane::Library,
+    ];
     for pane in panes {
         let json = serde_json::to_string(&pane).unwrap();
         let back: Pane = serde_json::from_str(&json).unwrap();
@@ -178,8 +186,7 @@ fn sidebar_column_and_scroll_content_ignore_textedit_overflow() {
                                 let gap = ui.spacing().item_spacing.y;
                                 let form_h = 3.0 * (FIELD_H + gap) + ui.spacing().interact_size.y;
                                 if wrap_form {
-                                    let (_, frect) =
-                                        ui.allocate_space(egui::vec2(FORM_W, form_h));
+                                    let (_, frect) = ui.allocate_space(egui::vec2(FORM_W, form_h));
                                     let mut f = ui.new_child(
                                         egui::UiBuilder::new()
                                             .max_rect(frect)
@@ -329,15 +336,25 @@ fn higher_priority_dir_wins_and_icons_fall_back() {
     write_theme(&bundled, "dark", "#00ff00"); // must lose to overrides
     write_theme(&bundled, "mine", "#0000ff"); // no icons dir
     std::fs::create_dir_all(overrides.join("dark").join("icons")).unwrap();
-    std::fs::write(overrides.join("dark").join("icons").join("play.png"), b"png").unwrap();
+    std::fs::write(
+        overrides.join("dark").join("icons").join("play.png"),
+        b"png",
+    )
+    .unwrap();
 
     // Priority order: first dir in the slice wins on id clash.
     let themes = Themes::load_from(&[overrides.clone(), bundled]);
     assert_eq!(themes.list().len(), 2);
-    assert_eq!(themes.default().palette.accent, Color32::from_rgb(0xff, 0, 0));
+    assert_eq!(
+        themes.default().palette.accent,
+        Color32::from_rgb(0xff, 0, 0)
+    );
     // "mine" has no icons of its own → falls back to the default theme's.
     let mine = themes.get("mine").unwrap();
-    assert!(themes.icon_path(mine, Icon::Play).unwrap().ends_with("dark/icons/play.png"));
+    assert!(themes
+        .icon_path(mine, Icon::Play)
+        .unwrap()
+        .ends_with("dark/icons/play.png"));
     assert!(themes.icon_path(mine, Icon::Volume).is_none()); // dark has no volume.png
 
     let _ = std::fs::remove_dir_all(&base);
@@ -400,8 +417,7 @@ fn right_to_left_center_does_not_swallow_the_column() {
                         ui.horizontal(|ui| {
                             ui.label("Search");
                             ui.add(
-                                egui::TextEdit::singleline(&mut String::new())
-                                    .desired_width(220.0),
+                                egui::TextEdit::singleline(&mut String::new()).desired_width(220.0),
                             );
                         });
                         ui.horizontal(|ui| {
@@ -413,8 +429,10 @@ fn right_to_left_center_does_not_swallow_the_column() {
                             .auto_shrink([false, false])
                             .max_height(scroll_h)
                             .show(ui, |ui| {
-                                let (r, _) = ui
-                                    .allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
+                                let (r, _) = ui.allocate_exact_size(
+                                    vec2(ui.available_width(), 20.0),
+                                    Sense::hover(),
+                                );
                                 scroll_top = r.min.y;
                             });
                     });
@@ -486,17 +504,15 @@ mod breadcrumb {
             vec![Step::Seg(0), Step::Ellipsis, Step::Seg(4), Step::Seg(5)]
         );
         // A shallow path is never collapsed — every level is one click away.
-        assert_eq!(plan(3, LOCAL), vec![Step::Seg(0), Step::Seg(1), Step::Seg(2)]);
+        assert_eq!(
+            plan(3, LOCAL),
+            vec![Step::Seg(0), Step::Seg(1), Step::Seg(2)]
+        );
         // Premise for the share case below: the local rule really would strand
         // a user, because it collapses the host and the share.
         assert_eq!(
             plan(7, LOCAL),
-            vec![
-                Step::Seg(0),
-                Step::Ellipsis,
-                Step::Seg(5),
-                Step::Seg(6)
-            ],
+            vec![Step::Seg(0), Step::Ellipsis, Step::Seg(5), Step::Seg(6)],
             "local rule over a 7-segment share path"
         );
         // A share exempts Local / host / share, so a deep directory still has a

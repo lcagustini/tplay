@@ -94,7 +94,11 @@ fn advancing_past_the_last_track_stops_rather_than_wrapping() {
     // should panic.
     t.app.advance();
     t.app.advance();
-    assert_eq!(t.app.current_index(), after_first, "no wrap-around without repeat");
+    assert_eq!(
+        t.app.current_index(),
+        after_first,
+        "no wrap-around without repeat"
+    );
 }
 
 #[test]
@@ -105,7 +109,10 @@ fn an_empty_playlist_never_starts_anything() {
     let mut t = TestApp::new("empty-playlist");
     t.app.advance();
     t.app.advance();
-    assert!(t.app.current_path().is_none(), "nothing loaded, nothing started");
+    assert!(
+        t.app.current_path().is_none(),
+        "nothing loaded, nothing started"
+    );
     assert!(!t.app.can_play(), "and nothing to play");
 }
 
@@ -120,13 +127,19 @@ fn a_failed_load_leaves_nothing_current_and_does_not_panic() {
     t.app.add_files(vec![good.clone()]);
 
     t.app.play_file(dir.join("does-not-exist.wav"));
-    assert!(t.app.current_path().is_none(), "an unreadable file loads nothing");
+    assert!(
+        t.app.current_path().is_none(),
+        "an unreadable file loads nothing"
+    );
 
     // The guard: with no current track, repeated advances must not pick up the
     // playlist entry that was never asked for.
     t.app.advance();
     t.app.advance();
-    assert!(t.app.current_path().is_none(), "a failed load must not cascade");
+    assert!(
+        t.app.current_path().is_none(),
+        "a failed load must not cascade"
+    );
 }
 
 #[test]
@@ -140,7 +153,9 @@ fn a_1s_track_reports_its_own_duration() {
 
     t.app.play_file(track);
     assert!(
-        t.app.total_duration().is_some_and(|d| d.as_secs_f32().min(1.5) > 0.5),
+        t.app
+            .total_duration()
+            .is_some_and(|d| d.as_secs_f32().min(1.5) > 0.5),
         "a 1s WAV must report about 1s, got {:?}",
         t.app.total_duration()
     );
@@ -168,7 +183,10 @@ fn stop_unloads_the_track_and_the_next_play_rewinds() {
 
     assert!(t.app.current_path().is_none(), "stop unloads the track");
     assert_eq!(t.app.current_index(), None, "and leaves no playlist index");
-    assert!(t.app.total_duration().is_none(), "duration is cleared with it");
+    assert!(
+        t.app.total_duration().is_none(),
+        "duration is cleared with it"
+    );
     assert!(!t.app.can_play(), "so the play button greys out");
 
     // The rewind is asserted by *playing again*, not by reading the position

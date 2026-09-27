@@ -64,7 +64,10 @@ fn sidebar_row(
                 egui::Label::new(
                     egui::RichText::new(label)
                         .color(if active { p.accent } else { p.text_secondary })
-                        .font(egui::FontId::new(layout.text_meta, theme.metadata_font.clone())),
+                        .font(egui::FontId::new(
+                            layout.text_meta,
+                            theme.metadata_font.clone(),
+                        )),
                 )
                 .truncate()
                 .sense(egui::Sense::click()),
@@ -74,8 +77,15 @@ fn sidebar_row(
             out = Some(RowClick::Jump);
         }
         if removable
-            && theme::icon_button(ui, themes.icon(theme::Icon::Remove), theme::Icon::Remove, 13.0, true, false)
-                .clicked()
+            && theme::icon_button(
+                ui,
+                themes.icon(theme::Icon::Remove),
+                theme::Icon::Remove,
+                13.0,
+                true,
+                false,
+            )
+            .clicked()
         {
             out = Some(RowClick::Remove);
         }
@@ -85,7 +95,12 @@ fn sidebar_row(
 
 /// A section heading: "Places" / "Volumes" / "Network" / "Favorites".
 fn section_label(ui: &mut egui::Ui, p: theme::Palette, text: &str) {
-    ui.label(egui::RichText::new(text).small().strong().color(p.text_secondary));
+    ui.label(
+        egui::RichText::new(text)
+            .small()
+            .strong()
+            .color(p.text_secondary),
+    );
     ui.add_space(4.0);
 }
 
@@ -168,7 +183,9 @@ pub fn sidebar_ui(
                     for vol in volumes {
                         let active = current_local.as_deref() == Some(vol.path.as_path());
                         if matches!(
-                            sidebar_row(ui, themes, theme, &layout, &vol.label, &vol.path, active, false),
+                            sidebar_row(
+                                ui, themes, theme, &layout, &vol.label, &vol.path, active, false
+                            ),
                             Some(RowClick::Jump)
                         ) {
                             jump = Some(vol.path);
@@ -186,8 +203,17 @@ pub fn sidebar_ui(
                     // (unbounded) content width and push the + past the 120px
                     // sidebar.
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("Network").small().strong().color(p.text_secondary));
-                        if ui.add(egui::Button::new("+").small()).on_hover_text("Add server").clicked() {
+                        ui.label(
+                            egui::RichText::new("Network")
+                                .small()
+                                .strong()
+                                .color(p.text_secondary),
+                        );
+                        if ui
+                            .add(egui::Button::new("+").small())
+                            .on_hover_text("Add server")
+                            .clicked()
+                        {
                             // is_none + assign: `Option::or` would move `form` out of this scope.
                             if form.is_none() {
                                 *form = Some(String::new());
@@ -199,20 +225,20 @@ pub fn sidebar_ui(
                         // on Enter — the standard pattern).
                         let mut enter = false;
                         let mut submit: Option<bool> = None; // Some(true) = Add, Some(false) = Cancel
-                        // The form lives in a FIXED-RECT child so egui's TextEdit
-                        // overflow allocation ("allocate additional space … so a
-                        // ScrollArea can properly scroll to the cursor") cannot
-                        // widen the scroll content — that growth is what kept
-                        // dragging the sidebar's scrollbar while typing.
-                        //
-                        // Both halves are load-bearing and *different*:
-                        // `allocate_space` reserves the rect AND advances the
-                        // layout cursor (a bare `new_child` would leave the next
-                        // row drawn on top of the form), while the raw
-                        // `new_child` does NOT propagate its min_rect to the
-                        // scroll content, which is what contains the overflow.
-                        // `clip_text` alone is not enough — it pins the field rect
-                        // but the overflow allocation still grows the parent.
+                                                             // The form lives in a FIXED-RECT child so egui's TextEdit
+                                                             // overflow allocation ("allocate additional space … so a
+                                                             // ScrollArea can properly scroll to the cursor") cannot
+                                                             // widen the scroll content — that growth is what kept
+                                                             // dragging the sidebar's scrollbar while typing.
+                                                             //
+                                                             // Both halves are load-bearing and *different*:
+                                                             // `allocate_space` reserves the rect AND advances the
+                                                             // layout cursor (a bare `new_child` would leave the next
+                                                             // row drawn on top of the form), while the raw
+                                                             // `new_child` does NOT propagate its min_rect to the
+                                                             // scroll content, which is what contains the overflow.
+                                                             // `clip_text` alone is not enough — it pins the field rect
+                                                             // but the overflow allocation still grows the parent.
                         let gap = ui.spacing().item_spacing.y;
                         let form_h = FORM_FIELD_H + gap + ui.spacing().interact_size.y;
                         let (_, form_rect) = ui.allocate_space(egui::vec2(FORM_W, form_h));
@@ -229,7 +255,9 @@ pub fn sidebar_ui(
                                         .hint_text("host or smb://host/share")
                                         .clip_text(true),
                                 )
-                                .on_hover_text("like 192.168.1.50 — ask for the login in the main pane");
+                                .on_hover_text(
+                                    "like 192.168.1.50 — ask for the login in the main pane",
+                                );
                             if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                                 enter = true;
                             }
@@ -294,8 +322,15 @@ pub fn sidebar_ui(
                             {
                                 app.network_mut().browse_server(s.host.clone());
                             }
-                            if theme::icon_button(ui, themes.icon(theme::Icon::Remove), theme::Icon::Remove, 13.0, true, false)
-                                .clicked()
+                            if theme::icon_button(
+                                ui,
+                                themes.icon(theme::Icon::Remove),
+                                theme::Icon::Remove,
+                                13.0,
+                                true,
+                                false,
+                            )
+                            .clicked()
                             {
                                 app.network_mut().remove_server(&s.host);
                             }
@@ -310,7 +345,9 @@ pub fn sidebar_ui(
                     let active = current_local.as_deref() == Some(dir.as_path());
                     match sidebar_row(ui, themes, theme, &layout, &name, &dir, active, true) {
                         Some(RowClick::Jump) => jump = Some(dir),
-                        Some(RowClick::Remove) => { app.library_mut().toggle_favorite(dir); }
+                        Some(RowClick::Remove) => {
+                            app.library_mut().toggle_favorite(dir);
+                        }
                         None => {}
                     }
                 }

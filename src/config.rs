@@ -92,19 +92,28 @@ pub struct Config {
     pub servers: Vec<network::ServerCfg>,
 }
 
-fn default_volume() -> f32 { 1.0 }
-fn default_crossfade_secs() -> f32 { 3.0 }
-fn default_buffer_size() -> u32 { 8192 }
+fn default_volume() -> f32 {
+    1.0
+}
+fn default_crossfade_secs() -> f32 {
+    3.0
+}
+fn default_buffer_size() -> u32 {
+    8192
+}
 /// 2 GiB of never-played spool, sized for a laptop with room to spare. Raise
 /// `spool_cache_mb` in config.json to keep more of a browsed share on disk.
-fn default_spool_cache_mb() -> u32 { 2048 }
+fn default_spool_cache_mb() -> u32 {
+    2048
+}
 
 impl Default for Config {
     fn default() -> Self {
         Config {
             // "" is not a theme id; `ThemeState::load` falls back to the default
             // theme, so this stays a GUI-free "unset".
-            theme: String::new(),            eq: EqData::default(),
+            theme: String::new(),
+            eq: EqData::default(),
             shuffle: false,
             repeat: false,
             viz_view: VizView::default(),
@@ -131,7 +140,9 @@ pub struct EqData {
     pub gains: [f32; 10],
 }
 
-fn default_gains() -> [f32; 10] { [0.0; 10] }
+fn default_gains() -> [f32; 10] {
+    [0.0; 10]
+}
 
 #[derive(Serialize, Deserialize, Default)]
 pub struct LibraryData {
@@ -184,27 +195,41 @@ impl Prefs {
         }
     }
 
-    pub fn viz_view(&self) -> VizView { self.viz_view }
+    pub fn viz_view(&self) -> VizView {
+        self.viz_view
+    }
 
     pub fn set_viz_view(&mut self, v: VizView) {
         self.viz_view = v;
     }
 
-    pub fn remaining(&self) -> bool { self.remaining }
+    pub fn remaining(&self) -> bool {
+        self.remaining
+    }
 
     pub fn set_remaining(&mut self, v: bool) {
         self.remaining = v;
     }
 
-    pub fn gapless(&self) -> bool { self.gapless }
+    pub fn gapless(&self) -> bool {
+        self.gapless
+    }
 
-    pub fn toggle_gapless(&mut self) { self.gapless = !self.gapless; }
+    pub fn toggle_gapless(&mut self) {
+        self.gapless = !self.gapless;
+    }
 
-    pub fn crossfade(&self) -> bool { self.crossfade }
+    pub fn crossfade(&self) -> bool {
+        self.crossfade
+    }
 
-    pub fn toggle_crossfade(&mut self) { self.crossfade = !self.crossfade; }
+    pub fn toggle_crossfade(&mut self) {
+        self.crossfade = !self.crossfade;
+    }
 
-    pub fn crossfade_secs(&self) -> f32 { self.crossfade_secs }
+    pub fn crossfade_secs(&self) -> f32 {
+        self.crossfade_secs
+    }
 
     /// Clamped to what the UI offers, so a hand-edited value that survives
     /// `from_config`'s clamp cannot be re-widened from here.
@@ -212,7 +237,9 @@ impl Prefs {
         self.crossfade_secs = secs.clamp(0.0, MAX_CROSSFADE_SECS);
     }
 
-    pub fn balance(&self) -> f32 { *self.balance.read().unwrap() }
+    pub fn balance(&self) -> f32 {
+        *self.balance.read().unwrap()
+    }
 
     pub fn set_balance(&mut self, v: f32) {
         *self.balance.write().unwrap() = v.clamp(-1.0, 1.0);
@@ -220,7 +247,9 @@ impl Prefs {
 
     /// The handle `BalanceSource` holds. Cloned, not shared by reference — the
     /// source outlives any borrow of `self`.
-    pub fn balance_shared(&self) -> Arc<RwLock<f32>> { Arc::clone(&self.balance) }
+    pub fn balance_shared(&self) -> Arc<RwLock<f32>> {
+        Arc::clone(&self.balance)
+    }
 }
 
 fn path() -> Option<PathBuf> {
@@ -242,7 +271,9 @@ pub fn load() -> Config {
 /// without writing to the user's real config.
 pub fn load_from(p: Option<&Path>) -> Config {
     let Some(p) = p else { return Config::default() };
-    let Ok(text) = std::fs::read_to_string(p) else { return Config::default() };
+    let Ok(text) = std::fs::read_to_string(p) else {
+        return Config::default();
+    };
     match serde_json::from_str(&text) {
         Ok(c) => c,
         Err(e) => {
@@ -260,8 +291,12 @@ pub fn load_from(p: Option<&Path>) -> Config {
 
 pub fn save(config: &Config) {
     let Some(path) = path() else { return };
-    if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
-    if let Ok(json) = serde_json::to_string_pretty(config) { let _ = std::fs::write(&path, json); }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(config) {
+        let _ = std::fs::write(&path, json);
+    }
 }
 
 // ── When to write ───────────────────────────────────────────────────────────

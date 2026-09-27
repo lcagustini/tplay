@@ -29,7 +29,9 @@ fn embedded_picture_wins() {
 
     let png = tiny_png();
     let mut tagged = lofty::read_from_path(&track).unwrap();
-    let pic = Picture::unchecked(png.clone()).mime_type(MimeType::Png).build();
+    let pic = Picture::unchecked(png.clone())
+        .mime_type(MimeType::Png)
+        .build();
     if let Some(tag) = tagged.primary_tag_mut() {
         tag.push_picture(pic);
     } else {
@@ -37,7 +39,9 @@ fn embedded_picture_wins() {
         tag.push_picture(pic);
         tagged.insert_tag(tag);
     }
-    tagged.save_to_path(&track, WriteOptions::default()).unwrap();
+    tagged
+        .save_to_path(&track, WriteOptions::default())
+        .unwrap();
 
     assert_eq!(library::read_cover(&track), Some(png.clone()));
     let _ = std::fs::remove_dir_all(&dir);

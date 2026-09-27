@@ -1,15 +1,15 @@
 //! Library logic tests — directory listing, tag reading, sorting, scan thread.
 
-use tplay::library::*;
+use lofty::config::WriteOptions;
+use lofty::file::{AudioFile, TaggedFileExt};
+use lofty::tag::{ItemKey, Tag, TagType};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
-use lofty::config::WriteOptions;
-use lofty::file::{AudioFile, TaggedFileExt};
-use lofty::tag::{ItemKey, Tag, TagType};
+use tplay::library::*;
 #[path = "common.rs"]
 mod common;
 use crate::common::{test_dir, write_tagged_mp3, write_wav};
@@ -27,14 +27,21 @@ fn the_scan_reports_a_result_for_every_file_asked_about() {
     // Named so nothing upstream would filter it as non-audio, but not audio.
     let bad = dir.join("bad.mp3");
     fs::write(&bad, b"not audio at all").unwrap();
-    assert!(read_info(&bad).is_none(), "premise: lofty cannot read this one");
+    assert!(
+        read_info(&bad).is_none(),
+        "premise: lofty cannot read this one"
+    );
 
     let (tx, rx) = mpsc::channel();
     let asked = vec![good, bad.clone()];
     scan_files(asked.clone(), tx);
 
     let got: Vec<PathBuf> = rx.into_iter().map(|(p, _)| p).collect();
-    assert_eq!(got.len(), asked.len(), "a file was dropped, so its row never caches");
+    assert_eq!(
+        got.len(),
+        asked.len(),
+        "a file was dropped, so its row never caches"
+    );
     for p in &asked {
         assert!(got.contains(p), "{} never reported", p.display());
     }
@@ -79,9 +86,18 @@ fn read_info_reads_tags_written_by_lofty() {
 
 #[test]
 fn cmp_entries_sorts_by_tag_fields() {
-    let a = Entry { path: PathBuf::from("a.wav"), is_dir: false };
-    let b = Entry { path: PathBuf::from("b.wav"), is_dir: false };
-    let dir = Entry { path: PathBuf::from("z-folder"), is_dir: true };
+    let a = Entry {
+        path: PathBuf::from("a.wav"),
+        is_dir: false,
+    };
+    let b = Entry {
+        path: PathBuf::from("b.wav"),
+        is_dir: false,
+    };
+    let dir = Entry {
+        path: PathBuf::from("z-folder"),
+        is_dir: true,
+    };
     // Tags deliberately cross the filename order (a.wav < b.wav) so each
     // key proves it sorts by tags, not names.
     let info_a = TrackInfo {
@@ -106,7 +122,7 @@ fn cmp_entries_sorts_by_tag_fields() {
     // Artist / Album.
     assert!(sort_key(&a, Some(&info_b), 1) < sort_key(&b, Some(&info_a), 1)); // Amy < Zed
     assert!(sort_key(&a, Some(&info_b), 2) < sort_key(&b, Some(&info_a), 2)); // Alpha < Zeta
-    // Duration: present sorts before missing.
+                                                                              // Duration: present sorts before missing.
     assert!(sort_key(&b, Some(&info_a), 3) < sort_key(&a, Some(&info_b), 3));
     // Missing tags sort last (empty artist after "Zed", not before).
     assert!(sort_key(&b, Some(&info_a), 1) < sort_key(&a, None, 1));
@@ -122,13 +138,41 @@ fn cmp_entries_sorts_by_tag_fields() {
 /// (so track 2 precedes track 10, which a plain string pad is what buys).
 #[test]
 fn sort_key_album_orders_tracks_within_an_album() {
-    let a = Entry { path: PathBuf::from("a.wav"), is_dir: false };
-    let b = Entry { path: PathBuf::from("b.wav"), is_dir: false };
-    let c = Entry { path: PathBuf::from("c.wav"), is_dir: false };
-    let two = TrackInfo { album: "Set".into(), track_no: Some("2".into()), title: "Zebra".into(), ..Default::default() };
-    let ten = TrackInfo { album: "Set".into(), track_no: Some("10".into()), title: "Aardvark".into(), ..Default::default() };
-    let unnumbered = TrackInfo { album: "Set".into(), title: "Bonus".into(), ..Default::default() };
-    let other = TrackInfo { album: "Tangent".into(), track_no: Some("1".into()), title: "First".into(), ..Default::default() };
+    let a = Entry {
+        path: PathBuf::from("a.wav"),
+        is_dir: false,
+    };
+    let b = Entry {
+        path: PathBuf::from("b.wav"),
+        is_dir: false,
+    };
+    let c = Entry {
+        path: PathBuf::from("c.wav"),
+        is_dir: false,
+    };
+    let two = TrackInfo {
+        album: "Set".into(),
+        track_no: Some("2".into()),
+        title: "Zebra".into(),
+        ..Default::default()
+    };
+    let ten = TrackInfo {
+        album: "Set".into(),
+        track_no: Some("10".into()),
+        title: "Aardvark".into(),
+        ..Default::default()
+    };
+    let unnumbered = TrackInfo {
+        album: "Set".into(),
+        title: "Bonus".into(),
+        ..Default::default()
+    };
+    let other = TrackInfo {
+        album: "Tangent".into(),
+        track_no: Some("1".into()),
+        title: "First".into(),
+        ..Default::default()
+    };
 
     // 2 before 10, even though "Aardvark" < "Zebra" alphabetically.
     assert!(sort_key(&a, Some(&two), 2) < sort_key(&b, Some(&ten), 2));
@@ -142,10 +186,23 @@ fn sort_key_album_orders_tracks_within_an_album() {
 /// a folder either — both belong in the "no value" sink region.
 #[test]
 fn sort_key_album_untagged_sinks_with_folders() {
-    let file = Entry { path: PathBuf::from("a.wav"), is_dir: false };
-    let dir = Entry { path: PathBuf::from("z-folder"), is_dir: true };
-    let untagged = TrackInfo { title: "Plain".into(), ..Default::default() };
-    let album = TrackInfo { album: "Set".into(), track_no: Some("1".into()), ..Default::default() };
+    let file = Entry {
+        path: PathBuf::from("a.wav"),
+        is_dir: false,
+    };
+    let dir = Entry {
+        path: PathBuf::from("z-folder"),
+        is_dir: true,
+    };
+    let untagged = TrackInfo {
+        title: "Plain".into(),
+        ..Default::default()
+    };
+    let album = TrackInfo {
+        album: "Set".into(),
+        track_no: Some("1".into()),
+        ..Default::default()
+    };
     // Last: no album, so behind every tagged file.
     assert!(sort_key(&file, Some(&untagged), 2) > sort_key(&file, Some(&album), 2));
     // Same sink region as a folder, not in front of it.
@@ -186,19 +243,28 @@ fn list_dir_separates_dirs_and_files() {
     assert_eq!(files.len(), 2);
     // list_dir does not sort; it returns filesystem order.
     // Just verify the correct entries are present.
-    let dir_names: std::collections::HashSet<_> = dirs.iter().map(|p| p.file_name().unwrap().to_str().unwrap()).collect();
+    let dir_names: std::collections::HashSet<_> = dirs
+        .iter()
+        .map(|p| p.file_name().unwrap().to_str().unwrap())
+        .collect();
     assert!(dir_names.contains("zzz"));
     assert!(dir_names.contains("AAA"));
     assert!(!dir_names.contains(".hidden")); // hidden by default
 
-    let file_names: std::collections::HashSet<_> = files.iter().map(|p| p.file_name().unwrap().to_str().unwrap()).collect();
+    let file_names: std::collections::HashSet<_> = files
+        .iter()
+        .map(|p| p.file_name().unwrap().to_str().unwrap())
+        .collect();
     assert!(file_names.contains("track1.wav"));
     assert!(file_names.contains("track2.mp3"));
     assert!(!file_names.contains("notes.txt")); // not audio
 
     let (dirs_hidden, _) = list_dir(&dir, true);
     assert_eq!(dirs_hidden.len(), 3);
-    let hidden_names: std::collections::HashSet<_> = dirs_hidden.iter().map(|p| p.file_name().unwrap().to_str().unwrap()).collect();
+    let hidden_names: std::collections::HashSet<_> = dirs_hidden
+        .iter()
+        .map(|p| p.file_name().unwrap().to_str().unwrap())
+        .collect();
     assert!(hidden_names.contains(".hidden"));
     assert!(hidden_names.contains("zzz"));
     assert!(hidden_names.contains("AAA"));
@@ -256,12 +322,18 @@ fn read_info_gives_tags_and_a_true_duration_from_a_whole_file() {
     // 300 frames of 1152 samples at 44.1 kHz ≈ 7.84 s. The point is that it is
     // the FILE's length, not a function of how much was read: a prefix of any
     // size would have produced a smaller number.
-    let secs = info.duration.expect("whole file has a duration").as_secs_f64();
+    let secs = info
+        .duration
+        .expect("whole file has a duration")
+        .as_secs_f64();
     assert!(
         (secs - 7.8).abs() < 0.5,
         "duration {secs:.2}s should match the file's 300 frames (~7.8s), not a prefix"
     );
-    assert!(bytes.len() > 100_000, "premise: the fixture is much larger than any prefix");
+    assert!(
+        bytes.len() > 100_000,
+        "premise: the fixture is much larger than any prefix"
+    );
     fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -277,9 +349,18 @@ fn sort_entries_orders_both_sources_the_same_way() {
         artist: a.into(),
         ..Default::default()
     };
-    let z = Entry { path: PathBuf::from("z.mp3"), is_dir: false };
-    let a = Entry { path: PathBuf::from("a.mp3"), is_dir: false };
-    let folder = Entry { path: PathBuf::from("mid"), is_dir: true };
+    let z = Entry {
+        path: PathBuf::from("z.mp3"),
+        is_dir: false,
+    };
+    let a = Entry {
+        path: PathBuf::from("a.mp3"),
+        is_dir: false,
+    };
+    let folder = Entry {
+        path: PathBuf::from("mid"),
+        is_dir: true,
+    };
     cache.insert(z.path.clone(), tagged("Alpha", "Zed"));
     cache.insert(a.path.clone(), tagged("Zulu", "Abe"));
 
@@ -310,9 +391,18 @@ fn sort_entries_orders_both_sources_the_same_way() {
     // The same three rows as smb:// URIs sort identically — the URI is just a
     // path whose last segment is the filename.
     let mut remote: Vec<Entry> = vec![
-        Entry { path: PathBuf::from("smb://nas/music/z.mp3"), is_dir: false },
-        Entry { path: PathBuf::from("smb://nas/music/a.mp3"), is_dir: false },
-        Entry { path: PathBuf::from("smb://nas/music/mid"), is_dir: true },
+        Entry {
+            path: PathBuf::from("smb://nas/music/z.mp3"),
+            is_dir: false,
+        },
+        Entry {
+            path: PathBuf::from("smb://nas/music/a.mp3"),
+            is_dir: false,
+        },
+        Entry {
+            path: PathBuf::from("smb://nas/music/mid"),
+            is_dir: true,
+        },
     ];
     let mut rcache: HashMap<PathBuf, TrackInfo> = HashMap::new();
     rcache.insert(remote[0].path.clone(), tagged("Alpha", "Zed"));
@@ -322,32 +412,65 @@ fn sort_entries_orders_both_sources_the_same_way() {
         .iter()
         .map(|e| e.path().file_name().unwrap().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(rnames, vec!["z.mp3", "mid", "a.mp3"], "titles Alpha, folder, Zulu");
+    assert_eq!(
+        rnames,
+        vec!["z.mp3", "mid", "a.mp3"],
+        "titles Alpha, folder, Zulu"
+    );
 }
 
 #[test]
 fn sort_key_title_prefers_tag_over_filename() {
-    let a = Entry { path: PathBuf::from("a.wav"), is_dir: false };
-    let b = Entry { path: PathBuf::from("b.wav"), is_dir: false };
-    let info_a = TrackInfo { title: "Zebra".into(), ..Default::default() };
-    let info_b = TrackInfo { title: "Alpha".into(), ..Default::default() };
+    let a = Entry {
+        path: PathBuf::from("a.wav"),
+        is_dir: false,
+    };
+    let b = Entry {
+        path: PathBuf::from("b.wav"),
+        is_dir: false,
+    };
+    let info_a = TrackInfo {
+        title: "Zebra".into(),
+        ..Default::default()
+    };
+    let info_b = TrackInfo {
+        title: "Alpha".into(),
+        ..Default::default()
+    };
     // b.wav has title "Alpha", a.wav has title "Zebra" -> b sorts before a
     assert!(sort_key(&b, Some(&info_b), 0) < sort_key(&a, Some(&info_a), 0));
 }
 
 #[test]
 fn sort_key_tag_columns_sink_missing_values() {
-    let a = Entry { path: PathBuf::from("a.wav"), is_dir: false };
-    let info = TrackInfo { artist: "Zed".into(), ..Default::default() };
+    let a = Entry {
+        path: PathBuf::from("a.wav"),
+        is_dir: false,
+    };
+    let info = TrackInfo {
+        artist: "Zed".into(),
+        ..Default::default()
+    };
     // Track with artist "Zed" sorts before track with no artist
     assert!(sort_key(&a, Some(&info), 1) < sort_key(&a, None, 1));
 }
 
 #[test]
 fn sort_key_folders_untagged() {
-    let dir = Entry { path: PathBuf::from("z-folder"), is_dir: true };
-    let file = Entry { path: PathBuf::from("a.wav"), is_dir: false };
-    let info = TrackInfo { title: "Alpha".into(), artist: "Amy".into(), duration: Some(Duration::from_secs(100)), ..Default::default() };
+    let dir = Entry {
+        path: PathBuf::from("z-folder"),
+        is_dir: true,
+    };
+    let file = Entry {
+        path: PathBuf::from("a.wav"),
+        is_dir: false,
+    };
+    let info = TrackInfo {
+        title: "Alpha".into(),
+        artist: "Amy".into(),
+        duration: Some(Duration::from_secs(100)),
+        ..Default::default()
+    };
 
     // Title: folder name "z-folder" > "Alpha"
     assert!(sort_key(&file, Some(&info), 0) < sort_key(&dir, None, 0));
@@ -359,20 +482,38 @@ fn sort_key_folders_untagged() {
 
 #[test]
 fn sort_key_duration_missing_sorts_last() {
-    let a = Entry { path: PathBuf::from("a.wav"), is_dir: false };
-    let b = Entry { path: PathBuf::from("b.wav"), is_dir: false };
-    let info_a = TrackInfo { duration: Some(Duration::from_secs(100)), ..Default::default() };
-    let info_b = TrackInfo { duration: None, ..Default::default() };
+    let a = Entry {
+        path: PathBuf::from("a.wav"),
+        is_dir: false,
+    };
+    let b = Entry {
+        path: PathBuf::from("b.wav"),
+        is_dir: false,
+    };
+    let info_a = TrackInfo {
+        duration: Some(Duration::from_secs(100)),
+        ..Default::default()
+    };
+    let info_b = TrackInfo {
+        duration: None,
+        ..Default::default()
+    };
     assert!(sort_key(&a, Some(&info_a), 3) < sort_key(&b, Some(&info_b), 3));
 }
 
 #[test]
 fn title_or_stem_fallbacks() {
     let path = PathBuf::from("song.mp3");
-    let info = TrackInfo { title: "Tagged Title".into(), ..Default::default() };
+    let info = TrackInfo {
+        title: "Tagged Title".into(),
+        ..Default::default()
+    };
     assert_eq!(title_or_stem(&path, Some(&info)), "Tagged Title");
 
-    let info_empty = TrackInfo { title: "".into(), ..Default::default() };
+    let info_empty = TrackInfo {
+        title: "".into(),
+        ..Default::default()
+    };
     assert_eq!(title_or_stem(&path, Some(&info_empty)), "song");
 
     assert_eq!(title_or_stem(&path, None), "song");

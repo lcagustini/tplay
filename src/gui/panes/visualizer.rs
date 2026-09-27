@@ -22,7 +22,10 @@ pub fn visualizer_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::U
             egui::RichText::new("Visualizer")
                 .strong()
                 .color(p.text_primary)
-                .font(egui::FontId::new(layout.text_meta, theme.metadata_font.clone())),
+                .font(egui::FontId::new(
+                    layout.text_meta,
+                    theme.metadata_font.clone(),
+                )),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             egui::ComboBox::from_id_salt("viz_view")

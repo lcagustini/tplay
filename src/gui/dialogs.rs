@@ -36,7 +36,10 @@ pub enum ConfirmAction {
     /// `remote` picks the playlist transport: a share row's path is an
     /// `smb://` URI, and the GUI layer never asks `is_remote` itself (see the
     /// one-surface rule in `tracks.rs`), so the list's caller says which it is.
-    LoadPlaylist { path: PathBuf, remote: bool },
+    LoadPlaylist {
+        path: PathBuf,
+        remote: bool,
+    },
     DeleteLayout(PathBuf),
 }
 
@@ -110,7 +113,11 @@ fn confirm_modal(app: &mut TPlayApp, themes: &ThemeState, ctx: &egui::Context) {
     let mut answer: Option<bool> = None;
     let resp = egui::Modal::new(egui::Id::new(CONFIRM_ID)).show(ctx, |ui| {
         ui.set_min_width(CONFIRM_W);
-        ui.label(egui::RichText::new(&armed.title).strong().color(p.text_primary));
+        ui.label(
+            egui::RichText::new(&armed.title)
+                .strong()
+                .color(p.text_primary),
+        );
         // Wrapped: descriptions carry track and layout names, which can be long.
         ui.add(egui::Label::new(egui::RichText::new(&armed.desc).color(p.text_secondary)).wrap());
         ui.add_space(6.0);
@@ -156,9 +163,12 @@ fn run(app: &mut TPlayApp, ctx: &egui::Context, action: ConfirmAction) {
         ConfirmAction::DeleteLayout(path) => {
             let _ = std::fs::remove_file(&path);
             // Clear tracking if this was the tracked layout.
-            let tracked = ctx.data(|d| d.get_temp::<String>(egui::Id::new(coordinator::NAMED_LAYOUT_FILE)));
+            let tracked =
+                ctx.data(|d| d.get_temp::<String>(egui::Id::new(coordinator::NAMED_LAYOUT_FILE)));
             if tracked.as_deref() == Some(path.to_string_lossy().as_ref()) {
-                ctx.data_mut(|d| d.insert_temp(egui::Id::new(coordinator::NAMED_LAYOUT_FILE), String::new()));
+                ctx.data_mut(|d| {
+                    d.insert_temp(egui::Id::new(coordinator::NAMED_LAYOUT_FILE), String::new())
+                });
             }
         }
     }
@@ -173,7 +183,9 @@ fn save_name_modal(
     tree: &mut DockState<Pane>,
     ctx: &egui::Context,
 ) {
-    let Some((target, dir, mut name)) = take_state::<(SaveTarget, String, String)>(ctx, SAVE_NAME_ID) else {
+    let Some((target, dir, mut name)) =
+        take_state::<(SaveTarget, String, String)>(ctx, SAVE_NAME_ID)
+    else {
         return;
     };
 
@@ -182,10 +194,16 @@ fn save_name_modal(
     let mut action: Option<Option<String>> = None;
     let resp = egui::Modal::new(egui::Id::new(SAVE_NAME_ID)).show(ctx, |ui| {
         ui.set_min_width(FIELD_W);
-        ui.label(egui::RichText::new(target.title()).strong().color(p.text_primary));
+        ui.label(
+            egui::RichText::new(target.title())
+                .strong()
+                .color(p.text_primary),
+        );
         // Full target, truncated to the modal but complete on hover.
-        ui.add(egui::Label::new(egui::RichText::new(&dir).small().color(p.text_secondary)).truncate())
-            .on_hover_text(&dir);
+        ui.add(
+            egui::Label::new(egui::RichText::new(&dir).small().color(p.text_secondary)).truncate(),
+        )
+        .on_hover_text(&dir);
         ui.add_space(4.0);
 
         // Enter submits (TextEdit surrenders focus on Enter).
@@ -248,13 +266,17 @@ fn write(
             }
         }
         SaveTarget::Layout => {
-            let Some(file) = layout_file_name(typed) else { return };
+            let Some(file) = layout_file_name(typed) else {
+                return;
+            };
             let path = PathBuf::from(dir).join(file);
             coordinator::save_layout(tree, &path);
-            ctx.data_mut(|d| d.insert_temp(
-                egui::Id::new(coordinator::NAMED_LAYOUT_FILE),
-                path.to_string_lossy().into_owned(),
-            ));
+            ctx.data_mut(|d| {
+                d.insert_temp(
+                    egui::Id::new(coordinator::NAMED_LAYOUT_FILE),
+                    path.to_string_lossy().into_owned(),
+                )
+            });
         }
     }
 }
@@ -277,7 +299,9 @@ fn layout_file_name(typed: &str) -> Option<String> {
 /// frame, the next one starts unarmed unless the modal puts the state back.
 fn take_state<T: Clone + Send + Sync + 'static>(ctx: &egui::Context, key: &str) -> Option<T> {
     let id = egui::Id::new(key);
-    let state = ctx.memory_mut(|m| m.data.get_temp::<Option<T>>(id)).unwrap_or(None);
+    let state = ctx
+        .memory_mut(|m| m.data.get_temp::<Option<T>>(id))
+        .unwrap_or(None);
     ctx.memory_mut(|m| m.data.insert_temp(id, None::<T>));
     state
 }
