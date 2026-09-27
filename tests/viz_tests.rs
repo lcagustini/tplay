@@ -26,6 +26,55 @@ fn viz_buf_clear() {
     assert!(buf.snapshot_tail(10).is_empty());
 }
 
+/// A source at a chosen rate, so the tap can report one that is not the default.
+struct RateSource {
+    rate: u32,
+    left: usize,
+}
+
+impl Iterator for RateSource {
+    type Item = f32;
+    fn next(&mut self) -> Option<f32> {
+        if self.left == 0 {
+            return None;
+        }
+        self.left -= 1;
+        Some(0.0)
+    }
+}
+
+impl tplay::rodio::Source for RateSource {
+    fn current_span_len(&self) -> Option<usize> { None }
+    fn channels(&self) -> u16 { 1 }
+    fn sample_rate(&self) -> u32 { self.rate }
+    fn total_duration(&self) -> Option<std::time::Duration> { None }
+    fn try_seek(&mut self, _: std::time::Duration) -> Result<(), tplay::rodio::source::SeekError> {
+        Err(tplay::rodio::source::SeekError::NotSupported { underlying_source: "rate probe" })
+    }
+}
+
+/// The band→bin mapping needs the source's real rate, and a source is the only
+/// thing that knows it — `compute_bands` used to assume 44.1 kHz outright, so a
+/// 48 kHz file had every band edge ~9% off.
+#[test]
+fn the_tap_reports_the_sources_sample_rate() {
+    use tplay::audio::viz::TapSource;
+
+    let buf = VizBuf::new();
+    assert_eq!(buf.sample_rate(), 44100, "nothing playing: the default stands");
+
+    let mut tap = TapSource::new(RateSource { rate: 48000, left: 4 }, buf.clone());
+    assert_eq!(buf.sample_rate(), 48000);
+    while tap.next().is_some() {}
+
+    // Explicitly: a non-44.1k rate survives, and a 96k one is not clamped.
+    TapSource::new(RateSource { rate: 96000, left: 1 }, buf.clone());
+    assert_eq!(buf.sample_rate(), 96000);
+
+    // `Default` must not hand out a zero rate, which would divide the bins to inf.
+    assert_eq!(VizBuf::default().sample_rate(), 44100);
+}
+
 #[test]
 fn fft_constant_dc() {
     let mut input = [0.0f32; FFT_SIZE * 2];

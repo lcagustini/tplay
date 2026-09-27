@@ -325,12 +325,17 @@ pub fn list_dir(dir: &Path, show_hidden: bool) -> (Vec<PathBuf>, Vec<PathBuf>) {
 
 /// Tag-read every file and send `(path, info)` results. Runs on a background
 /// thread; stops early when the receiver is dropped (a new navigation).
+///
+/// An unreadable file reports an empty `TrackInfo` rather than being skipped: a
+/// permanent parse failure would otherwise never enter the cache, and
+/// `library_scanning()` — "missing from the cache" — would then hold `Scanning…`
+/// on screen for the rest of the session. Same rule the remote side applies in
+/// `TagReader::absorb`, which caches `Ok`-with-blank-fields but not `Err`.
 pub fn scan_files(files: Vec<PathBuf>, tx: Sender<(PathBuf, TrackInfo)>) {
     for path in files {
-        if let Some(info) = read_info(&path) {
-            if tx.send((path, info)).is_err() {
-                return;
-            }
+        let info = read_info(&path).unwrap_or_default();
+        if tx.send((path, info)).is_err() {
+            return;
         }
     }
 }

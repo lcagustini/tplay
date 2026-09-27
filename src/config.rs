@@ -1,14 +1,16 @@
-//! The app's one settings file — `~/.config/tplay/config.json`.
+//! The app's one settings file — `~/.config/tplay/config.json`, and the live
+//! `Prefs` that mirrors its playback fields.
 //!
-//! Owns the on-disk shape and nothing else: the structs, their serde defaults,
-//! and the read/write. It has no idea what a "theme" or a "shuffle" *does* —
-//! `TPlayApp` builds a `Config` from its own state and hands it over. That
-//! one-way dependency is the point: the fields are `pub` because they document
-//! the format the tests pin, not because the app reads them back through here.
+//! The file half is one-way: `TPlayApp` builds a `Config` from its own state and
+//! hands it over, and nothing reads a setting back *through* this module. It has
+//! no idea what a "theme" or a "shuffle" *does*. The fields are `pub` because
+//! they document the format the tests pin. The live half — [`Prefs`], the six
+//! user-tunable playback settings — is the counterpart of the matching `Config`
+//! fields, and owns their clamping.
 
 use crate::network;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 const FILE: &str = "config.json";
@@ -35,8 +37,18 @@ impl VizView {
 }
 
 /// Unified config — single JSON file. Dock layout stays separate.
-#[derive(Serialize, Deserialize, Default)]
+///
+/// `Default` is written out rather than derived, and must agree with the
+/// `#[serde(default = …)]` attributes below: a *missing* file deserializes
+/// through them, and this is what a missing or unreadable file falls back to.
+/// Derived, the two disagreed and a fresh install got `volume: 0.0` — a silent
+/// player — where an install with `{}` got 1.0.
+#[derive(Serialize, Deserialize)]
 pub struct Config {
+    /// The only field that was ever required, and a missing one cost the whole
+    /// file: `""` is not a theme id, and `ThemeState::load` falls back to the
+    /// default theme for an unknown one, so "" is a GUI-free "unset".
+    #[serde(default)]
     pub theme: String,
     #[serde(default)]
     pub eq: EqData,
@@ -86,6 +98,30 @@ fn default_buffer_size() -> u32 { 8192 }
 /// 2 GiB of never-played spool, sized for a laptop with room to spare. Raise
 /// `spool_cache_mb` in config.json to keep more of a browsed share on disk.
 fn default_spool_cache_mb() -> u32 { 2048 }
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            // "" is not a theme id; `ThemeState::load` falls back to the default
+            // theme, so this stays a GUI-free "unset".
+            theme: String::new(),            eq: EqData::default(),
+            shuffle: false,
+            repeat: false,
+            viz_view: VizView::default(),
+            volume: default_volume(),
+            buffer_size: default_buffer_size(),
+            spool_cache_mb: default_spool_cache_mb(),
+            last_playlist: None,
+            library: LibraryData::default(),
+            balance: 0.0,
+            remaining: false,
+            gapless: false,
+            crossfade: false,
+            crossfade_secs: default_crossfade_secs(),
+            servers: Vec::new(),
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize, Default)]
 pub struct EqData {
@@ -191,12 +227,35 @@ fn path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("tplay").join(FILE))
 }
 
-/// Read config.json. A missing, unreadable or malformed file is a fresh
-/// install, not an error — the app starts on defaults.
+/// Read config.json. A missing or unreadable file is a fresh install, not an
+/// error — the app starts on defaults.
+///
+/// A *malformed* one is a different case: `TPlayApp::new` seeds its write
+/// baseline from what this returns, so returning defaults here means the first
+/// `flush_config` overwrites the user's settings. Keep the original before that
+/// can happen.
 pub fn load() -> Config {
-    path().and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    load_from(path().as_deref())
+}
+
+/// `load` against an explicit path, so the malformed-file case is testable
+/// without writing to the user's real config.
+pub fn load_from(p: Option<&Path>) -> Config {
+    let Some(p) = p else { return Config::default() };
+    let Ok(text) = std::fs::read_to_string(p) else { return Config::default() };
+    match serde_json::from_str(&text) {
+        Ok(c) => c,
+        Err(e) => {
+            let kept = p.with_extension("json.broken");
+            let _ = std::fs::write(&kept, &text);
+            eprintln!(
+                "tplay: {} is malformed ({e}); original kept at {}",
+                p.display(),
+                kept.display()
+            );
+            Config::default()
+        }
+    }
 }
 
 pub fn save(config: &Config) {

@@ -242,6 +242,7 @@ fn select_evictions_never_removes_a_played_file() {
         key: key.into(),
         size,
         played,
+        path: std::path::PathBuf::new(),
     };
 
     // Under budget: nothing goes, even though something is unmarked.
@@ -292,6 +293,50 @@ fn select_evictions_never_removes_a_played_file() {
     let second = select_evictions(&tied, 250);
     assert_eq!(first, second);
     assert_eq!(first[0], "ccc", "the strictly largest goes first");
+}
+
+/// `select_evictions` is pure, so it cannot see whether the key it returns is
+/// the key a file is *stored* under. It is not: `cache_path_in` writes
+/// `<spool_key>.<ext>` while `mark_played` records the extensionless
+/// `spool_key`, so keying on `file_name()` matched neither — and the ceiling
+/// silently never applied. This drives the real wiring over a temp spool dir.
+#[test]
+fn evict_unplayed_in_deletes_what_it_selects() {
+    use tplay::network::Network;
+
+    let dir = std::env::temp_dir().join(format!("tplay-test-{}/evict", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let on_disk = |uri: &str| dir.join(cache_path_in(uri, &dir).file_name().unwrap());
+
+    let (uri_played, uri_big, uri_small) = (
+        "smb://nas/m/played.flac",
+        "smb://nas/m/big.flac",
+        "smb://nas/m/small.mp3",
+    );
+    for (uri, n) in [(uri_played, 900usize), (uri_big, 800), (uri_small, 100)] {
+        let p = on_disk(uri);
+        assert!(p.extension().is_some(), "cache files carry the format's extension");
+        std::fs::write(&p, vec![0u8; n]).unwrap();
+    }
+
+    let mut net = Network::new(vec![]);
+    net.mark_played(uri_played);
+
+    // Both unmarked files must go: freeing only the 800 would leave 1000, still
+    // over. The largest file overall survives — it is the one playback consumed.
+    net.evict_unplayed_in(&dir, 900);
+    assert!(on_disk(uri_played).is_file(), "a played file is never a candidate");
+    assert!(!on_disk(uri_big).exists(), "the selected file is actually unlinked");
+    assert!(!on_disk(uri_small).exists(), "eviction continues until the budget is met");
+
+    let uri_keep = "smb://nas/m/keep.flac";
+    std::fs::write(on_disk(uri_keep), vec![0u8; 10]).unwrap();
+    net.evict_unplayed_in(&dir, 5000);
+    assert!(on_disk(uri_keep).is_file(), "under budget nothing is deleted");
+
+    net.evict_unplayed_in(&dir.join("nope"), 0);
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 /// A remote track that keeps failing must stop being retried, or the per-frame

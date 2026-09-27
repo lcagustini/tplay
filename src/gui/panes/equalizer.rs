@@ -1,7 +1,11 @@
 use crate::app::{Pane, TPlayApp};
-use crate::audio::eq::{EQ_FREQUENCIES, EQ_PRESETS};
+use crate::audio::eq::{EQ_FREQUENCIES, EQ_GAIN_MAX_DB, EQ_GAIN_MIN_DB, EQ_PRESETS};
 use crate::gui::theme::ThemeState;
 use eframe::egui;
+
+/// The one band count every layout decision reads, so a change to
+/// `EQ_FREQUENCIES` cannot leave the width maths and the floor behind.
+const BANDS: usize = EQ_FREQUENCIES.len();
 
 pub fn equalizer_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui) {
     // Owned Arc copy — panes take `&mut app` while using theme data.
@@ -20,7 +24,7 @@ pub fn equalizer_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui
                     app.eq_mut().toggle();
                 }
                 if ui.button("Reset").clicked() {
-                    for i in 0..10 {
+                    for i in 0..BANDS {
                         app.eq_mut().set_band(i, 0.0);
                     }
                 }
@@ -64,17 +68,17 @@ pub fn equalizer_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui
             egui::Id::new("tplay.pane_content_h").with(Pane::Equalizer),
             header_h + layout.eq_header_gap + layout.eq_slider_min_h + layout.eq_band_gap + label_h,
         );
-        // Horizontal floor: the 10 bands at min width. The same
+        // Horizontal floor: the bands at min width. The same
         // `layout.eq_band_w_min` drives both the shrink logic and this floor.
         d.insert_temp(
             egui::Id::new("tplay.pane_content_w").with(Pane::Equalizer),
-            10.0 * layout.eq_band_w_min,
+            BANDS as f32 * layout.eq_band_w_min,
         );
     });
 
     ui.add_space(layout.eq_header_gap);
 
-    // 10 bands with fixed inter-band spacing, centered in the pane: the gap
+    // Bands with fixed inter-band spacing, centered in the pane: the gap
     // between sliders is constant, and the margins to the pane edges absorb all
     // leftover width equally (dynamic centering).
     let slider_h = (ui.available_height() - 30.0).clamp(layout.eq_slider_min_h, layout.eq_slider_max_h);
@@ -82,17 +86,19 @@ pub fn equalizer_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui
     let min_spacing = ui.spacing().item_spacing.x;
     let avail_w = ui.available_width();
     let band_w_max = 80.0;
-    let row_w_full = band_w_max * 10.0 + min_spacing * 9.0;
+    let n = BANDS as f32;
+    let gaps = (BANDS - 1) as f32;
+    let row_w_full = band_w_max * n + min_spacing * gaps;
     let (band_w, spacing) = if row_w_full <= avail_w {
         (band_w_max, min_spacing)
-    } else if band_w_max * 10.0 <= avail_w {
+    } else if band_w_max * n <= avail_w {
         // Enough room for bands, shrink spacing to fit.
-        (band_w_max, ((avail_w - band_w_max * 10.0) / 9.0).max(0.0))
+        (band_w_max, ((avail_w - band_w_max * n) / gaps).max(0.0))
     } else {
         // Not enough room even at zero spacing — shrink bands too.
-        ((avail_w / 10.0).max(layout.eq_band_w_min), 0.0)
+        ((avail_w / n).max(layout.eq_band_w_min), 0.0)
     };
-    let row_w = band_w * 10.0 + spacing * 9.0;
+    let row_w = band_w * n + spacing * gaps;
     let pad = ((avail_w - row_w) / 2.0).max(0.0);
 
     ui.horizontal(|ui| {
@@ -101,7 +107,7 @@ pub fn equalizer_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui
         }
         ui.spacing_mut().item_spacing.x = spacing;
 
-        for i in 0..10 {
+        for i in 0..BANDS {
             let mut gain = gains[i];
 
             ui.vertical(|ui| {
@@ -109,7 +115,7 @@ pub fn equalizer_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui
                 ui.spacing_mut().slider_width = slider_h;
                 ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
                     ui.push_id(i, |ui| {
-                        let slider = egui::Slider::new(&mut gain, -12.0..=12.0)
+                        let slider = egui::Slider::new(&mut gain, EQ_GAIN_MIN_DB..=EQ_GAIN_MAX_DB)
                             .show_value(true)
                             .vertical()
                             .trailing_fill(true);

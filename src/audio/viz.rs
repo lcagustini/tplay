@@ -18,42 +18,71 @@ pub const FFT_SIZE: usize = 1024;
 /// Number of log-spaced output bands for drawing.
 pub const VIZ_BANDS: usize = 32;
 
+/// The buffer plus the rate its samples were captured at, which the band→bin
+/// mapping needs and only a source knows. Written once per track, so no
+/// read-compare.
+#[derive(Debug, Clone)]
+struct VizState {
+    /// Until a source reports its own: only observable with nothing playing.
+    rate: u32,
+    buf: VecDeque<f32>,
+}
+
 /// Shared ring buffer for the tap source → GUI.
 /// Lock-free on the audio thread would be ideal; the mutex is uncontended
 /// at 44.1 kHz pushes and a single snapshot per frame on the GUI thread.
 /// ponytail: if contention ever shows up in profiling, swap for a crossbeam
 /// lock-free ring or a double-buffered copy.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct VizBuf {
-    buf: Arc<Mutex<VecDeque<f32>>>,
+    inner: Arc<Mutex<VizState>>,
+}
+
+impl Default for VizBuf {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl VizBuf {
     pub fn new() -> Self {
         Self {
-            buf: Arc::new(Mutex::new(VecDeque::with_capacity(VIZ_BUFFER_CAP))),
+            inner: Arc::new(Mutex::new(VizState {
+                rate: 44100,
+                buf: VecDeque::with_capacity(VIZ_BUFFER_CAP),
+            })),
         }
+    }
+
+    /// Called by `TapSource::new` — also at the crossfade arm, so a mixed-rate
+    /// overlap briefly reports the incoming track's rate.
+    pub fn set_rate(&self, rate: u32) {
+        self.inner.lock().unwrap().rate = rate;
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        self.inner.lock().unwrap().rate
     }
 
     /// Push one mono sample (audio thread).
     pub fn push(&self, sample: f32) {
-        let mut guard = self.buf.lock().unwrap();
-        if guard.len() == VIZ_BUFFER_CAP {
-            guard.pop_front();
+        let mut state = self.inner.lock().unwrap();
+        if state.buf.len() == VIZ_BUFFER_CAP {
+            state.buf.pop_front();
         }
-        guard.push_back(sample);
+        state.buf.push_back(sample);
     }
 
     /// The most recent `n` samples (GUI thread), oldest first, up to `n` long.
     pub fn snapshot_tail(&self, n: usize) -> Vec<f32> {
-        let guard = self.buf.lock().unwrap();
-        let len = guard.len().min(n);
-        guard.iter().rev().take(len).rev().copied().collect()
+        let state = self.inner.lock().unwrap();
+        let len = state.buf.len().min(n);
+        state.buf.iter().rev().take(len).rev().copied().collect()
     }
 
     /// Clear the buffer (e.g. on track load/stop).
     pub fn clear(&self) {
-        self.buf.lock().unwrap().clear();
+        self.inner.lock().unwrap().buf.clear();
     }
 }
 
@@ -77,6 +106,9 @@ where
 {
     pub fn new(inner: S, buf: VizBuf) -> Self {
         let channels = inner.channels();
+        // The band→bin mapping needs the real rate; a source is the only thing
+        // that knows it.
+        buf.set_rate(inner.sample_rate());
         Self {
             inner,
             buf,
@@ -250,19 +282,19 @@ pub fn compute_bands(viz: &VizBuf, prev: &mut [f32; VIZ_BANDS], attack: f32, rel
 
     // Log-spaced band averaging (skip DC, start at bin 1)
     let max_bin = mag.len() - 1; // Nyquist
+    // 20 Hz .. Nyquist of the *source's* rate, not an assumed 44.1 kHz — the
+    // hardcoded version put every band edge ~9% off on a 48 kHz file.
+    let rate = viz.sample_rate() as f32;
+    let log_min = 20.0f32.ln();
+    let log_max = (rate / 2.0).ln();
     for (b, prev_b) in prev.iter_mut().enumerate() {
-        // Log spacing: 20 Hz .. sample_rate/2
-        let f_min: f32 = 20.0;
-        let f_max: f32 = 22050.0; // 44.1k/2
-        let log_min = f_min.ln();
-        let log_max = f_max.ln();
         let frac_lo = b as f32 / VIZ_BANDS as f32;
         let frac_hi = (b + 1) as f32 / VIZ_BANDS as f32;
         let f_lo = (log_min + frac_lo * (log_max - log_min)).exp();
         let f_hi = (log_min + frac_hi * (log_max - log_min)).exp();
 
-        let bin_lo = (f_lo * FFT_SIZE as f32 / 44100.0).round() as usize;
-        let bin_hi = (f_hi * FFT_SIZE as f32 / 44100.0).round() as usize;
+        let bin_lo = (f_lo * FFT_SIZE as f32 / rate).round() as usize;
+        let bin_hi = (f_hi * FFT_SIZE as f32 / rate).round() as usize;
         let lo = bin_lo.max(1).min(max_bin);
         let hi = bin_hi.max(lo + 1).min(max_bin);
 

@@ -275,6 +275,20 @@ fn xf_gains_holds_silence_for_gapless() {
     assert_eq!(xf_gains(Duration::ZERO, false, 0.0), (1.0, 0.0));
 }
 
+/// The ☰ slider offers `0.0..=MAX_CROSSFADE_SECS`, so a zero window is reachable
+/// with crossfade *on* — and `0/0` is NaN, which `clamp` propagates straight into
+/// both sinks' volume. With no window there is nothing to fade through, so the
+/// arm lands on the swap point itself.
+#[test]
+fn xf_gains_is_finite_for_a_zero_length_crossfade() {
+    let end = fade_gains(1.0);
+    for remaining in [Duration::ZERO, Duration::from_millis(1), Duration::from_secs(3)] {
+        let (out, inc) = xf_gains(remaining, true, 0.0);
+        assert!(out.is_finite() && inc.is_finite(), "{remaining:?} left gave ({out}, {inc})");
+        assert_eq!((out, inc), end, "{remaining:?} left");
+    }
+}
+
 #[test]
 fn xf_gains_agrees_with_fade_gains() {
     // It is a thin wrapper, so the two must not drift: p is the whole difference.

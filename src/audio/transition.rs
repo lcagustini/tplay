@@ -53,8 +53,9 @@ pub struct ArmInput<'a> {
 }
 
 /// What a successful arm should apply. `out_total` is the *outgoing* track's
-/// duration, which the caller must capture before `total_duration` flips to
-/// the incoming track — the fade math needs both.
+/// duration, carried even though it equals `ArmInput::total`: the caller has to
+/// capture it before `total_duration` flips to the incoming track, and the fade
+/// math needs both.
 pub struct Armed {
     pub index: usize,
     pub track: PathBuf,
@@ -146,11 +147,15 @@ pub fn fade_gains(p: f32) -> (f32, f32) {
 /// is instant, so this returns `(1.0, 0.0)` — full out, silence in — for any
 /// `remaining`. A pair rather than an `Option` keeps the caller's per-frame block
 /// to three lines with no branch.
+///
+/// A zero-length crossfade is the ☰ slider's floor and reaches this as
+/// `0/0` = NaN, which `clamp` propagates into both sinks' volume. With no window
+/// there is nothing to fade through, so `p` is pinned to 1 — the swap point.
 pub fn xf_gains(remaining: Duration, crossfade: bool, crossfade_secs: f32) -> (f32, f32) {
     if !crossfade {
         return (1.0, 0.0);
     }
-    let p = 1.0 - remaining.as_secs_f32() / crossfade_secs;
+    let p = if crossfade_secs > 0.0 { 1.0 - remaining.as_secs_f32() / crossfade_secs } else { 1.0 };
     fade_gains(p)
 }
 

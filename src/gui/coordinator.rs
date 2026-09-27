@@ -1,6 +1,7 @@
 //! Coordinator — wires the panes together in one frame using egui_dock.
 
 use crate::app::{TPlayApp, Pane};
+use crate::config::MAX_CROSSFADE_SECS;
 use crate::gui::dialogs;
 use crate::gui::panes;
 use crate::gui::theme;
@@ -275,8 +276,11 @@ pub fn update_ui(app: &mut TPlayApp, themes: &mut ThemeState, ctx: &egui::Contex
                 // Crossfade duration always visible and editable (constant menu height).
                 let mut cf_secs = app.prefs().crossfade_secs();
                 if ui.add(
-                    egui::Slider::new(&mut cf_secs, 0.0..=10.0).suffix("s").trailing_fill(true),
-                ).changed() {
+                    egui::Slider::new(&mut cf_secs, 0.0..=MAX_CROSSFADE_SECS)
+                        .suffix("s")
+                        .trailing_fill(true),
+                )
+                .changed() {
                     app.prefs_mut().set_crossfade_secs(cf_secs);
                 }
                 // Layouts section — panes + saved layouts + save/load

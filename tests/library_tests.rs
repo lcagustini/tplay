@@ -14,6 +14,34 @@ use lofty::tag::{ItemKey, Tag, TagType};
 mod common;
 use crate::common::{test_dir, write_tagged_mp3, write_wav};
 
+/// `library_scanning()` reads as "any row missing from the tag cache", so a file
+/// the scan drops pins `Scanning…` on screen for the whole session. A
+/// permanently unparseable file is what used to do it: lofty fails, nothing is
+/// sent, and nothing ever clears the label. One result per file asked about is
+/// the invariant that prevents it.
+#[test]
+fn the_scan_reports_a_result_for_every_file_asked_about() {
+    let dir = test_dir("scan_reports_all");
+    let good = dir.join("good.wav");
+    write_wav(&good);
+    // Named so nothing upstream would filter it as non-audio, but not audio.
+    let bad = dir.join("bad.mp3");
+    fs::write(&bad, b"not audio at all").unwrap();
+    assert!(read_info(&bad).is_none(), "premise: lofty cannot read this one");
+
+    let (tx, rx) = mpsc::channel();
+    let asked = vec![good, bad.clone()];
+    scan_files(asked.clone(), tx);
+
+    let got: Vec<PathBuf> = rx.into_iter().map(|(p, _)| p).collect();
+    assert_eq!(got.len(), asked.len(), "a file was dropped, so its row never caches");
+    for p in &asked {
+        assert!(got.contains(p), "{} never reported", p.display());
+    }
+
+    fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn read_info_reads_tags_written_by_lofty() {
     let dir = test_dir("read_info_reads_tags_written_by_lofty");

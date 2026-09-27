@@ -1128,9 +1128,7 @@ impl TPlayApp {
     pub fn seek_target(&self) -> Option<f32> {
         self.seek_target
     }
-}
 
-impl TPlayApp {
     /// Everything one frame needs from the app, in order. The shell draws first
     /// (`gui::coordinator::update_ui`), then calls this.
     ///
@@ -1142,10 +1140,6 @@ impl TPlayApp {
     pub fn update(&mut self, now: f64, closing: bool, theme_id: &str) -> bool {
         self.advance();
         let scanning = self.drain_tag_scan();
-        // Settings persist on a throttle, not on the setter that changed them —
-        // see `config::should_flush`. Last in the frame, so a click that both
-        // arms a dialog and moves a slider is already recorded.
-        self.flush_config(now, closing, theme_id);
         // SMB replies: browse listings are applied inside `Network::drain`; a
         // completed spool promotes playback, a fetched `.tplay` loads, and a
         // save confirms. Drain every event, not just the first — a save reply
@@ -1189,6 +1183,11 @@ impl TPlayApp {
                 }
             }
         }
+        // Settings persist on a throttle, not on the setter that changed them —
+        // see `config::should_flush`. Last in the frame, and after the drain, so
+        // an `Event::Saved` that retargets `playlist_file` is recorded in the
+        // same frame it lands.
+        self.flush_config(now, closing, theme_id);
         scanning
             || self.network.busy()
             || (!self.sink.empty() && !self.sink.is_paused())

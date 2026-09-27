@@ -4,9 +4,66 @@
 //! on-disk contract and the decision of *when* to write are what's pinned here.
 
 use tplay::app::{Config, EqData, LibraryData, VizView};
-use tplay::config::{should_flush, CONFIG_SAVE_DEBOUNCE_SECS};
+use tplay::config::{load_from, should_flush, CONFIG_SAVE_DEBOUNCE_SECS};
 use tplay::network::ServerCfg;
 use std::path::PathBuf;
+
+// ── Reading a damaged file ──────────────────────────────────────────────────
+
+/// A missing config must land on the same settings as one whose fields are all
+/// absent — the first goes through `Default`, the second through serde. Derived
+/// `Default` they disagreed, and a fresh install got `volume: 0.0`: a silent
+/// player, where an install with `{}` got 1.0.
+#[test]
+fn a_missing_config_agrees_with_one_whose_fields_are_absent() {
+    let from_default = Config::default();
+    let from_serde: Config = serde_json::from_str("{}").unwrap();
+    assert_eq!(from_serde.volume, 1.0, "absent field takes its serde default");
+    assert_eq!(from_default.volume, 1.0, "and so must a missing file");
+    assert_eq!(
+        serde_json::to_string(&from_default).unwrap(),
+        serde_json::to_string(&from_serde).unwrap(),
+        "the two definitions of \"default\" have diverged"
+    );
+    assert_eq!(from_default.buffer_size, 8192);
+    assert_eq!(from_default.spool_cache_mb, 2048);
+    assert_eq!(from_default.crossfade_secs, 3.0);
+}
+
+/// A hand-edited config that fails to parse used to be replaced with defaults on
+/// the first `flush_config` — which is how a single typo cost every setting. The
+/// original is now kept beside it, so the mistake is recoverable.
+#[test]
+fn a_malformed_config_is_kept_before_defaults_can_overwrite_it() {
+    let dir = std::env::temp_dir().join(format!("tplay-test-{}/cfg_broken", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.json");
+
+    // Valid but wrong, so the failure is unambiguously a parse error.
+    let original = r#"{ "volume": 0.5, "theme": }"#;
+    std::fs::write(&path, original).unwrap();
+
+    // The app still starts — a bad file is not a reason not to launch.
+    let loaded = load_from(Some(&path));
+    assert_eq!(loaded.volume, 1.0, "defaults, so the app runs");
+
+    let kept = dir.join("config.json.broken");
+    assert_eq!(std::fs::read_to_string(&kept).unwrap(), original, "original bytes preserved");
+
+    // A missing file is a fresh install, not damage: nothing to keep.
+    std::fs::remove_file(&kept).unwrap();
+    assert_eq!(load_from(Some(&dir.join("absent.json"))).volume, 1.0);
+    assert!(!kept.exists(), "a missing file is not a malformed one");
+
+    // A good file round-trips and leaves no `.broken` behind.
+    let good = Config { volume: 0.25, ..Config::default() };
+    std::fs::write(&path, serde_json::to_string(&good).unwrap()).unwrap();
+    assert_eq!(load_from(Some(&path)).volume, 0.25);
+    assert!(!kept.exists());
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
 
 // ── The write throttle ──────────────────────────────────────────────────────
 //

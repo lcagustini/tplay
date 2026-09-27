@@ -30,10 +30,15 @@ pub const TAG_ATTEMPTS_MAX: u8 = 3;
 /// ever evicted.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CacheEntry {
-    /// Spool key — the file's stem in the cache dir, no extension.
+    /// Spool key — the file's **stem**, no extension. `spool_key` returns this
+    /// and `mark_played` stores this, so it is the only value the two sides can
+    /// agree on: the on-disk name is `<key>.<ext>`, per `cache_path_in`.
     pub key: String,
     pub size: u64,
     pub played: bool,
+    /// Carried so deleting a selected key does not re-walk the directory to
+    /// re-derive the name.
+    pub path: PathBuf,
 }
 
 /// Which cached files to delete to bring the cache under `budget`.
@@ -281,34 +286,38 @@ impl Network {
     /// acceptable failure mode here. Per tag batch, not per frame — it walks
     /// the directory.
     pub fn evict_unplayed(&mut self, budget: u64) {
-        let dir = spool_dir();
-        let entries: Vec<CacheEntry> = match std::fs::read_dir(&dir) {
+        self.evict_unplayed_in(&spool_dir(), budget)
+    }
+
+    /// `evict_unplayed` over an injected spool dir, so the **wiring** is
+    /// testable. `select_evictions` being pure proved the policy, not that a
+    /// selected key resolves to a file — and it did not: entries were keyed by
+    /// `file_name()` while deletion matched on `file_stem()`, so nothing was ever
+    /// unlinked and no played file was ever recognised.
+    pub fn evict_unplayed_in(&mut self, dir: &Path, budget: u64) {
+        let entries: Vec<CacheEntry> = match std::fs::read_dir(dir) {
             Ok(rd) => rd
                 .flatten()
                 .filter(|e| e.path().is_file())
                 .filter_map(|e| {
-                    let key = e.file_name().to_string_lossy().into_owned();
+                    let path = e.path();
+                    // Stem, not `file_name()`: only the extensionless part
+                    // matches both `spool_key` and `mark_played`.
+                    let key = path.file_stem()?.to_string_lossy().into_owned();
                     let size = e.metadata().ok()?.len();
                     Some(CacheEntry {
                         played: self.played.contains(&key),
                         key,
                         size,
+                        path,
                     })
                 })
                 .collect(),
             Err(_) => return,
         };
         for key in select_evictions(&entries, budget) {
-            // `key` is the file's stem: it was written with an extension, so
-            // match on the stem rather than assuming a name.
-            if let Some(path) = std::fs::read_dir(&dir)
-                .into_iter()
-                .flatten()
-                .flatten()
-                .map(|e| e.path())
-                .find(|p| p.file_stem().is_some_and(|s| s.to_string_lossy() == key))
-            {
-                let _ = std::fs::remove_file(path);
+            if let Some(entry) = entries.iter().find(|e| e.key == key) {
+                let _ = std::fs::remove_file(&entry.path);
             }
         }
     }
