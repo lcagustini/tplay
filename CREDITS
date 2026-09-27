@@ -2,10 +2,11 @@
 
 ## Icons
 
-18 of tplay's 23 pane icons are from **[game-icons.net](https://game-icons.net)**,
+16 of tplay's 23 pane icons are from **[game-icons.net](https://game-icons.net)**,
 used under the **[Creative Commons Attribution 3.0 Unported licence](http://creativecommons.org/licenses/by/3.0/)**
-(CC BY 3.0). The remaining five — `stop`, `shuffle`, `gapless`, `crossfade` and
-`new_list` — are original to this repository and carry no third-party terms.
+(CC BY 3.0). The remaining seven — `logo`, `stop`, `shuffle`, `gapless`,
+`crossfade`, `new_list` and `nocover` — are original to this repository and carry
+no third-party terms.
 
 Attribution, as CC BY 3.0 requires:
 
@@ -19,7 +20,6 @@ Attribution, as CC BY 3.0 requires:
 
 | icon | source |
 |---|---|
-| `logo` | `lorc/double-quaver` |
 | `play` | `guard13007/play-button` |
 | `pause` | `guard13007/pause-button` |
 | `prev` | `delapouite/previous-button` |
@@ -36,6 +36,7 @@ Attribution, as CC BY 3.0 requires:
 | `maximize` | `delapouite/expand` |
 | `reverse` | `delapouite/vertical-flip` |
 | `save` | `delapouite/save` |
+| `logo` | original to this repository |
 | `shuffle` | original to this repository |
 | `stop` | original to this repository |
 | `gapless` | original to this repository |
@@ -55,6 +56,29 @@ and *visually* wrong, which is the only kind of substitution worth recording:
   turns to mush at 20px, and the mark that shipped here is the eight-ray sunburst
   the old generator drew — 8 rays from 40% out to 90% of the radius, no core.
 
+### The logo
+
+`logo` is the app's own mark and was never an upstream icon: a lightning bolt over
+a play triangle on a rounded plate. It briefly *was* — `lorc/double-quaver`, a
+beamed pair of notes, which is what the SVG icon migration left behind and what
+made the ☰ button stop looking like tplay. The artwork is back.
+
+`themes/dark/icons/logo.svg` is traced from the original 776×776 render, so the
+four silhouettes are exact. Its shading is **one linear gradient per shape**, not
+the render's per-limb lighting, which is why it reads flatter than the raster did.
+Tracing the shading bands too was measured at ~160 KB of path data, against ~12 KB
+for this, so the gradient is the trade that was taken deliberately.
+
+Two consequences for the rest of this file:
+
+- It is **not** one of the two edits below — it has a `stroke` and a `<defs>` block,
+  and it is not built from an upstream path. The "re-deriving" recipe does not
+  apply to it.
+- It is **not** per-theme and **not** recoloured. The three per-theme copies it
+  replaces were byte-identical, so there is no palette token behind it;
+  `recolor_icons.py` lists it in `FIXED` and leaves it alone. A theme that ships no
+  logo of its own reaches the default theme's, the same as any other icon.
+
 ### Re-deriving a file
 
 The upstream files are stored with two edits and nothing else: the
@@ -68,18 +92,21 @@ https://raw.githubusercontent.com/game-icons/icons/master/<author>/<name>.svg
 ```
 
 A future version of game-icons.net may replace an icon's artwork under the same
-name. The names above are the ones the 19 shapes were taken from on 2026-09-27.
+name. The names above are the ones the 16 upstream shapes were taken from on
+2026-09-27.
 
 ### The two edits matter
 
-The background rectangle is load-bearing to remove, not cosmetic: it is an
-opaque black 512×512 fill, so an icon that kept it rasterizes to a solid black
-square. `every_icon_has_a_parseable_svg_source` in `tests/gui_tests.rs` asserts
-each file has both an opaque and a transparent pixel, which is what catches it.
+These are the two edits the 16 **upstream** files carry. The background rectangle
+is load-bearing to remove, not cosmetic: it is an opaque black 512×512 fill, so an
+icon that kept it rasterizes to a solid black square.
+`every_icon_has_a_parseable_svg_source` in `tests/gui_tests.rs` asserts each file
+has both an opaque and a transparent pixel, which is what catches it.
 
 The `fill` is what makes each theme's set its own, and it is why the icons are
 stored per theme rather than shared. Change a token in a `theme.json` and run
-`python3 themes/recolor_icons.py` to propagate it.
+`python3 themes/recolor_icons.py` to propagate it. The logo is excluded from both
+halves of that — see above.
 
 ## Test audio fixtures
 

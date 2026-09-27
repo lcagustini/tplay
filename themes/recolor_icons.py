@@ -15,7 +15,8 @@ token in `theme.json`, run this, and every icon follows.
 viewBox and structure are never touched, so this cannot alter a glyph's shape and
 cannot clobber the icons that are original to this repository. Recolouring is the
 whole job — there is no drawing and no rasterization here, so it needs nothing
-installed.
+installed. The one exception to "every icon is one palette token" is `logo`, which
+`FIXED` skips: it is the app's mark, not a themed glyph.
 
 `--check` is the safety net for the workflow this replaces: it reports any file
 whose fills are not the tokens it is supposed to carry, which is what a missed
@@ -33,7 +34,6 @@ ROOT = pathlib.Path(__file__).resolve().parent
 
 # The one list: slot -> the palette token its fill is baked from.
 TOKENS = {
-    "logo": "accent",
     "play": "text_primary",
     "pause": "text_primary",
     "stop": "text_primary",
@@ -63,6 +63,14 @@ TOKENS = {
 # below is the order the `fill`/`stroke` attributes appear in the file, which is
 # why the recolour counts them.
 NOCOVER_TOKENS = ("panel_bg", "border", "text_secondary")
+
+# Slots the recolour must not touch, and says nothing about. The logo is the app's
+# mark rather than a themed glyph: it is full-colour artwork, and the three
+# per-theme copies it replaces were byte-identical, so there is no palette token
+# behind it. A slot with no row is already left alone, so this is not about the
+# bytes — without it the logo is reported as a problem on every run and `--check`
+# exits 1 forever, which is a CI failure for a file that is correct.
+FIXED = {"logo"}
 
 # Only a **hex** colour is a fill to rewrite. `fill="none"` is structural: the
 # hand-authored icons group their stroked paths under `<g fill="none" …>`, and
@@ -124,6 +132,8 @@ def main():
         for name, token in sorted(TOKENS.items()):
             print(f"{name}.svg  {token}")
         print(f"nocover.svg  {' + '.join(NOCOVER_TOKENS)}")
+        for name in sorted(FIXED):
+            print(f"{name}.svg  (fixed colours, not recoloured)")
         return 0
 
     available = themes()
@@ -141,6 +151,8 @@ def main():
         changed = 0
         for path in sorted((ROOT / theme_id / "icons").glob("*.svg")):
             slot = path.stem
+            if slot in FIXED:
+                continue
             if slot not in TOKENS and slot != "nocover":
                 problems.append(f"{theme_id}/{path.name}: no token in TOKENS, left alone")
                 continue
