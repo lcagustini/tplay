@@ -1,9 +1,9 @@
 //! The Library pane's left column: Places, Volumes, Network servers, Favorites.
 //!
-//! Fixed-width by construction — see the `allocate_space` note below. Every row
-//! is a click target that jumps the browser, so the click is deferred to the end
-//! of the scroll closure (one `jump` for the whole column) rather than acted on
-//! inside it.
+//! Fixed-width by construction — see the `allocate_space` note below. The three
+//! local row kinds (Places / Volumes / Favorites) each jump the browser, so
+//! their click is deferred to one `jump` after the loop rather than acted on
+//! inside it; the server rows act inline, as they do not navigate.
 
 use super::dir_name;
 use crate::app::TPlayApp;
@@ -27,6 +27,30 @@ const ROW_H: f32 = 18.0;
 const FORM_W: f32 = 100.0;
 /// Height of one add-server form text field.
 const FORM_FIELD_H: f32 = 18.0;
+/// egui memory: the Places and Volumes lists, read once per session.
+const LIB_PLACES: &str = "tplay.library.places";
+
+/// The two filesystem-derived lists the sidebar draws.
+///
+/// Both are pure functions of the filesystem, which is exactly why they are
+/// cached: `quick_folders` probes three directories and `mounted_volumes` reads
+/// `/proc/self/mounts` *and* scans `/dev/disk/by-label`, so drawing them inline
+/// cost about six syscalls on every frame — 60×/sec, forever, for data that
+/// changes about never. A rescan happens on a fresh launch.
+#[derive(Clone)]
+struct SidebarDirs {
+    places: Vec<(String, PathBuf)>,
+    volumes: Vec<library::Volume>,
+}
+
+impl SidebarDirs {
+    fn read() -> Self {
+        Self {
+            places: library::quick_folders(),
+            volumes: library::Volume::mounted_volumes(),
+        }
+    }
+}
 
 /// What a sidebar row's click asked for.
 enum RowClick {
@@ -34,6 +58,19 @@ enum RowClick {
     Jump,
     /// Remove it (Favorites drops the bookmark; a server row drops the entry).
     Remove,
+}
+
+/// What a sidebar row carries. A struct rather than four more positional
+/// parameters: the two `bool`s sat in the middle of a call where a stray `true`
+/// was indistinguishable from `active`.
+struct Row<'a> {
+    label: &'a str,
+    /// The row's target — also its hover text.
+    path: &'a Path,
+    /// Accent-tinted because this is the folder currently open.
+    active: bool,
+    /// Whether the row carries a ✕ (a Favorite or a saved server does).
+    removable: bool,
 }
 
 /// One sidebar row: a truncating label, accent-tinted when it is the current
@@ -50,10 +87,7 @@ fn sidebar_row(
     themes: &ThemeState,
     theme: &theme::Theme,
     layout: &theme::Layout,
-    label: &str,
-    path: &Path,
-    active: bool,
-    removable: bool,
+    row: Row,
 ) -> Option<RowClick> {
     let p = theme.palette;
     let mut out = None;
@@ -62,8 +96,12 @@ fn sidebar_row(
             .add_sized(
                 egui::vec2(ROW_W, ROW_H),
                 egui::Label::new(
-                    egui::RichText::new(label)
-                        .color(if active { p.accent } else { p.text_secondary })
+                    egui::RichText::new(row.label)
+                        .color(if row.active {
+                            p.accent
+                        } else {
+                            p.text_secondary
+                        })
                         .font(egui::FontId::new(
                             layout.text_meta,
                             theme.metadata_font.clone(),
@@ -72,11 +110,11 @@ fn sidebar_row(
                 .truncate()
                 .sense(egui::Sense::click()),
             )
-            .on_hover_text_at_pointer(path.display().to_string());
+            .on_hover_text_at_pointer(row.path.display().to_string());
         if resp.clicked() {
             out = Some(RowClick::Jump);
         }
-        if removable
+        if row.removable
             && theme::icon_button(
                 ui,
                 themes.icon(theme::Icon::Remove),
@@ -113,7 +151,7 @@ pub fn sidebar_ui(
     network_mode: bool,
 ) {
     let p = theme.palette;
-    let layout = theme.layout.with_defaults();
+    let layout = theme.layout;
 
     // The Places/Favorites column is a FIXED 120px sidebar. Two egui facts force
     // this exact shape:
@@ -151,6 +189,19 @@ pub fn sidebar_ui(
             .show(ui, |ui| {
                 let mut jump: Option<PathBuf> = None;
 
+                // Read once per session, not once per frame — see `SidebarDirs`.
+                let dirs = ui.ctx().memory_mut(|m| {
+                    let id = egui::Id::new(LIB_PLACES);
+                    match m.data.get_temp::<SidebarDirs>(id) {
+                        Some(d) => d,
+                        None => {
+                            let d = SidebarDirs::read();
+                            m.data.insert_temp(id, d.clone());
+                            d
+                        }
+                    }
+                });
+
                 // The local row to highlight — and `None` while a share is open.
                 // Entering network mode does NOT change `library_dir`, so
                 // comparing against it directly kept the last local folder lit
@@ -161,34 +212,52 @@ pub fn sidebar_ui(
                 let current_local = (!network_mode).then(|| app.library().dir().to_path_buf());
 
                 // Places: Home + XDG shortcuts — the favorites row style, no ✕.
-                let places = library::quick_folders();
-                if !places.is_empty() {
+                if !dirs.places.is_empty() {
                     section_label(ui, p, "Places");
-                    for (label, path) in places {
+                    for (label, path) in &dirs.places {
                         let active = current_local.as_deref() == Some(path.as_path());
                         if matches!(
-                            sidebar_row(ui, themes, theme, &layout, &label, &path, active, false),
+                            sidebar_row(
+                                ui,
+                                themes,
+                                theme,
+                                &layout,
+                                Row {
+                                    label,
+                                    path,
+                                    active,
+                                    removable: false,
+                                }
+                            ),
                             Some(RowClick::Jump)
                         ) {
-                            jump = Some(path);
+                            jump = Some(path.clone());
                         }
                     }
                     ui.add_space(8.0);
                 }
 
                 // Volumes: local block partitions from /proc/self/mounts.
-                let volumes = library::Volume::mounted_volumes();
-                if !volumes.is_empty() {
+                if !dirs.volumes.is_empty() {
                     section_label(ui, p, "Volumes");
-                    for vol in volumes {
+                    for vol in &dirs.volumes {
                         let active = current_local.as_deref() == Some(vol.path.as_path());
                         if matches!(
                             sidebar_row(
-                                ui, themes, theme, &layout, &vol.label, &vol.path, active, false
+                                ui,
+                                themes,
+                                theme,
+                                &layout,
+                                Row {
+                                    label: &vol.label,
+                                    path: &vol.path,
+                                    active,
+                                    removable: false,
+                                }
                             ),
                             Some(RowClick::Jump)
                         ) {
-                            jump = Some(vol.path);
+                            jump = Some(vol.path.clone());
                         }
                     }
                     ui.add_space(8.0);
@@ -221,24 +290,11 @@ pub fn sidebar_ui(
                         }
                     });
                     if let Some(host) = form.as_mut() {
-                        // Enter submits (singleline TextEdit surrenders focus
-                        // on Enter — the standard pattern).
+                        // Enter submits — see `login_form_ui` in listing.rs.
                         let mut enter = false;
                         let mut submit: Option<bool> = None; // Some(true) = Add, Some(false) = Cancel
-                                                             // The form lives in a FIXED-RECT child so egui's TextEdit
-                                                             // overflow allocation ("allocate additional space … so a
-                                                             // ScrollArea can properly scroll to the cursor") cannot
-                                                             // widen the scroll content — that growth is what kept
-                                                             // dragging the sidebar's scrollbar while typing.
-                                                             //
-                                                             // Both halves are load-bearing and *different*:
-                                                             // `allocate_space` reserves the rect AND advances the
-                                                             // layout cursor (a bare `new_child` would leave the next
-                                                             // row drawn on top of the form), while the raw
-                                                             // `new_child` does NOT propagate its min_rect to the
-                                                             // scroll content, which is what contains the overflow.
-                                                             // `clip_text` alone is not enough — it pins the field rect
-                                                             // but the overflow allocation still grows the parent.
+                                                             // Fixed-rect child, as the column above: the TextEdit
+                                                             // overflow allocation must not reach the scroll content.
                         let gap = ui.spacing().item_spacing.y;
                         let form_h = FORM_FIELD_H + gap + ui.spacing().interact_size.y;
                         let (_, form_rect) = ui.allocate_space(egui::vec2(FORM_W, form_h));
@@ -343,7 +399,18 @@ pub fn sidebar_ui(
                 for dir in app.library().favorites().to_vec() {
                     let name = dir_name(&dir);
                     let active = current_local.as_deref() == Some(dir.as_path());
-                    match sidebar_row(ui, themes, theme, &layout, &name, &dir, active, true) {
+                    match sidebar_row(
+                        ui,
+                        themes,
+                        theme,
+                        &layout,
+                        Row {
+                            label: &name,
+                            path: &dir,
+                            active,
+                            removable: true,
+                        },
+                    ) {
                         Some(RowClick::Jump) => jump = Some(dir),
                         Some(RowClick::Remove) => {
                             app.library_mut().toggle_favorite(dir);

@@ -15,7 +15,8 @@ fn cover_id() -> egui::Id {
     egui::Id::new("tplay.cover")
 }
 
-/// Cache value: the path the texture belongs to, plus the texture.
+/// `(track id the texture was decoded from, texture)`. The id half is what makes
+/// a track with no art re-read nothing until the track changes.
 type CoverCache = (String, Option<egui::TextureHandle>);
 
 pub fn album_cover_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui) {
@@ -70,7 +71,6 @@ pub fn album_cover_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
 
     match tex {
         Some(tex) => {
-            // Letterbox: aspect kept, centered, full pane otherwise.
             let size = tex.size_vec2();
             if size.x > 0.0 && size.y > 0.0 {
                 let scale = (rect.width() / size.x).min(rect.height() / size.y);

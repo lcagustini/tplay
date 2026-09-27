@@ -9,7 +9,7 @@
 use rodio::Source;
 use std::collections::VecDeque;
 use std::f32::consts::PI;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 /// Cap for the ring buffer (mono samples). 4096 @ 44.1 kHz ≈ 93 ms.
 pub const VIZ_BUFFER_CAP: usize = 4096;
@@ -57,16 +57,16 @@ impl VizBuf {
     /// Called by `TapSource::new` — also at the crossfade arm, so a mixed-rate
     /// overlap briefly reports the incoming track's rate.
     pub fn set_rate(&self, rate: u32) {
-        self.inner.lock().unwrap().rate = rate;
+        self.lock().rate = rate;
     }
 
     pub fn sample_rate(&self) -> u32 {
-        self.inner.lock().unwrap().rate
+        self.lock().rate
     }
 
     /// Push one mono sample (audio thread).
     pub fn push(&self, sample: f32) {
-        let mut state = self.inner.lock().unwrap();
+        let mut state = self.lock();
         if state.buf.len() == VIZ_BUFFER_CAP {
             state.buf.pop_front();
         }
@@ -75,20 +75,29 @@ impl VizBuf {
 
     /// The most recent `n` samples (GUI thread), oldest first, up to `n` long.
     pub fn snapshot_tail(&self, n: usize) -> Vec<f32> {
-        let state = self.inner.lock().unwrap();
+        let state = self.lock();
         let len = state.buf.len().min(n);
         state.buf.iter().rev().take(len).rev().copied().collect()
     }
 
     /// Clear the buffer (e.g. on track load/stop).
     pub fn clear(&self) {
-        self.inner.lock().unwrap().buf.clear();
+        self.lock().buf.clear();
+    }
+
+    /// The shared state, absorbing a poisoned lock rather than unwrapping it:
+    /// every holder here is a leaf that cannot panic while the guard is live, so
+    /// a poisoned buffer would otherwise be the one thing that escalates a
+    /// recovered panic into an abort — and `push` runs 44.1k times a second on
+    /// the audio thread.
+    fn lock(&self) -> std::sync::MutexGuard<'_, VizState> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
 /// Tap source — wraps an f32 source, mono-downmixes, pushes into the buffer, and
 /// forwards every sample untouched. Sits after `EqSource` so the viz reflects
-/// exactly what is heard (post-EQ, post-volume if volume is applied upstream).
+/// exactly what is heard (post-EQ; volume and balance are applied at the Sink).
 pub struct TapSource<S>
 where
     S: Source<Item = f32>,
@@ -169,14 +178,15 @@ where
     }
 }
 
-/// Hann window for the FFT.
-fn hann_window() -> [f32; FFT_SIZE] {
+/// The FFT's Hann window: a constant, so it is built once rather than 1024
+/// cosines per frame (60k/second, for a function of two compile-time constants).
+static HANN: LazyLock<[f32; FFT_SIZE]> = LazyLock::new(|| {
     let mut w = [0.0f32; FFT_SIZE];
     for (i, win) in w.iter_mut().enumerate() {
         *win = 0.5 * (1.0 - (2.0 * PI * i as f32 / (FFT_SIZE - 1) as f32).cos());
     }
     w
-}
+});
 
 /// Radix-2 Cooley-Tukey FFT, in-place, decimation-in-time.
 /// Input is interleaved real/imaginary (len must be 2 * power_of_two).
@@ -186,7 +196,6 @@ pub fn fft_magnitude(input: &mut [f32]) -> Vec<f32> {
     assert!(n_complex.is_power_of_two());
     let n = n_complex;
 
-    // Bit-reversal permutation (swaps pairs for interleaved storage)
     let mut j = 0;
     for i in 1..n {
         let mut bit = n >> 1;
@@ -196,13 +205,11 @@ pub fn fft_magnitude(input: &mut [f32]) -> Vec<f32> {
         }
         j ^= bit;
         if i < j {
-            // Swap real and imaginary parts together
             input.swap(2 * i, 2 * j);
             input.swap(2 * i + 1, 2 * j + 1);
         }
     }
 
-    // Cooley-Tukey (decimation-in-time, interleaved real/imag storage)
     let mut len = 2;
     while len <= n {
         let ang = -2.0 * PI / len as f32;
@@ -212,7 +219,6 @@ pub fn fft_magnitude(input: &mut [f32]) -> Vec<f32> {
             let mut w = 1.0;
             let mut w_im = 0.0;
             for j in 0..len / 2 {
-                // Index calculations for interleaved storage
                 let idx_u = 2 * (i + j);
                 let idx_v = 2 * (i + j + len / 2);
 
@@ -225,13 +231,11 @@ pub fn fft_magnitude(input: &mut [f32]) -> Vec<f32> {
                 let v_re = v_re_in * w - v_im_in * w_im;
                 let v_im = v_re_in * w_im + v_im_in * w;
 
-                // Butterfly
                 input[idx_u] = u_re + v_re;
                 input[idx_u + 1] = u_im + v_im;
                 input[idx_v] = u_re - v_re;
                 input[idx_v + 1] = u_im - v_im;
 
-                // w = w * wlen (complex multiplication)
                 let nw = w * wlen - w_im * wlen_im;
                 w_im = w * wlen_im + w_im * wlen;
                 w = nw;
@@ -240,7 +244,6 @@ pub fn fft_magnitude(input: &mut [f32]) -> Vec<f32> {
         len <<= 1;
     }
 
-    // Magnitudes (only positive frequencies)
     let half = n / 2;
     let mut mag = Vec::with_capacity(half);
     for i in 0..half {
@@ -264,9 +267,9 @@ pub fn compute_bands(viz: &VizBuf, prev: &mut [f32; VIZ_BANDS], attack: f32, rel
         return;
     }
 
-    let window = hann_window();
-    for i in 0..FFT_SIZE {
-        samples[i] *= window[i];
+    let window = &*HANN;
+    for (s, w) in samples.iter_mut().zip(window.iter()) {
+        *s *= *w;
     }
 
     let mut fft_input = vec![0.0f32; FFT_SIZE * 2];
@@ -281,9 +284,9 @@ pub fn compute_bands(viz: &VizBuf, prev: &mut [f32; VIZ_BANDS], attack: f32, rel
     let norm = 4.0 / FFT_SIZE as f32;
 
     // Log-spaced band averaging (skip DC, start at bin 1)
-    let max_bin = mag.len() - 1; // Nyquist
-                                 // 20 Hz .. Nyquist of the *source's* rate, not an assumed 44.1 kHz — the
-                                 // hardcoded version put every band edge ~9% off on a 48 kHz file.
+    let max_bin = mag.len() - 1;
+    // 20 Hz .. Nyquist of the *source's* rate, not an assumed 44.1 kHz — the
+    // hardcoded version put every band edge ~9% off on a 48 kHz file.
     let rate = viz.sample_rate() as f32;
     let log_min = 20.0f32.ln();
     let log_max = (rate / 2.0).ln();

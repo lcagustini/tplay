@@ -72,7 +72,10 @@ fn moving_unrelated_item_keeps_index() {
 }
 
 #[test]
-fn remove_current_track_stops_playback() {
+fn remove_current_track_clears_the_index() {
+    // Index math only. Whether the *audio* stops is the app's half of the
+    // question, and it needs a real sink to answer: `removing_the_playing_track
+    // _stops_it_playing` in `playlist_edit.rs` is that test.
     assert_eq!(apply_remove(3, Some(3)), None);
     assert_eq!(apply_remove(0, Some(0)), None);
 }

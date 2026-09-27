@@ -8,10 +8,11 @@
 //! user-tunable playback settings — is the counterpart of the matching `Config`
 //! fields, and owns their clamping.
 
+use crate::audio::eq::EQ_BANDS;
 use crate::network;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, PoisonError, RwLock};
 
 const FILE: &str = "config.json";
 
@@ -110,8 +111,6 @@ fn default_spool_cache_mb() -> u32 {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            // "" is not a theme id; `ThemeState::load` falls back to the default
-            // theme, so this stays a GUI-free "unset".
             theme: String::new(),
             eq: EqData::default(),
             shuffle: false,
@@ -137,11 +136,11 @@ pub struct EqData {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default = "default_gains")]
-    pub gains: [f32; 10],
+    pub gains: [f32; EQ_BANDS],
 }
 
-fn default_gains() -> [f32; 10] {
-    [0.0; 10]
+fn default_gains() -> [f32; EQ_BANDS] {
+    [0.0; EQ_BANDS]
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -163,18 +162,18 @@ pub const MAX_CROSSFADE_SECS: f32 = 10.0;
 /// The user-tunable playback settings, as one owned group.
 ///
 /// The live counterpart of the matching `Config` fields: `from_config` reads them
-/// at startup, `TPlayApp::snapshot` reads them back at save time. It exists
-/// because `TPlayApp` had **12** near-identical setters — six the same "if
-/// unchanged, return; set; mark dirty" shape — with the clamping duplicated in
-/// each. The setters here clamp, and the "did anything change" question they
-/// used to answer is now asked once, by comparing the whole config against the
-/// copy on disk.
+/// at startup, `TPlayApp::snapshot` reads them back at save time. The setters
+/// here clamp, and whether a write is needed is asked once, by comparing the
+/// whole config against the copy on disk.
 pub struct Prefs {
-    pub viz_view: VizView,
-    pub remaining: bool,
-    pub gapless: bool,
-    pub crossfade: bool,
-    pub crossfade_secs: f32,
+    // Private like `balance`: every one of the six has a getter, a clamping
+    // setter and a place in `snapshot`, so a public field would be a second way
+    // in that skipped the clamp.
+    viz_view: VizView,
+    remaining: bool,
+    gapless: bool,
+    crossfade: bool,
+    crossfade_secs: f32,
     /// Balance (L/R). An `Arc` because `BalanceSource` reads it per audio frame on
     /// the audio thread while the GUI writes it — the same live-shared shape as
     /// `EqShared`. Not a plain `f32` for exactly that reason.
@@ -238,11 +237,11 @@ impl Prefs {
     }
 
     pub fn balance(&self) -> f32 {
-        *self.balance.read().unwrap()
+        *self.balance.read().unwrap_or_else(PoisonError::into_inner)
     }
 
     pub fn set_balance(&mut self, v: f32) {
-        *self.balance.write().unwrap() = v.clamp(-1.0, 1.0);
+        *self.balance.write().unwrap_or_else(PoisonError::into_inner) = v.clamp(-1.0, 1.0);
     }
 
     /// The handle `BalanceSource` holds. Cloned, not shared by reference — the
@@ -294,9 +293,18 @@ pub fn save(config: &Config) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Ok(json) = serde_json::to_string_pretty(config) {
-        let _ = std::fs::write(&path, json);
+    let Ok(json) = serde_json::to_string_pretty(config) else {
+        return;
+    };
+    // Write-then-rename, so a process killed mid-write cannot leave a truncated
+    // config.json. A half-written one reads back as *malformed*, which `load`
+    // answers by resetting every setting to its default — so the atomic write
+    // is what keeps a bad shutdown from costing the user's configuration.
+    let partial = path.with_extension("json.part");
+    if std::fs::write(&partial, &json).is_ok() && std::fs::rename(&partial, &path).is_ok() {
+        return;
     }
+    let _ = std::fs::remove_file(&partial);
 }
 
 // ── When to write ───────────────────────────────────────────────────────────

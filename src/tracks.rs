@@ -24,16 +24,9 @@
 //! **The app holds one path per track, and never learns that a local path
 //! exists.** Everything below takes a track id and returns the *thing asked
 //! for* — a `File`, a `TrackInfo`, a duration, art bytes — never a resolved
-//! path to pass along.
-//!
-//! The earlier shape resolved in the app and passed the pair around
-//! (`load_file_as(local, display)`), which satisfied a weaker, greppable rule
-//! ("no `is_remote` in `app.rs`") while actually being the bug's shape: two
-//! paths for one track, correct only if the caller does not swap them. It did
-//! get swapped — `TPlayApp::play()` handed an `smb://` URI to `File::open`, and
-//! the crossfade arm did the same through a builder that `.expect()`ed. Passing
-//! a pair is not agnostic; it is the source distinction wearing a disguise. So
-//! the resolution lives here and the pair is gone.
+//! path to pass along. The history of the two-path form this replaced, and the
+//! two silent crashes it caused, is under **Tracks: one surface per source** in
+//! AGENTS.md.
 //!
 //! Greppable form: `app.rs` and `src/gui/` never call `File::open` /
 //! `read_info` / `probe_duration` / `read_cover` on a track id, and never bind a

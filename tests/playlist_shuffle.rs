@@ -4,8 +4,10 @@
 //! *reset* semantics and the unplayed-pool behavior for dynamically added
 //! tracks.
 //!
-//! (TPlayApp itself needs an audio device + eframe CreationContext, so the
-//! pure logic is replicated here — same convention as playlist_tests.rs.)
+//! (The traversal itself is replicated here rather than driven through
+//! `TPlayApp` — same convention as playlist_tests.rs, and it keeps the reset
+//! matrix readable as a table. `playlist_edit.rs` drives the real struct where
+//! a sink is needed to observe the effect.)
 
 /// XorShift64 — matches TPlayApp::rand_u64.
 fn xor_shift(state: &mut u64) -> u64 {

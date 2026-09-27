@@ -112,9 +112,11 @@ pub struct TPlayApp {
     /// The six user-tunable playback settings. `config::Prefs` owns them because
     /// they map 1:1 onto `Config` fields; the app only ever sees the group.
     prefs: config::Prefs,
-    /// Incoming track's sink during a crossfade/gapless. While `Some`, the
-    /// current track plays in `sink` and the next in `xf_sink`, faded or held
-    /// per frame in `advance()`.
+    /// Incoming track's sink during a crossfade/gapless. While `Some`, `sink`
+    /// is the **outgoing** track and `xf_sink` the incoming one — note that
+    /// `current_path` was already flipped to the incoming track at arm time, so
+    /// "the current track" names the one playing from `xf_sink`, not from
+    /// `sink`. Faded or held per frame in `advance()`.
     xf_sink: Option<Sink>,
     /// The outgoing track's duration, captured at arm time — the arm flips
     /// `total_duration` to the incoming track for the seek bar, so the fade
@@ -295,6 +297,16 @@ impl TPlayApp {
         }
     }
 
+    /// Append tracks, skipping any id already present.
+    ///
+    /// ponytail: ids arrive **un-normalized** here, where `apply_playlist` runs
+    /// them through `tracks::normalize`. The Library hands over `read_dir` paths
+    /// under the folder as navigated, so on a symlinked music dir one file can
+    /// have two ids — which `dedup`'s literal `==` misses, `tag_cache` then
+    /// scans twice, and `playlist_reordered`'s `position()` (which assumes ids
+    /// are unique) can resolve to the wrong row. Normalize at the three call
+    /// sites if it bites; it is not normalized here because that would also
+    /// silently drop a file deleted between listing and add.
     pub fn add_files(&mut self, paths: Vec<PathBuf>) {
         let mut added_count = 0;
         for path in paths {
@@ -311,8 +323,8 @@ impl TPlayApp {
     }
 
     /// Replace the sink with a fresh empty one, dropping the old decoder/file.
-    /// Shared by `start_track` and the remote spool wait (which pauses playback
-    /// until the download lands).
+    /// Shared by `start_track` and `play_now`'s spool request, which tears the
+    /// current track down until the download lands.
     fn fresh_sink(&mut self) {
         self.cancel_xf();
         self.seek_target = None;
@@ -327,11 +339,8 @@ impl TPlayApp {
     /// where the bytes actually are is `tracks`' problem.
     ///
     /// Every file read goes through `tracks::{open, info, probe}`, which
-    /// resolve internally. That is the whole rule: an earlier version took
-    /// `(local, display)` and let the caller resolve, putting two paths for one
-    /// track in circulation — and `File::open("smb://…")` fails quietly rather
-    /// than loudly, so a swapped pair was a silent, app-killing bug. One
-    /// parameter cannot be swapped.
+    /// resolve internally. One parameter cannot be swapped; the two-path form
+    /// this replaces is documented under **Tracks** in AGENTS.md.
     fn start_track(&mut self, track: PathBuf) {
         self.fresh_sink(); // cancels any live crossfade
 
@@ -387,9 +396,7 @@ impl TPlayApp {
     ///
     /// Pure by construction: the draw comes from a scratch copy of `rng_state`,
     /// so per-frame asking returns the same candidate and burns no entropy.
-    /// That is the whole point of the split — the arm evaluates this every
-    /// frame, and a mutating pick there rewrote the shuffle order 60 times a
-    /// second. See **Shuffle order** in AGENTS.md.
+    /// See **Shuffle order** in AGENTS.md.
     fn peek_next_index(&self) -> Option<(usize, u64)> {
         if self.playlist.is_empty() {
             return None;
@@ -424,8 +431,8 @@ impl TPlayApp {
 
     /// Record `idx` as played: the one place the shuffle cycle advances. Called
     /// once per track that actually starts playing, so `played` changes only on
-    /// a play, a playlist edit (`reset_shuffle` on add/remove/move) or a stop —
-    /// never on a frame of deliberation.
+    /// a play, a playlist edit (`reset_shuffle` on remove/move/reorder/load) or
+    /// a stop — never on a frame of deliberation.
     fn commit_next_index(&mut self, idx: usize, rng: u64) {
         self.rng_state = rng;
         if !self.shuffle || self.playlist.len() < 2 {
@@ -480,10 +487,9 @@ impl TPlayApp {
             self.played.get(self.played.len() - 2).copied()
         } else if self.repeat {
             // One entry, so step back onto it. **An empty history has nothing to
-            // walk**, however repeat is set: this used to read `self.repeat` and
-            // report `true`, lighting a button that then did nothing. An empty
-            // history is reachable by clicking any playlist row with shuffle on
-            // — `play_track` resets it and `start` never pushes.
+            // walk**, however repeat is set — and an empty history is reachable
+            // by clicking any playlist row with shuffle on, since `play_track`
+            // resets it and `start` never pushes.
             self.played.last().copied()
         } else {
             None
@@ -792,6 +798,13 @@ impl TPlayApp {
 
     pub fn remove_track(&mut self, index: usize) {
         self.playlist_dirty = true;
+        // Asked *before* the removal, and not derivable afterwards: a `None`
+        // index afterwards means two different things — the playing track was
+        // removed, or there was never an index (a direct open). Keying the
+        // unload on `current_index.is_none()` could not tell them apart, so
+        // removing an *unrelated* track while a directly-opened file played
+        // blanked Now Playing for the file actually playing.
+        let was_current = self.current_index == Some(index);
         self.playlist.remove(index);
         self.current_index = self.current_index.and_then(|ci| {
             if ci == index {
@@ -802,8 +815,13 @@ impl TPlayApp {
                 Some(ci)
             }
         });
-        if self.current_index.is_none() {
-            self.current_path = None;
+        if was_current {
+            // The track that was playing has left the list, so unload it rather
+            // than leave the sink running: audio would carry on with nothing to
+            // show for it, and `advance`'s `current_path` guard would refuse to
+            // move on. `stop` covers the xf sink, the position and the history.
+            self.stop();
+            return;
         }
         self.cancel_xf();
         self.reset_shuffle();
@@ -895,9 +913,9 @@ impl TPlayApp {
         }
     }
 
-    // ── Playlists — plain `.tplay` files on disk, found in the Library like
-    //    any other file. Shuffle/repeat are appwide settings (config.json),
-    //    never playlist content.
+    // ── Playlists — `.tplay`/`.m3u`/`.m3u8`/`.pls` files on disk, found in the
+    //    Library like any other file. Shuffle/repeat are appwide settings
+    //    (config.json), never playlist content.
 
     /// Write the current playlist (paths only) and record it as the file future
     /// saves overwrite without re-opening the dialog.
@@ -1043,9 +1061,6 @@ impl TPlayApp {
     /// `TagReader` splits the batch and hands each half to the thread or the SMB
     /// worker. Both land in the same `tag_cache`, remote keyed by URI, so every
     /// pane fills in identically.
-    ///
-    /// Safe to call every frame: the reader skips cached tracks and the network
-    /// side keeps its own in-flight set, so a running batch is not re-queued.
     pub fn ensure_tags(&mut self, paths: Vec<PathBuf>) -> bool {
         let cache = &self.tag_cache;
         self.tracks.request(cache, &mut self.network, &paths)
@@ -1085,11 +1100,11 @@ impl TPlayApp {
     /// `current_index` — `play_file` (direct open) sets `None`, `start`
     /// (playlist flow) sets the index, and neither decision belongs in here.
     ///
-    /// The trap this exists to kill: opening a track id directly on a remote
-    /// track is `File::open("smb://…")`, which always fails *quietly*, so a
-    /// caller that skips this path breaks playback silently rather than loudly.
-    /// Note also that a remote track is a *ready* track whenever its spool copy
-    /// exists — which is why this is one entry point and not two.
+    /// The trap this exists to kill is `File::open("smb://…")`, which always
+    /// fails *quietly* — so a caller that skips this path breaks playback
+    /// silently rather than loudly. Note also that a remote track is a *ready*
+    /// track whenever its spool copy exists, which is why this is one entry
+    /// point and not two.
     fn play_now(&mut self, track: PathBuf) {
         if tracks::is_ready(&track) {
             self.start_track(track);
@@ -1156,10 +1171,9 @@ impl TPlayApp {
     // accessors are the whole boundary: a pane that draws the equalizer depends
     // on `EqSettings`, not on a set of method names this file invented for it.
     //
-    // Anything that was a bare forward to one of these — a getter per value, a
-    // setter per setting — is gone. What remains on `TPlayApp` either touches
-    // state only the app has, or performs an effect that spans owners (persist,
-    // re-list, scan, rebuild the sink, drain the network).
+    // What remains on `TPlayApp` either touches state only the app has, or
+    // performs an effect that spans owners (persist, re-list, scan, rebuild the
+    // sink, drain the network).
 
     /// The six user-tunable playback settings. Their clamping lives in
     /// `Prefs`; persistence is the config compare in `flush_config`, so a
@@ -1287,9 +1301,9 @@ impl TPlayApp {
     ///
     /// Returns whether the GUI should keep repainting: something is in flight
     /// (a scan, a spool, a tag batch) or audio is playing. The app cannot ask
-    /// for a repaint itself — it has no `egui::Context` — so the three places
-    /// that used to call `request_repaint` return a bool instead and the shell
-    /// ORs them together.
+    /// for a repaint itself — it has no `egui::Context` — so each of the three
+    /// things that would have called it returns a bool and the shell ORs them
+    /// together.
     pub fn update(&mut self, now: f64, closing: bool, theme_id: &str) -> bool {
         self.advance();
         let scanning = self.drain_tag_scan();

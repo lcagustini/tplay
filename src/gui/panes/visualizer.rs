@@ -11,12 +11,11 @@ pub mod views;
 pub fn visualizer_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui) {
     let theme = themes.current().clone();
     let p = theme.palette;
-    let layout = theme.layout.with_defaults();
+    let layout = theme.layout;
 
-    // Selected view — persisted in config.json via `TPlayApp::viz_view`.
+    // Selected view — persisted in config.json via `Prefs::viz_view`.
     let mut view = app.prefs().viz_view();
 
-    // Header: title + view selector
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new("Visualizer")
@@ -48,7 +47,6 @@ pub fn visualizer_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::U
 
     let painter = ui.painter();
 
-    // Background
     painter.rect_filled(rect, 0.0, p.bg);
 
     match view {

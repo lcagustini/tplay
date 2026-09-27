@@ -22,6 +22,9 @@ const SEG_CHAR_W: f32 = 8.0;
 const SEG_PAD_W: f32 = 6.0;
 /// Height of one segment — the row the whole header sits on.
 const SEG_H: f32 = 18.0;
+/// Leading segments exempt from `plan`'s `…` collapse, per source. See `plan`.
+const LOCAL_ALWAYS: usize = 1;
+const SHARE_ALWAYS: usize = 3;
 
 /// What clicking a breadcrumb segment does.
 ///
@@ -175,8 +178,7 @@ pub fn local_header(
     let p = theme.palette;
     let dir = app.library().dir().to_path_buf();
     let segs = local_segs(&dir);
-    // 1 = only the filesystem root is exempt from the `…` collapse.
-    if let Some(seg) = breadcrumb(ui, p, &segs, 1) {
+    if let Some(seg) = breadcrumb(ui, p, &segs, LOCAL_ALWAYS) {
         apply(app, seg);
     }
 
@@ -206,18 +208,13 @@ pub fn remote_header(
     browse: &network::NetworkBrowse,
 ) {
     let segs = remote_segs(browse);
-    // 3 = Local / host / share, so a deep directory still has a way back to the
-    // share root. The share-list stage is only 2 segments, under `always` and so
-    // always shown — the exit never disappears.
-    if let Some(seg) = breadcrumb(ui, theme.palette, &segs, 3) {
+    if let Some(seg) = breadcrumb(ui, theme.palette, &segs, SHARE_ALWAYS) {
         apply(app, seg);
     }
 }
 
-/// Root → current, so "one level up" is the second-to-last segment. The
-/// breadcrumb is the only way up: there is deliberately no `..` row, which
-/// duplicated navigation, consumed a banded row, and was counted toward the
-/// folder total in the composition counts.
+/// Root → current, so "one level up" is the second-to-last segment — the
+/// breadcrumb is the only way up.
 pub fn local_segs(dir: &Path) -> Vec<Seg> {
     let mut segs: Vec<PathBuf> = Vec::new();
     let mut cur = Some(dir.to_path_buf());
@@ -241,8 +238,6 @@ pub fn remote_segs(browse: &network::NetworkBrowse) -> Vec<Seg> {
         action,
         hover: None,
     };
-    // "Local" is the exit back to the folder browser; at the share-list stage it
-    // is the only way out, so it is segment 0 and never collapsed away.
     let mut segs = vec![seg(String::from("Local"), Action::LeaveNetwork)];
     segs.push(seg(
         browse.host.clone(),
@@ -260,8 +255,11 @@ pub fn remote_segs(browse: &network::NetworkBrowse) -> Vec<Seg> {
         },
     ));
     // One segment per directory level, each carrying the walk to that level.
+    // The empty parts are dropped because `"".split('/')` yields one: at the
+    // share root (`rel == ""`) that produced a fourth segment labelled "" which
+    // `plan` then drew as the bold "you are here" crumb.
     let mut walk = String::new();
-    for part in browse.rel.split('/') {
+    for part in browse.rel.split('/').filter(|p| !p.is_empty()) {
         if !walk.is_empty() {
             walk.push('/');
         }

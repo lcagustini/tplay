@@ -1,10 +1,9 @@
 //! The seek-position arithmetic, on its own.
 //!
-//! `TPlayApp` cannot reach this headlessly (it needs an audio device), and the
-//! slow path that sets the offset can't be *forced* even with one — `try_seek`
-//! succeeds for every format a test could cheaply produce, so the
-//! `skip_duration` fallback never runs. That leaves one option: name the
-//! arithmetic and test it directly.
+//! The slow path that sets the offset cannot be *forced* — `try_seek` succeeds
+//! for every format a test could cheaply produce, so the `skip_duration`
+//! fallback never runs, with or without a device. That leaves one option: name
+//! the arithmetic and test it directly.
 //!
 //! The failure this guards is silent by nature. A fast seek lands in place and
 //! the offset is zero, so a broken `effective_pos` still shows the right

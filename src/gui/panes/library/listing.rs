@@ -63,7 +63,7 @@ fn draw_dir_row(
     folder: Option<&egui::TextureHandle>,
 ) -> bool {
     let p = theme.palette;
-    let layout = theme.layout.with_defaults();
+    let layout = theme.layout;
     let (rect, mut row) = theme::row(ui, i, false, row_h, theme);
     row.spacing_mut().item_spacing.x = 4.0;
     let mut text_x = rect.min.x + 6.0;
@@ -97,9 +97,8 @@ fn draw_dir_row(
     resp.clicked()
 }
 
-/// A saved playlist row: full filename (extension visible) + a right-aligned
-/// "Playlist" tag — no tag cells, no `+`. Click loads it (the caller adds the
-/// replace-confirm).
+/// A saved playlist row: full filename (extension visible) + a "Playlist" tag —
+/// no tag cells, no `+`. Click loads it (the caller adds the replace-confirm).
 fn draw_playlist_row(
     ui: &mut egui::Ui,
     theme: &theme::Theme,
@@ -146,7 +145,7 @@ enum FileAct {
 /// The local and SMB browsers render identical rows, so they share one list
 /// widget and differ only in carrying the action out: `Nav` is `navigate_to`
 /// locally and `browse_open` on a share; `LoadPlaylist` is `load_playlist_from`
-/// locally and `fetch_remote_playlist` (spool, then load) on one.
+/// locally and `network_mut().fetch` (spool, then load) on one.
 enum Act {
     /// Enter a subdirectory — a local path, or an `smb://` share directory URI.
     Nav(PathBuf),
@@ -168,7 +167,7 @@ fn draw_file_row(
     info: Option<&library::TrackInfo>,
 ) -> Option<FileAct> {
     let p = theme.palette;
-    let layout = theme.layout.with_defaults();
+    let layout = theme.layout;
     // A spooled `smb://` track is "current" under its URI, which is what the
     // playlist holds — so the highlight follows the track across both sources.
     let is_current = app.current_path().is_some_and(|c| c == path);
@@ -480,8 +479,6 @@ fn list_header_right(
     p: theme::Palette,
     entries: &[library::Entry],
 ) {
-    // `Align::Min`, NOT `Center` — see the doc above. It looks cosmetic (top-align
-    // vs centre a ~21px row) and is anything but.
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
         if ui
             .button("Add All")

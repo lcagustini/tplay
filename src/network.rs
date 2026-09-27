@@ -194,25 +194,31 @@ pub struct NetworkBrowse {
     pub error: Option<String>,
 }
 
-/// All SMB network state + worker channels, as one object. Pure state —
-/// persistence and playback are the app's job; the GUI reaches in through
+/// All SMB network state + worker channels, as one object — it spawns the worker
+/// thread and issues commands, so the app has no channel plumbing to forget.
+/// Persistence and the sink stay the app's job; the GUI reaches in through
 /// `TPlayApp::network()`/`network_mut()`.
 pub struct Network {
     servers: Vec<ServerCfg>,
     /// Session-memory passwords keyed by host — never persisted.
     passwords: HashMap<String, String>,
     browse: Option<NetworkBrowse>,
-    /// A remote track waiting on its spool (its `smb://` URI). The app set
-    /// `current_index` first, so the spooled file plays into it.
+    /// A remote track waiting on its spool (its `smb://` URI). The app has
+    /// already unloaded whatever was playing; the reply is promoted to the sink
+    /// by `update()` regardless of whether the track came from the playlist or
+    /// a direct open.
     pending: Option<PathBuf>,
     /// A remote `.tplay` waiting on its download. Separate from `pending` so
     /// reading a playlist can never displace a track still spooling, or vice
     /// versa.
     fetch_req: Option<String>,
-    /// A playlist write to a share is in flight. No stale check needed (the app
-    /// acts on every reply), but it must keep frames coming so the reply is
-    /// drained and the listing refreshes.
-    saving: bool,
+    /// Playlist writes to shares in flight. A **count**, not a bool: saving an
+    /// already-tracked playlist needs no dialog, so two clicks queue two writes
+    /// and a bool cleared by the first reply left `busy()` false with the second
+    /// reply undrained until some unrelated repaint happened. No stale check is
+    /// needed (the app acts on every reply) but the count must keep frames
+    /// coming so each one is drained and the listing refreshes.
+    saving: usize,
     /// Remote URIs with a tag request **in flight**. Without this the same
     /// directory's uncached files would be re-queued continuously while the
     /// first batch runs, since the app asks every frame for whatever is
@@ -246,7 +252,7 @@ impl Network {
             browse: None,
             pending: None,
             fetch_req: None,
-            saving: false,
+            saving: 0,
             tagging: HashSet::new(),
             tag_attempts: HashMap::new(),
             played: HashSet::new(),
@@ -304,7 +310,7 @@ impl Network {
     pub fn busy(&self) -> bool {
         self.pending.is_some()
             || self.fetch_req.is_some()
-            || self.saving
+            || self.saving > 0
             || !self.tagging.is_empty()
             || self.browse.as_ref().is_some_and(|b| b.busy)
     }
@@ -469,7 +475,7 @@ impl Network {
     /// `drain` reports the outcome, so the UI thread never blocks on the LAN.
     pub fn save(&mut self, uri: String, data: String) {
         let host = split_uri(&uri).map(|(h, _, _)| h).unwrap_or_default();
-        self.saving = true;
+        self.saving += 1;
         self.send(SmbCmd::Save {
             uri,
             data: data.into_bytes(),
@@ -579,7 +585,7 @@ impl Network {
                     }
                 }
                 SmbReply::Saved { uri, result } => {
-                    self.saving = false;
+                    self.saving = self.saving.saturating_sub(1);
                     return Some(Event::Saved { uri, result });
                 }
                 SmbReply::Tags { results } => {
@@ -681,7 +687,7 @@ pub fn uri_parent(uri: &str) -> &str {
 
 /// FNV-1a 64-bit — hand-rolled because `DefaultHasher`'s algorithm is
 /// unspecified across Rust releases, and a cache filename must be stable. Same
-/// "no dep for a tiny hash" convention as app.rs's XorShift64 RNG.
+/// "no dep for a tiny hash" convention as playlist.rs's XorShift64 RNG.
 pub fn fnv1a64(s: &str) -> u64 {
     let mut h = 0xcbf2_9ce4_8422_2325u64;
     for b in s.as_bytes() {
@@ -840,7 +846,7 @@ pub fn is_self_or_parent(name: &str) -> bool {
 }
 
 /// Download `uri` to its spool cache path. Already cached → return immediately.
-/// Full-file pipelined read, then one write.
+/// Full-file pipelined read, then write to a `.part` and rename into place.
 /// ponytail: whole file buffered in RAM — fine for tracks (≤ a few hundred MB);
 /// switch to streaming `FileDownload`/write-behind if ever spooling multi-GB.
 async fn run_spool(uri: &str, creds: &SmbCreds) -> CmdResult<PathBuf> {
@@ -862,8 +868,19 @@ async fn run_spool(uri: &str, creds: &SmbCreds) -> CmdResult<PathBuf> {
     if let Some(p) = dest.parent() {
         let _ = std::fs::create_dir_all(p);
     }
-    if let Err(e) = std::fs::write(&dest, &bytes) {
-        let _ = std::fs::remove_file(&dest);
+    // Write-then-rename: a plain `fs::write` truncates in place, so a process
+    // killed mid-transfer left a partial file that `dest.is_file()` — and so
+    // `tracks::is_ready` — treated as a complete track, giving wrong tags, a
+    // wrong duration and garbage playback. The rename is atomic within the
+    // directory, so the cache only ever holds whole files. A leftover `.part` is
+    // picked up by `evict_unplayed_in` as an ordinary entry.
+    let partial = dest.with_extension("part");
+    if let Err(e) = std::fs::write(&partial, &bytes) {
+        let _ = std::fs::remove_file(&partial);
+        return Err(e.to_string());
+    }
+    if let Err(e) = std::fs::rename(&partial, &dest) {
+        let _ = std::fs::remove_file(&partial);
         return Err(e.to_string());
     }
     Ok(dest)

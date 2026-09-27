@@ -4,7 +4,7 @@
 //! `next()` — no sink rebuild, no audio restart.
 
 use rodio::Source;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Duration;
 
 /// 10 equalizer band frequencies, matching the reference UI labels (20..16K).
@@ -12,13 +12,19 @@ pub const EQ_FREQUENCIES: [f32; 10] = [
     20.0, 100.0, 300.0, 600.0, 1000.0, 3000.0, 5000.0, 8000.0, 12000.0, 16000.0,
 ];
 
+/// How many bands there are. Every array sized by the band count is written
+/// `[f32; EQ_BANDS]` rather than `[f32; 10]`, so adding an eleventh frequency to
+/// `EQ_FREQUENCIES` is a one-line change that the compiler checks everywhere
+/// instead of a four-file edit that compiles until a band reads out of bounds.
+pub const EQ_BANDS: usize = EQ_FREQUENCIES.len();
+
 /// Equalizer presets — Flat is the reset. A manually tweaked slider
 /// switches the selection to Custom (None).
 /// Curves follow sfxengine.com/blog/best-equalizer-settings-for-music:
 /// Flat ⇐ Flat, Rock ⇐ Rock/Metal, Pop ⇐ V-Shape, Jazz ⇐ Treble Boost,
 /// Classical ⇐ gentle V-Shape, Electronic ⇐ Bass Boost, Vocal ⇐ Vocal Enhancement.
-pub const EQ_PRESETS: [(&str, [f32; 10]); 7] = [
-    ("Flat", [0.0; 10]),
+pub const EQ_PRESETS: [(&str, [f32; EQ_BANDS]); 7] = [
+    ("Flat", [0.0; EQ_BANDS]),
     ("Rock", [2.0, 2.5, 3.0, -1.0, 0.0, 3.0, 2.0, 0.5, 0.5, 0.0]),
     ("Pop", [3.0, 2.5, 1.0, -0.5, -0.5, -1.5, 1.0, 2.0, 2.5, 2.0]),
     ("Jazz", [0.0, 0.5, 0.5, 0.0, 0.5, 1.0, 2.5, 2.0, 1.5, 1.0]),
@@ -39,7 +45,7 @@ pub const EQ_PRESETS: [(&str, [f32; 10]); 7] = [
 /// The preset a gain set matches, or `None` for Custom. Derived, never stored:
 /// `gains` is the single source of truth, so a hand-tweaked curve cannot drift
 /// out of sync with the name shown beside it.
-pub fn preset_for(gains: [f32; 10]) -> Option<&'static str> {
+pub fn preset_for(gains: [f32; EQ_BANDS]) -> Option<&'static str> {
     EQ_PRESETS
         .iter()
         .find(|(_, g)| *g == gains)
@@ -56,17 +62,18 @@ pub const EQ_GAIN_MAX_DB: f32 = 12.0;
 /// *audio* thread every frame while the GUI writes gains as sliders move — so the
 /// state has to be an `Arc<RwLock<EqShared>>`. Holding the handle here rather
 /// than in `TPlayApp` keeps the presets, clamping and name derivation beside the
-/// filters they describe, and gives the seven `TPlayApp` accessors something to
+/// filters they describe, and gives `TPlayApp`'s two accessors something to
 /// delegate to instead of each reaching for the lock.
 ///
-/// Setters report whether the value changed, so the caller can skip marking the
-/// config dirty when a drag re-sets the same number.
+/// Setters report whether the value changed. No caller needs the answer —
+/// `flush_config`'s content compare decides writes — but it is what the tests
+/// pin, and it costs nothing to keep.
 pub struct EqSettings {
     shared: Arc<RwLock<EqShared>>,
 }
 
 impl EqSettings {
-    pub fn new(enabled: bool, gains: [f32; 10]) -> Self {
+    pub fn new(enabled: bool, gains: [f32; EQ_BANDS]) -> Self {
         Self {
             shared: Arc::new(RwLock::new(EqShared { gains, enabled })),
         }
@@ -79,11 +86,17 @@ impl EqSettings {
     }
 
     pub fn enabled(&self) -> bool {
-        self.shared.read().unwrap().enabled
+        self.shared
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .enabled
     }
 
-    pub fn gains(&self) -> [f32; 10] {
-        self.shared.read().unwrap().gains
+    pub fn gains(&self) -> [f32; EQ_BANDS] {
+        self.shared
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .gains
     }
 
     /// Set one band's gain, clamped to the +/-12 dB the UI offers. An
@@ -93,7 +106,7 @@ impl EqSettings {
             return false;
         }
         let clamped = gain_db.clamp(EQ_GAIN_MIN_DB, EQ_GAIN_MAX_DB);
-        let mut shared = self.shared.write().unwrap();
+        let mut shared = self.shared.write().unwrap_or_else(PoisonError::into_inner);
         if (shared.gains[band] - clamped).abs() < f32::EPSILON {
             return false;
         }
@@ -109,7 +122,7 @@ impl EqSettings {
         let Some((_, gains)) = EQ_PRESETS.iter().find(|(n, _)| *n == name) else {
             return false;
         };
-        let mut shared = self.shared.write().unwrap();
+        let mut shared = self.shared.write().unwrap_or_else(PoisonError::into_inner);
         if shared.gains == *gains {
             return false;
         }
@@ -118,7 +131,7 @@ impl EqSettings {
     }
 
     pub fn toggle(&self) {
-        let mut shared = self.shared.write().unwrap();
+        let mut shared = self.shared.write().unwrap_or_else(PoisonError::into_inner);
         shared.enabled = !shared.enabled;
     }
 
@@ -131,11 +144,11 @@ impl EqSettings {
     }
 }
 
-/// Live-controllable EQ state, shared between `TPlayApp` (writer) and `EqSource` (reader).
+/// Live-controllable EQ state, written by `EqSettings` and read by `EqSource`.
 /// Gains are in dB (-12..12); 0 dB is an exact identity filter.
 #[derive(Debug, Clone, Default)]
 pub struct EqShared {
-    pub gains: [f32; 10],
+    pub gains: [f32; EQ_BANDS],
     pub enabled: bool,
 }
 
@@ -197,6 +210,21 @@ impl Biquad {
     }
 }
 
+/// How many samples pass between two reads of the shared gains.
+///
+/// The read is the only reason `refresh` is not free, and it ran once per
+/// *sample* — ~88k lock acquisitions a second per sink, against a 10-band
+/// filter chain that is the actual work in `next`. 32 samples is ~0.7 ms at
+/// 44.1 kHz, far below a frame, so a slider drag still lands within the frame
+/// that moved it, and the coefficients swap between samples rather than inside
+/// a frame, so the change is bit-identical to a per-sample poll — only later.
+///
+/// `BalanceSource` deliberately does *not* do this: it holds one channel of a
+/// frame between two `next()` calls, so a value that changed in between would
+/// scale the left with one gain and the right with the other. There the
+/// per-sample read is load-bearing, not an optimisation.
+const REFRESH_EVERY: u32 = 32;
+
 /// 10-band graphic EQ Source wrapper for f32 samples: 10 biquad filters in
 /// series, one per band.
 pub struct EqSource<S>
@@ -206,9 +234,11 @@ where
     inner: S,
     shared: Arc<RwLock<EqShared>>,
     sample_rate: u32,
-    bands: [Biquad; 10],
-    cached_gains: [f32; 10],
+    bands: [Biquad; EQ_BANDS],
+    cached_gains: [f32; EQ_BANDS],
     cached_enabled: bool,
+    /// Samples since the last read of `shared`; see `REFRESH_EVERY`.
+    since_refresh: u32,
 }
 
 impl<S> EqSource<S>
@@ -218,7 +248,7 @@ where
     pub fn new(inner: S, shared: Arc<RwLock<EqShared>>) -> Self {
         let sample_rate = inner.sample_rate();
         let (gains, enabled) = {
-            let state = shared.read().unwrap();
+            let state = shared.read().unwrap_or_else(PoisonError::into_inner);
             (state.gains, state.enabled)
         };
         let bands = std::array::from_fn(|i| Biquad::new(sample_rate, EQ_FREQUENCIES[i], gains[i]));
@@ -229,14 +259,16 @@ where
             bands,
             cached_gains: gains,
             cached_enabled: enabled,
+            since_refresh: REFRESH_EVERY,
         }
     }
 
     /// Pull the latest gains from the GUI thread. A band whose gain changed gets
     /// fresh coefficients *and* fresh filter state (no click from stale
-    /// history). Returns whether the EQ is currently enabled.
-    fn refresh(&mut self) -> bool {
-        let state = self.shared.read().unwrap();
+    /// history). Leaves `cached_enabled` describing the current state, so the
+    /// caller can branch on it.
+    fn refresh(&mut self) {
+        let state = self.shared.read().unwrap_or_else(PoisonError::into_inner);
         if state.enabled != self.cached_enabled {
             self.cached_enabled = state.enabled;
             self.bands = std::array::from_fn(|i| {
@@ -251,7 +283,7 @@ where
             // for the other three, so it is no shorter — and a 4-way `zip` reads
             // worse than the parallel-array form it replaces.
             #[allow(clippy::needless_range_loop)]
-            for i in 0..10 {
+            for i in 0..EQ_BANDS {
                 if state.gains[i] != self.cached_gains[i] {
                     self.cached_gains[i] = state.gains[i];
                     self.bands[i] =
@@ -259,7 +291,6 @@ where
                 }
             }
         }
-        state.enabled
     }
 }
 
@@ -271,7 +302,13 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         let sample = self.inner.next()?;
-        if !self.refresh() {
+        if self.since_refresh >= REFRESH_EVERY {
+            self.since_refresh = 0;
+            self.refresh();
+        } else {
+            self.since_refresh += 1;
+        }
+        if !self.cached_enabled {
             return Some(sample);
         }
         let mut s = sample;

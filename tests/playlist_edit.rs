@@ -391,3 +391,81 @@ fn a_reorder_does_not_pull_a_directly_opened_track_into_the_playlist_flow() {
     assert_eq!(t.app.current_index(), None, "a reorder must not invent one");
     assert_eq!(t.app.current_path(), Some(paths[1].as_path()));
 }
+
+// ── What the app owes every removal ───────────────────────────────────────────
+
+/// `n` playable 1s WAVs in a temp dir, added to the playlist in order.
+fn playable(name: &str, files: &[&str]) -> (TestApp, Vec<PathBuf>) {
+    let mut t = TestApp::new(name);
+    let dir = test_dir(name);
+    let paths: Vec<PathBuf> = files
+        .iter()
+        .map(|n| {
+            let p = dir.join(n);
+            write_wav(&p);
+            p
+        })
+        .collect();
+    t.app.add_files(paths.clone());
+    (t, paths)
+}
+
+#[test]
+fn removing_the_playing_track_stops_it_playing() {
+    // The row is gone, so there is nothing for the sink to be playing *as* any
+    // more: it used to keep going with `current_path` cleared, which left audio
+    // with no Now Playing entry and no auto-advance to end it.
+    let (mut t, paths) = playable("remove-current", &["a.wav", "b.wav"]);
+    t.app.play_track(0);
+    t.pump(0.05);
+    assert_eq!(t.app.current_path(), Some(paths[0].as_path()), "premise");
+
+    t.app.remove_track(0);
+    assert_eq!(t.app.current_path(), None);
+    assert_eq!(t.app.current_index(), None);
+    // Immediate tell: a stopped player reports no duration, and Now Playing's
+    // seek bar is enabled off exactly this.
+    assert_eq!(
+        t.app.total_duration(),
+        None,
+        "a stopped player must not report a track length"
+    );
+    // The real tell: the sink itself. `stop` only sets a flag, so the audio has
+    // to be pulled before the queue drains — pump a little, then it must be
+    // empty rather than still playing a track that is no longer in the list.
+    t.pump(0.05);
+    assert!(
+        t.app.is_empty(),
+        "the removed track's audio must stop, not run on unlabelled"
+    );
+}
+
+#[test]
+fn removing_an_unrelated_track_leaves_a_directly_opened_file_alone() {
+    // `play_file` is a direct open, so `current_index` is `None` from the start
+    // and "the index I had is gone" cannot be told from "there was never an
+    // index". Keying the unload on `current_index.is_none()` therefore blanked
+    // Now Playing for the file that was actually playing, on removing any row at
+    // all — including one that had nothing to do with it.
+    let (mut t, paths) = playable("remove-direct", &["a.wav", "b.wav", "c.wav"]);
+    t.app.play_file(paths[2].clone());
+    assert_eq!(
+        t.app.current_index(),
+        None,
+        "premise: a direct open has no index"
+    );
+    assert_eq!(t.app.current_path(), Some(paths[2].as_path()), "premise");
+
+    t.app.remove_track(0);
+    assert_eq!(
+        t.app.current_path(),
+        Some(paths[2].as_path()),
+        "removing an unrelated row must not touch what is playing"
+    );
+    assert_eq!(t.app.current_index(), None, "and must not invent an index");
+    t.pump(0.05);
+    assert!(
+        !t.app.is_empty(),
+        "the directly-opened track is still in the sink"
+    );
+}

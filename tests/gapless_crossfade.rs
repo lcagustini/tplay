@@ -1,7 +1,7 @@
 //! Crossfade/gapless tests — the `arm_plan` decision (pure), `fade_gains`
 //! curve properties (pure) and the shared xf source builder on a real WAV file
 //! (both sinks play the same full-track source; the two-sink playback logic
-//! itself is headless-boundary, mirrored only where pure).
+//! itself is in `app.rs`, mirrored only where pure).
 
 mod common;
 
@@ -365,11 +365,9 @@ fn xf_gains_agrees_with_fade_gains() {
 
 // ── arm_plan: the pre-buffer decision ───────────────────────────────────────
 //
-// These guards used to live inside `TPlayApp::advance`, unreachable from any
-// test because `TPlayApp::new` needs an audio device. Every one of them costs a
-// *gap* rather than a crash, so none of them was ever caught by a failure —
-// they had to be pinned deliberately. A default case that arms, then one case
-// per guard.
+// Every one of these guards costs a *gap* rather than a crash, so none of them
+// would ever be caught by a failure — they have to be pinned deliberately. A
+// default case that arms, then one case per guard.
 
 const NEXT: &str = "/music/next.mp3";
 

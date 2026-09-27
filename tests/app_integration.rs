@@ -1,10 +1,11 @@
 //! TPlayApp public API — static helpers, constants and pure logic
 //! invariants.
 //!
-//! `TPlayApp::new(&config)` needs an audio output device, so end-to-end
-//! playback can't run headless; the pure logic behind the public surface is
-//! pinned here instead. (It no longer needs an eframe `CreationContext` — the
-//! app holds no `egui::Context` — but the device is still the blocker.)
+//! The pure logic behind `TPlayApp`'s public surface. `TPlayApp::new(&config,
+//! mixer)` needs neither an audio device nor an eframe `CreationContext`, so
+//! this is not the only headless view of the app — `playback_integration.rs`
+//! drives real playback. What is pinned here is what a bare struct cannot
+//! reach: the formatting, enum and preset helpers, exercised without a sink.
 
 use std::time::Duration;
 use tplay::app::{Pane, TPlayApp, VizView};

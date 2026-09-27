@@ -23,7 +23,6 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &P
     const RELEASE: f32 = 0.92;
     compute_bands(viz, &mut prev, ATTACK, RELEASE);
 
-    // Persist prev for next frame
     painter
         .ctx()
         .memory_mut(|m| m.data.insert_temp(prev_id(), prev));
@@ -34,7 +33,6 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &P
     let max_h = rect.height() * 0.45; // leave margins top/bottom
 
     for (i, &db) in prev.iter().enumerate() {
-        // Map -60..0 dB to 0..1
         let level = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
         let h = level * max_h;
 
@@ -42,7 +40,6 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &P
         let w = (bar_w * 0.8).max(1.0);
         let gap = bar_w - w;
 
-        // Mirrored: up and down from center
         let top = mid_y - h;
         let bottom = mid_y + h;
 

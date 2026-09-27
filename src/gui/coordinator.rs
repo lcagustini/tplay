@@ -144,7 +144,7 @@ impl TabViewer for PaneViewer<'_> {
     fn ui(&mut self, ui: &mut egui::Ui, pane: &mut Pane) {
         // Reborrow rather than move: `self` is `&mut PaneViewer`, so the
         // destructuring below would otherwise move the `&mut` out of it.
-        let (app, themes) = (&mut *self.app, &*self.themes);
+        let (app, themes) = (&mut *self.app, self.themes);
         match pane {
             Pane::NowPlaying => panes::now_playing::now_playing_pane(app, themes, ui),
             Pane::Playlist => panes::playlist::playlist_pane(app, themes, ui),
@@ -239,8 +239,7 @@ pub fn update_ui(app: &mut TPlayApp, themes: &mut ThemeState, ctx: &egui::Contex
         .unwrap_or_else(default_tree);
 
     // Top-left menu button (app logo per theme): pane checkboxes reflect the
-    // tree, toggles edit it; a Theme section (moved here from the Now Playing
-    // title row) switches themes.
+    // tree and toggles edit it, and the Theme section switches themes.
     egui::TopBottomPanel::top("pane_dropdown_panel")
         .frame(egui::Frame::none())
         .show(ctx, |ui| {
@@ -297,7 +296,6 @@ pub fn update_ui(app: &mut TPlayApp, themes: &mut ThemeState, ctx: &egui::Contex
                 {
                     app.set_show_hidden(show_hidden);
                 }
-                // Crossfade section
                 ui.separator();
                 ui.label("Crossfade");
                 // Crossfade duration always visible and editable (constant menu height).
@@ -312,10 +310,8 @@ pub fn update_ui(app: &mut TPlayApp, themes: &mut ThemeState, ctx: &egui::Contex
                 {
                     app.prefs_mut().set_crossfade_secs(cf_secs);
                 }
-                // Layouts section — panes + saved layouts + save/load
                 ui.separator();
                 ui.label("Layouts");
-                // Pane visibility checkboxes
                 let open_count = Pane::ALL
                     .iter()
                     .filter(|p| pane_is_open(&tree, **p))
@@ -338,7 +334,6 @@ pub fn update_ui(app: &mut TPlayApp, themes: &mut ThemeState, ctx: &egui::Contex
                     }
                 }
                 ui.separator();
-                // Saved layouts from the layouts/ directory
                 for path in &layout_files {
                     let stem = path
                         .file_stem()
@@ -494,9 +489,12 @@ pub fn update_ui(app: &mut TPlayApp, themes: &mut ThemeState, ctx: &egui::Contex
         .show(ctx, &mut viewer);
 
     // Enforce minimum pane sizes after layout: the splitter drag and floating
-    // window resize happen inside `show()` and ignore the pre-show pass.
+    // window resize both happen inside `show()`, so this is the only pass that
+    // can see the result and nothing floors a pane before its opening frame.
     let mut corrected = apply_min_pane_sizes(&mut tree, ctx, border_v, border_h);
-    // EQ pane minimum width: 10 bands at their minimum width.
+    // EQ pane minimum width: `BANDS` bands at their minimum width. This block is
+    // the floating-window path — the split-fraction pass above cannot floor a
+    // torn-off pane's width.
     let eq_min_w = ctx
         .data(|d| d.get_temp::<f32>(egui::Id::new(PANE_CONTENT_W).with(Pane::Equalizer)))
         .unwrap_or(0.0);
@@ -524,8 +522,7 @@ pub fn update_ui(app: &mut TPlayApp, themes: &mut ThemeState, ctx: &egui::Contex
     // this menu) and drawn + carried out here, above everything.
     dialogs::show(app, &*themes, &mut tree, ctx);
 
-    // Persist to egui memory (session) + disk (JSON, not RON) — only on change or
-    // close.
+    // Persist to egui memory (session) + disk — only on change or close.
     ctx.data_mut(|d| d.insert_temp(egui::Id::new(DOCK_ID), tree.clone()));
     if let Some(path) = layout_path() {
         let json = serde_json::to_string(&tree).unwrap_or_default();

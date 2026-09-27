@@ -6,13 +6,15 @@ use eframe::egui;
 /// The one band count every layout decision reads, so a change to
 /// `EQ_FREQUENCIES` cannot leave the width maths and the floor behind.
 const BANDS: usize = EQ_FREQUENCIES.len();
+/// Widest a band's column gets before the row starts shrinking to fit.
+const BAND_W_MAX: f32 = 80.0;
 
 pub fn equalizer_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui) {
     // Owned Arc copy — panes take `&mut app` while using theme data.
     let theme = themes.current().clone();
     let p = theme.palette;
     let gains = app.eq().gains();
-    let layout = theme.layout.with_defaults();
+    let layout = theme.layout;
 
     // Header — grouped controls; the tab already names the pane. Measured via
     // a scope so `min_content_h` below is exact, not guessed.
@@ -68,7 +70,7 @@ pub fn equalizer_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui
             egui::Id::new("tplay.pane_content_h").with(Pane::Equalizer),
             header_h + layout.eq_header_gap + layout.eq_slider_min_h + layout.eq_band_gap + label_h,
         );
-        // Horizontal floor: the bands at min width. The same
+        // Horizontal floor: `BANDS` at min width. The same
         // `layout.eq_band_w_min` drives both the shrink logic and this floor.
         d.insert_temp(
             egui::Id::new("tplay.pane_content_w").with(Pane::Equalizer),
@@ -81,12 +83,16 @@ pub fn equalizer_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui
     // Bands with fixed inter-band spacing, centered in the pane: the gap
     // between sliders is constant, and the margins to the pane edges absorb all
     // leftover width equally (dynamic centering).
+    // The height budget subtracts the band gap and the label, both measured
+    // above for the pane's minimum height. The floor above and this budget must
+    // subtract the same two numbers, or a theme with a larger `text_meta` grows
+    // one and not the other and the labels clip.
+    let label_below = layout.eq_band_gap + label_h;
     let slider_h =
-        (ui.available_height() - 30.0).clamp(layout.eq_slider_min_h, layout.eq_slider_max_h);
-    // Fixed band width and spacing normally; shrink to fit narrow panes.
+        (ui.available_height() - label_below).clamp(layout.eq_slider_min_h, layout.eq_slider_max_h);
     let min_spacing = ui.spacing().item_spacing.x;
     let avail_w = ui.available_width();
-    let band_w_max = 80.0;
+    let band_w_max = BAND_W_MAX;
     let n = BANDS as f32;
     let gaps = (BANDS - 1) as f32;
     let row_w_full = band_w_max * n + min_spacing * gaps;

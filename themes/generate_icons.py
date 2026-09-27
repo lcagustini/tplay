@@ -144,8 +144,9 @@ class Mark:
     token: str = TOKEN
 
 
-# The one list. A mark is registered by being a key here, so `OWNED` cannot
-# drift away from `MARKS` the way a second hand-maintained list would.
+# The one list. A mark is registered by being a key here, so it cannot drift
+# away from the set this script writes the way a second hand-maintained list
+# would.
 MARKS: dict[str, Mark] = {
     "reverse": Mark(draw_reverse),
     "new_list": Mark(draw_new_list),

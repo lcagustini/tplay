@@ -6,7 +6,7 @@
 //!   2. `<exe_dir>/themes/`         — shipped with the app
 //!   3. `./themes/`                 — dev convenience (`cargo run` from repo root)
 //!
-//! Each `theme.json` carries the 14-token palette, `base` (dark/light), and an
+//! Each `theme.json` carries the 13-token palette, `base` (dark/light), and an
 //! optional `metadata_font`. Icons are per-theme PNGs under `<theme>/icons/`,
 //! falling back to the default theme's, then to unicode glyphs. Selection
 //! persists in the `theme` field of `~/.config/tplay/config.json`.
@@ -82,48 +82,22 @@ pub struct Layout {
 }
 
 impl Layout {
+    /// Fill in every unset (zero or negative) token. `Theme::from_json` applies
+    /// this once on the way in, so no pane re-derives it per frame.
     pub fn with_defaults(self) -> Self {
+        // A token the theme omitted arrives as 0.0, so "not set" is "not
+        // positive"; a negative value is rejected the same way, since no token
+        // has a meaningful negative.
+        let or = |v: f32, d: f32| if v > 0.0 { v } else { d };
         Layout {
-            eq_slider_min_h: if self.eq_slider_min_h > 0.0 {
-                self.eq_slider_min_h
-            } else {
-                60.0
-            },
-            eq_slider_max_h: if self.eq_slider_max_h > 0.0 {
-                self.eq_slider_max_h
-            } else {
-                220.0
-            },
-            eq_band_w_min: if self.eq_band_w_min > 0.0 {
-                self.eq_band_w_min
-            } else {
-                30.0
-            },
-            eq_header_gap: if self.eq_header_gap > 0.0 {
-                self.eq_header_gap
-            } else {
-                6.0
-            },
-            eq_band_gap: if self.eq_band_gap > 0.0 {
-                self.eq_band_gap
-            } else {
-                2.0
-            },
-            text_meta: if self.text_meta > 0.0 {
-                self.text_meta
-            } else {
-                12.0
-            },
-            text_time: if self.text_time > 0.0 {
-                self.text_time
-            } else {
-                13.0
-            },
-            row_tint_alpha: if self.row_tint_alpha > 0.0 {
-                self.row_tint_alpha
-            } else {
-                0.10
-            },
+            eq_slider_min_h: or(self.eq_slider_min_h, 60.0),
+            eq_slider_max_h: or(self.eq_slider_max_h, 220.0),
+            eq_band_w_min: or(self.eq_band_w_min, 30.0),
+            eq_header_gap: or(self.eq_header_gap, 6.0),
+            eq_band_gap: or(self.eq_band_gap, 2.0),
+            text_meta: or(self.text_meta, 12.0),
+            text_time: or(self.text_time, 13.0),
+            row_tint_alpha: or(self.row_tint_alpha, 0.10),
         }
     }
 }
@@ -139,7 +113,10 @@ pub struct Theme {
     /// Retro renders times/metadata in monospace (the pixel-era look).
     pub metadata_font: FontFamily,
     pub palette: Palette,
-    /// Per-theme UI layout/sizing tokens.
+    /// Per-theme UI layout/sizing tokens. `from_json` runs
+    /// `Layout::with_defaults` on the way in, so a pane may read these
+    /// directly. Every field is `pub`, so a `Theme` built by struct literal
+    /// rather than by `from_json` owns applying the defaults itself.
     pub layout: Layout,
     /// `<theme_dir>/icons`, when the folder exists.
     pub icons_dir: Option<PathBuf>,
@@ -170,51 +147,28 @@ impl Theme {
         let palette = Palette::from_json(v.get("palette")?)?;
         let icons_dir = dir.join("icons");
         let icons_dir = icons_dir.is_dir().then_some(icons_dir);
-        let layout = v
-            .get("layout")
-            .map_or(Layout::default(), |l| Layout {
-                eq_slider_min_h: l
-                    .get("eq_slider_min_h")
-                    .and_then(|x| x.as_f64())
-                    .map(|x| x as f32)
-                    .unwrap_or(0.0),
-                eq_slider_max_h: l
-                    .get("eq_slider_max_h")
-                    .and_then(|x| x.as_f64())
-                    .map(|x| x as f32)
-                    .unwrap_or(0.0),
-                eq_band_w_min: l
-                    .get("eq_band_w_min")
-                    .and_then(|x| x.as_f64())
-                    .map(|x| x as f32)
-                    .unwrap_or(0.0),
-                eq_header_gap: l
-                    .get("eq_header_gap")
-                    .and_then(|x| x.as_f64())
-                    .map(|x| x as f32)
-                    .unwrap_or(0.0),
-                eq_band_gap: l
-                    .get("eq_band_gap")
-                    .and_then(|x| x.as_f64())
-                    .map(|x| x as f32)
-                    .unwrap_or(0.0),
-                text_meta: l
-                    .get("text_meta")
-                    .and_then(|x| x.as_f64())
-                    .map(|x| x as f32)
-                    .unwrap_or(0.0),
-                text_time: l
-                    .get("text_time")
-                    .and_then(|x| x.as_f64())
-                    .map(|x| x as f32)
-                    .unwrap_or(0.0),
-                row_tint_alpha: l
-                    .get("row_tint_alpha")
-                    .and_then(|x| x.as_f64())
-                    .map(|x| x as f32)
-                    .unwrap_or(0.0),
-            })
-            .with_defaults();
+        let layout = {
+            // Every token is optional; an absent one arrives as 0.0 and is
+            // filled in by `with_defaults` on the way out.
+            let num = |l: &serde_json::Value, k: &str| {
+                l.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0) as f32
+            };
+            v.get("layout")
+                .map(|l| {
+                    Layout {
+                        eq_slider_min_h: num(l, "eq_slider_min_h"),
+                        eq_slider_max_h: num(l, "eq_slider_max_h"),
+                        eq_band_w_min: num(l, "eq_band_w_min"),
+                        eq_header_gap: num(l, "eq_header_gap"),
+                        eq_band_gap: num(l, "eq_band_gap"),
+                        text_meta: num(l, "text_meta"),
+                        text_time: num(l, "text_time"),
+                        row_tint_alpha: num(l, "row_tint_alpha"),
+                    }
+                    .with_defaults()
+                })
+                .unwrap_or_else(|| Layout::default().with_defaults())
+        };
 
         Some(Theme {
             id,
@@ -227,8 +181,9 @@ impl Theme {
         })
     }
 
-    /// Hardcoded dark palette used only when no themes/ folder exists anywhere
-    /// (broken install) — the app never runs with zero themes.
+    /// Hardcoded dark palette, inserted when no loaded theme has
+    /// `id == "dark"` — no themes/ folder, every `theme.json` invalid, or a
+    /// renamed id. The app never runs with zero themes.
     fn builtin_fallback() -> Theme {
         // Use include_str so the theme.json is the single source of truth.
         let json = include_str!("../../themes/dark/theme.json");
@@ -388,8 +343,7 @@ pub fn load_icons(
 /// These were three `TPlayApp` fields, and the awkward part was never the fields:
 /// it was `set_theme`, which had to know that switching a theme means re-decoding
 /// every icon texture and did it inline. That coupling belongs next to
-/// `load_icons`. `set` reports whether anything changed, so the caller can skip
-/// marking the config dirty.
+/// `load_icons`.
 pub struct ThemeState {
     current: Arc<Theme>,
     themes: Themes,
@@ -593,9 +547,8 @@ pub fn icon(
 }
 
 /// Map the token palette onto egui's `Visuals`. (egui has no 1:1 token slots, so
-/// nearby fields stand in; the ones that can't be expressed here — row banding,
-/// text-secondary, disabled text — are read straight from `theme.palette` by the
-/// panes.)
+/// nearby fields stand in; the ones that can't be expressed here — row banding
+/// and disabled text — are read straight from `theme.palette` by the panes.)
 ///
 ///   --bg              panel_fill / window_fill / extreme_bg_color
 ///   --panel-bg        faint_bg_color / noninteractive.bg_fill
@@ -714,7 +667,7 @@ pub fn row(
     };
     ui.painter().rect_filled(rect, 2.0, bg);
     if is_current {
-        let alpha = theme.layout.with_defaults().row_tint_alpha;
+        let alpha = theme.layout.row_tint_alpha;
         let tint = Color32::from_rgba_unmultiplied(
             p.accent.r(),
             p.accent.g(),

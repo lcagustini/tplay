@@ -4,7 +4,7 @@
 //! `next()` — no sink rebuild, no audio restart.
 
 use rodio::Source;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Duration;
 
 /// Per-channel gains for a stereo output from a balance value (-1.0 = full
@@ -37,7 +37,7 @@ where
     S: Source<Item = f32>,
 {
     pub fn new(inner: S, balance: Arc<RwLock<f32>>) -> Self {
-        let cached_balance = *balance.read().unwrap();
+        let cached_balance = *balance.read().unwrap_or_else(PoisonError::into_inner);
         Self {
             inner,
             balance,
@@ -47,8 +47,14 @@ where
     }
 
     /// Pull the latest balance from the GUI thread.
+    ///
+    /// Per **sample**, and that is load-bearing rather than incidental: a frame's
+    /// two channels are emitted by two `next()` calls, so a balance that changed
+    /// between them would scale the left with one gain and the right with the
+    /// other. Polling less often than this is what `EqSource` gets away with,
+    /// because it has no such split.
     fn refresh(&mut self) {
-        let b = *self.balance.read().unwrap();
+        let b = *self.balance.read().unwrap_or_else(PoisonError::into_inner);
         if b != self.cached_balance {
             self.cached_balance = b;
             // Drop any buffered half-frame on a balance change, or it mismatches
@@ -65,24 +71,15 @@ where
     type Item = f32;
 
     fn next(&mut self) -> Option<Self::Item> {
-        // Read balance per sample (cheap — RwLock read is fast).
         self.refresh();
 
         let (left_gain, right_gain) = balance_gains(self.cached_balance);
 
         // Stereo (2 channels) or mono (1) input; output is always stereo — mono
         // emits the same sample scaled by each gain, stereo scales its first two
-        // channels.
+        // channels. The two arms are one arm: a source claiming more than two
+        // channels is treated as mono, since only the first two are scaled.
         match self.inner.channels() {
-            1 => {
-                // Mono input: emit left then right.
-                if let Some(sample) = self.half_frame.take() {
-                    return Some(sample * right_gain);
-                }
-                let sample = self.inner.next()?;
-                self.half_frame = Some(sample);
-                Some(sample * left_gain)
-            }
             2 => {
                 // Stereo input: emit L then R.
                 if let Some(sample) = self.half_frame.take() {
@@ -94,7 +91,7 @@ where
                 Some(left * left_gain)
             }
             _ => {
-                // Fallback: treat as mono (first channel only).
+                // Mono (or unknown layout): emit left then right.
                 if let Some(sample) = self.half_frame.take() {
                     return Some(sample * right_gain);
                 }

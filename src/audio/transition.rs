@@ -2,12 +2,11 @@
 //! pure, headless-testable free functions.
 //!
 //! The arm used to be a 50-line block inside `TPlayApp::advance`, putting it out
-//! of reach of every test: `TPlayApp::new` needs an audio device and an eframe
-//! `CreationContext`, so the app's most delicate branch had zero coverage — and
-//! its failure modes are silent (a skipped arm is a gap, a wrong arm is a
-//! skipped track). `arm_plan` is that block moved out whole: it reads a struct
+//! of reach of every test — and its failure modes are silent (a skipped arm is
+//! a gap, a wrong arm is a skipped track), so nothing would have caught a
+//! regression in it. `arm_plan` is that block moved out whole: it reads a struct
 //! of values and returns what to apply, so every guard below is reachable from
-//! a plain `#[test]`.
+//! a plain test.
 
 use crate::audio::balance::BalanceSource;
 use crate::audio::eq::{EqShared, EqSource};
@@ -41,12 +40,13 @@ pub struct ArmInput<'a> {
     pub pos: Duration,
     /// The candidate next track — playlist index plus its id — already chosen by
     /// the caller. Passed in rather than picked here because choosing *mutates*
-    /// shuffle's `played` history, and this runs per frame, so picking here
-    /// would rewrite the shuffle order 60×/sec. The caller peeks, then commits
-    /// only if the arm lands (see `advance` and `peek_next_index`).
+    /// shuffle's `played` history: the caller peeks, then commits only if the
+    /// arm lands (see `advance` and `peek_next_index`).
     pub next: Option<(usize, &'a Path)>,
     /// `tracks::is_ready(next)` — are the incoming bytes on hand right now?
-    /// Free for a local track (no filesystem check), one stat for a remote one.
+    /// One `stat` either way, and this block runs every frame: a local track is
+    /// `is_file()` on its own id, a remote one resolves the spool-cache path
+    /// first, which is a second lookup.
     pub next_ready: bool,
     /// The candidate's tagged duration, if `tag_cache` has one.
     pub next_duration: Option<Duration>,

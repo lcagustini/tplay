@@ -423,9 +423,11 @@ pub fn read_cover(path: &Path) -> Option<Vec<u8>> {
         .and_then(|p| std::fs::read(p).ok())
 }
 
-/// Entries in a directory: subfolders first, then audio files. Dot-prefixed
-/// (hidden) subfolders are skipped unless `show_hidden`. Unsorted — the caller
-/// sorts via `sort_entries`.
+/// Entries in a directory: subfolders first, then audio files *and playlist
+/// files* (one filter, so the two browsers can show both — callers that want
+/// only audio re-filter, see `LibraryState::to_scan`). Dot-prefixed (hidden)
+/// subfolders are skipped unless `show_hidden`. Unsorted — the caller sorts via
+/// `sort_entries`.
 pub fn list_dir(dir: &Path, show_hidden: bool) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let mut dirs = Vec::new();
     let mut files = Vec::new();

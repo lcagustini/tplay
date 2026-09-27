@@ -730,4 +730,27 @@ mod breadcrumb {
         assert_eq!(labels(&listing), ["Local", "nas"]);
         assert!(matches!(listing[1].action, Action::BrowseServer(_)));
     }
+
+    #[test]
+    fn a_share_root_has_no_empty_trailing_crumb() {
+        // `rel` is "" at the share root, and `"".split('/')` yields one empty
+        // item. Unfiltered, that became a fourth segment labelled "" which
+        // `plan` then drew as the bold "you are here" crumb — a blank box at the
+        // end of the breadcrumb, at the one level users sit at most.
+        let root = remote_segs(&browse(Some("music"), ""));
+        assert_eq!(labels(&root), ["Local", "nas", "music"]);
+        // Nothing to collapse at three segments, and the share is the way out.
+        assert_eq!(
+            plan(root.len(), SHARE),
+            vec![Step::Seg(0), Step::Seg(1), Step::Seg(2)]
+        );
+        // One level down is exactly one more crumb, and the share root stays
+        // reachable from it (the `always = 3` exemption).
+        let deeper = remote_segs(&browse(Some("music"), "Rock"));
+        assert_eq!(labels(&deeper), ["Local", "nas", "music", "Rock"]);
+        assert_eq!(
+            plan(deeper.len(), SHARE),
+            vec![Step::Seg(0), Step::Seg(1), Step::Seg(2), Step::Seg(3)]
+        );
+    }
 }

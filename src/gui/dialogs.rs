@@ -22,7 +22,7 @@ use std::path::PathBuf;
 pub const CONFIRM_ID: &str = "tplay.confirm";
 /// egui memory: the armed save-name prompt, `Option<(SaveTarget, String, String)>`.
 pub const SAVE_NAME_ID: &str = "tplay.save_name";
-/// Width of the save-name text field.
+/// The save-name modal's width, and the field's desired width within it.
 const FIELD_W: f32 = 220.0;
 /// Minimum width of the confirm modal (its description wraps within this).
 const CONFIRM_W: f32 = 260.0;

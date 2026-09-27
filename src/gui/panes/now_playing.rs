@@ -3,7 +3,8 @@ use crate::gui::theme::{self, Icon, Theme, ThemeState};
 use crate::library;
 use eframe::egui;
 
-/// egui memory Id for the seek slider position
+/// Held until `get_pos` catches up after a seek, so a slow-path `skip_duration`
+/// cannot snap the bar back to 0:00.
 fn seek_id() -> egui::Id {
     egui::Id::new("tplay.seek")
 }
@@ -18,12 +19,11 @@ fn meta(s: impl Into<String>, theme: &Theme, size: f32) -> egui::RichText {
 pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui) {
     // Owned Arc copy — panes take `&mut app` while `meta` needs `&Theme`.
     let theme = themes.current().clone();
-    let layout = theme.layout.with_defaults();
+    let layout = theme.layout;
 
-    // Fill pane (dock-sized, resizable — the Fixed pin is gone), so pad the top
-    // to center the controls. The pad comes from last frame's measured content
-    // height (the value the coordinator floors the split at), so it converges
-    // one frame after a resize.
+    // Fill pane, so pad the top to center the controls. The pad comes from last
+    // frame's measured content height (the value the coordinator floors the split
+    // at), so it converges one frame after a resize.
     let content_h_id = egui::Id::new("tplay.pane_content_h").with(crate::app::Pane::NowPlaying);
     let avail_h = ui.available_height();
     let last_h = ui
@@ -106,7 +106,6 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                 let bar_w = (ui.available_width() - label_w(&pos_str) - label_w(&total_str) - gaps)
                     .max(40.0);
 
-                // Elapsed/remaining label — click to toggle mode
                 let pos_label = ui.label(meta(pos_str, &theme, layout.text_time));
                 let remaining = app.prefs().remaining();
                 if pos_label.clicked() {
@@ -135,7 +134,9 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                 ui.label(meta(total_str, &theme, layout.text_time));
 
                 if bar.dragged() {
-                    // hold
+                    // Mid-drag: the Slider owns the value, so the catch-up and
+                    // resting branches below must not overwrite the user's
+                    // position with the sink's.
                 } else if bar.drag_stopped() || bar.clicked() {
                     app.seek(seek_normalized);
                 } else if let Some(target) = app.seek_target() {
@@ -161,7 +162,6 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
 
             // Controls row: transport + volume.
             ui.horizontal(|ui| {
-                // Prev track
                 let prev_enabled = app.has_prev_track();
                 if theme::icon_button(
                     ui,
@@ -176,7 +176,6 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                     app.prev_track();
                 }
 
-                // Play/Pause/Stop
                 let is_paused = app.is_paused();
                 let is_empty = app.is_empty();
                 if is_paused || is_empty {
@@ -213,7 +212,6 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                     app.stop();
                 }
 
-                // Next track
                 let next_enabled = app.has_next_track();
                 if theme::icon_button(
                     ui,
@@ -274,7 +272,6 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
             });
         });
 
-        // Second row: Balance (L/R) + Gapless/Crossfade toggles
         ui.horizontal(|ui| {
             // Balance slider (left); double-click resets to center
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {

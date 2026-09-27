@@ -16,7 +16,7 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
     // Owned Arc copy — panes take `&mut app` while using theme data.
     let theme = themes.current().clone();
     let p = theme.palette;
-    let layout = theme.layout.with_defaults();
+    let layout = theme.layout;
 
     // Header: the playlist's name (single source — app.playlist_name; follows
     // New/Save/Load live).
@@ -112,9 +112,8 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
             app.randomize_playlist();
         }
 
-        // `Align::Min`, NOT `Center` — see `list_header_right`. The wrong token
-        // here would swallow the pane's whole remaining height and collapse the
-        // list to its 40px floor, silently.
+        // `Align::Min`, NOT `Center` — see `list_header_right` in
+        // library/listing.rs for the measurement.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             // Right-to-left puts the first widget furthest right, so Save is added
@@ -239,7 +238,9 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
                         )),
                 );
 
-                // Title fills the remaining width (meta + fmt + ✕ right-aligned).
+                // Title fills the remaining width. The right side is the ✕ button
+                // and FORMAT cell when there is no secondary block, and adds the
+                // 150px artist·album cell when there is one.
                 let right_w = 130.0 + if meta.is_empty() { 0.0 } else { 158.0 };
                 let title_resp = row.add_sized(
                     egui::vec2((rect.width() - right_w).max(40.0), row_h),
@@ -329,7 +330,7 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
             }
 
             // Only a filtered-out list needs saying so — an empty playlist is
-            // already obvious, and this is the note the Library shows too.
+            // already obvious.
             if shown == 0 && !query.is_empty() {
                 ui.label(
                     egui::RichText::new("No tracks match")
