@@ -1108,19 +1108,19 @@ impl TPlayApp {
     /// `Err` means **nothing changed** — the cache and the file list are left
     /// exactly as they were, because a half-applied edit is worse than a refused
     /// one.
-    pub fn apply_edit(&mut self, track: &Path, edit: tracks::Edit) -> Result<(), String> {
+    pub fn apply_edit(&mut self, track: &Path, edit: tracks::Edit<'_>) -> Result<(), String> {
         let info = tracks::write_tags(track, &edit)?;
         self.db.cache_mut().insert(track.to_path_buf(), info);
         // Re-sort, because the entries the pane is drawing *are* the sorted list,
-        // and a tag that is a sort key has just changed. `apply_sort` rather than
-        // `set_sort`: the column has not changed, and re-setting it would flip the
-        // direction.
+        // and a title is one of `SORT_OPTIONS`. `apply_sort` rather than `set_sort`:
+        // the column has not changed, and re-setting it would flip the direction.
         //
-        // Not observable yet — a rating is not one of `SORT_OPTIONS`, so nothing
-        // written through today's `Edit` can move a row. It stays because the
-        // alternative is a manual obligation on whoever adds the first sortable
-        // field, and this repo has already deleted one of those for losing data
-        // silently. Phase 4 covers it.
+        // This line existed unobserved for a phase — a rating is not a sortable
+        // column, so no test could fail without it — and the note that said so is
+        // gone because `an_edit_moves_the_row_it_belongs_on` now covers it. It
+        // stayed in the meantime because the alternative is a manual obligation on
+        // whoever adds the first sortable field, and this repo has already deleted
+        // one of those for losing data silently.
         self.library.apply_sort(self.db.cache());
         Ok(())
     }

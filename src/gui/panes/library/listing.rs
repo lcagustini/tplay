@@ -149,8 +149,8 @@ fn draw_playlist_row(
 enum FileAct {
     Play,
     Add,
-    /// Open the rating picker for the row's track.
-    Rate,
+    /// Open the track editor for the row's track.
+    Edit,
 }
 
 /// What the user asked for by clicking a file-list row.
@@ -168,10 +168,10 @@ enum Act {
     Add(PathBuf),
     /// Load a `.tplay` — local path, or an `smb://` URI to fetch first.
     LoadPlaylist(PathBuf),
-    /// Open the rating picker for one track. The **caller** carries it out, because
+    /// Open the track editor for one track. The **caller** carries it out, because
     /// only it knows whether the row came from disk or from a share: a share row's
     /// rating is display-only, since a spool-cache copy is not the track.
-    Rate(PathBuf),
+    Edit(PathBuf),
 }
 
 // Nine arguments, and a params struct would be longer than the call sites it
@@ -272,7 +272,7 @@ fn draw_file_row(
             .truncate()
             .sense(egui::Sense::click()),
         )
-        .on_hover_text("Rating — click to change");
+        .on_hover_text("Edit tags — click to change");
     // The rating is the thing you scan a column for, so the play count rides on
     // hover rather than in a counter column nobody asked for.
     let rating_resp = match app.play_history(path) {
@@ -290,7 +290,7 @@ fn draw_file_row(
     } else if add_clicked {
         Some(FileAct::Add)
     } else if rating_resp.clicked() {
-        Some(FileAct::Rate)
+        Some(FileAct::Edit)
     } else {
         None
     }
@@ -480,8 +480,8 @@ fn file_list_ui(
                         // rather than refused later: `tracks::write_tags` also
                         // refuses, so a future caller that forgets this guard still
                         // cannot write to a spool cache.
-                        Some(FileAct::Rate) if remote => {}
-                        Some(FileAct::Rate) => action = Some(Act::Rate(path.to_path_buf())),
+                        Some(FileAct::Edit) if remote => {}
+                        Some(FileAct::Edit) => action = Some(Act::Edit(path.to_path_buf())),
                         None => {}
                     }
                 }
@@ -530,16 +530,16 @@ pub fn local_list_ui(
         Some(Act::Play(path)) => app.play_file(path),
         Some(Act::Add(path)) => app.add_files(vec![path]),
         Some(Act::LoadPlaylist(path)) => app.load_playlist_from(path),
-        Some(Act::Rate(path)) => arm_rating(ui, app, path),
+        Some(Act::Edit(path)) => arm_edit(ui, app, path),
         None => {}
     }
 }
 
-/// Arm the 5-star picker for a local track, carrying the rating the file has now
-/// so the modal can show it without a second lookup.
-fn arm_rating(ui: &egui::Ui, app: &TPlayApp, path: PathBuf) {
-    let current = app.db().cache().get(&path).map(|i| i.rating).unwrap_or(0);
-    dialogs::ask_rating(ui.ctx(), path, current);
+/// Arm the track editor for a local row, carrying the tags the file has now so
+/// the modal opens on them and needs no lookup of its own.
+fn arm_edit(ui: &egui::Ui, app: &TPlayApp, path: PathBuf) {
+    let info = app.db().cache().get(&path);
+    dialogs::ask_edit(ui.ctx(), path, info);
 }
 
 /// The right-hand end of a file-list header: composition counts and Add All.
@@ -767,10 +767,10 @@ pub fn remote_list_ui(
         Some(Act::Play(path)) => app.play_file(path),
         Some(Act::Add(path)) => app.add_files(vec![path]),
         Some(Act::LoadPlaylist(uri)) => app.network_mut().fetch(uri.to_string_lossy().into_owned()),
-        // Unreachable: `file_list_ui` drops a `Rate` when `remote` is set, since a
+        // Unreachable: `file_list_ui` drops an `Edit` when `remote` is set, since a
         // spool-cache copy is not the track. Named so that is a compile-time fact
         // rather than a comment.
-        Some(Act::Rate(_)) => {}
+        Some(Act::Edit(_)) => {}
         None => {}
     }
 }

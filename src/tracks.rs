@@ -156,13 +156,21 @@ pub fn local_file_now_in(track: &Path, dir: &Path) -> Option<PathBuf> {
 
 // ── Writing a track's tags ────────────────────────────────────────────────────
 
-/// The tag changes one write applies. `None` leaves a field alone.
+/// The tag changes one write applies. `None` leaves a field alone; an **empty**
+/// string removes that tag rather than writing a blank one.
 ///
-/// The rating is the only field here today because it is the only one with a UI;
-/// the full editor adds its fields to **this** struct rather than adding a second
-/// write path, so "change a tag" stays one function with one error path.
+/// This struct is the whole reason the app has one tag-write path. The rating
+/// arrived first and the text fields came later, and neither added a second
+/// function: a new editable field is one line here and one line in `write_tags`.
+/// `Default` is derived, so a caller writing only the rating spells
+/// `..Default::default()` — which is also what makes that the *common* case, and
+/// the reason the fields are ordered rating-last.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Edit {
+pub struct Edit<'a> {
+    pub title: Option<&'a str>,
+    pub artist: Option<&'a str>,
+    pub album: Option<&'a str>,
+    pub track_no: Option<&'a str>,
     /// `0` clears the rating; `1`–`5` set it. Clamped, because a `StarRating`
     /// holds nothing else and a hand-edited value must not reach the file.
     pub rating: Option<u8>,
@@ -231,6 +239,22 @@ pub fn write_tags(track: &Path, edit: &Edit) -> Result<TrackInfo, String> {
                     ItemKey::Popularimeter,
                     Popularimeter::musicbee(star_rating(n), 0).to_string(),
                 );
+            }
+        }
+        for (key, value) in [
+            (ItemKey::TrackTitle, edit.title),
+            (ItemKey::TrackArtist, edit.artist),
+            (ItemKey::AlbumTitle, edit.album),
+            (ItemKey::TrackNumber, edit.track_no),
+        ] {
+            let Some(value) = value else { continue };
+            if value.is_empty() {
+                // An empty text frame is not "no value" to every reader: some
+                // display a blank cell, which is exactly what a missing tag avoids.
+                // Removing is also what "cleared the field" means to the user.
+                tag.remove_key(key);
+            } else {
+                tag.insert_text(key, value.to_string());
             }
         }
     }

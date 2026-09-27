@@ -17,6 +17,8 @@
 //!   local one. That is the regression guard for the crossfade crash: the arm
 //!   used to hand an `smb://` URI to `File::open`, which panicked.
 
+use lofty::file::TaggedFileExt;
+use lofty::tag::ItemKey;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -482,7 +484,10 @@ fn a_rating_is_written_cleared_and_clamped() {
     let mp3 = dir.join("tagged.mp3");
     common::write_tagged_mp3(&mp3, "Kept Title", "Kept Artist", "Kept Album");
 
-    let set = tracks::Edit { rating: Some(4) };
+    let set = tracks::Edit {
+        rating: Some(4),
+        ..Default::default()
+    };
     let info = tracks::write_tags(&mp3, &set).expect("writes to a local file");
     assert_eq!(
         info.rating, 4,
@@ -495,11 +500,25 @@ fn a_rating_is_written_cleared_and_clamped() {
 
     // Out of range clamps rather than panicking: `Edit` is a public field, so a
     // caller can hand it 9 and there must be no way to reach the rewrite with it.
-    let clamped = tracks::write_tags(&mp3, &tracks::Edit { rating: Some(9) }).unwrap();
+    let clamped = tracks::write_tags(
+        &mp3,
+        &tracks::Edit {
+            rating: Some(9),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert_eq!(clamped.rating, 5);
 
     // Clearing is a removal, not a zero — a Popularimeter's scale starts at one.
-    let cleared = tracks::write_tags(&mp3, &tracks::Edit { rating: Some(0) }).unwrap();
+    let cleared = tracks::write_tags(
+        &mp3,
+        &tracks::Edit {
+            rating: Some(0),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert_eq!(cleared.rating, 0);
     assert_eq!(cleared.title, "Kept Title");
 
@@ -518,8 +537,14 @@ fn a_write_creates_a_tag_when_the_file_has_none() {
     let before = tplay::library::read_info(&wav).expect("a WAV parses");
     assert!(before.title.is_empty(), "premise: the file carries no tags");
 
-    let after = tracks::write_tags(&wav, &tracks::Edit { rating: Some(3) })
-        .expect("an untagged file is not a reason to refuse");
+    let after = tracks::write_tags(
+        &wav,
+        &tracks::Edit {
+            rating: Some(3),
+            ..Default::default()
+        },
+    )
+    .expect("an untagged file is not a reason to refuse");
     assert_eq!(after.rating, 3);
     assert_eq!(
         tracks::info(&wav).map(|i| i.rating),
@@ -536,10 +561,85 @@ fn a_write_creates_a_tag_when_the_file_has_none() {
 #[test]
 fn a_remote_track_is_refused() {
     let uri = PathBuf::from("smb://nas/media/music/remote.mp3");
-    let err = tracks::write_tags(&uri, &tracks::Edit { rating: Some(5) })
-        .expect_err("a remote track has no file of its own to write");
+    let err = tracks::write_tags(
+        &uri,
+        &tracks::Edit {
+            rating: Some(5),
+            ..Default::default()
+        },
+    )
+    .expect_err("a remote track has no file of its own to write");
     assert!(
         err.contains("server"),
         "the reason should say why, since it is what a user sees: {err}"
     );
+}
+
+/// The text half of the editor, over the same file the rating tests use. Three
+/// claims: the fields land, an emptied field *removes* its tag rather than
+/// writing a blank, and a write of one field leaves the others alone.
+#[test]
+fn text_tags_are_written_and_an_emptied_one_is_removed() {
+    let dir = common::test_dir("text_tags_are_written_and_an_emptied_one_is_removed");
+    let mp3 = dir.join("tagged.mp3");
+    common::write_tagged_mp3(&mp3, "Old Title", "Old Artist", "Old Album");
+
+    let info = tracks::write_tags(
+        &mp3,
+        &tracks::Edit {
+            title: Some("New Title"),
+            artist: Some("New Artist"),
+            album: Some("New Album"),
+            track_no: Some("7"),
+            rating: None,
+        },
+    )
+    .expect("writes to a local file");
+    assert_eq!(info.title, "New Title");
+    assert_eq!(info.artist, "New Artist");
+    assert_eq!(info.album, "New Album");
+    assert_eq!(info.track_no.as_deref(), Some("7"));
+
+    // Emptying a field removes the tag. A blank frame is not "no value" to every
+    // reader — some render an empty cell, which is what a missing tag avoids — so
+    // the write has to be a removal to mean "cleared".
+    let cleared = tracks::write_tags(
+        &mp3,
+        &tracks::Edit {
+            title: Some(""),
+            track_no: Some(""),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(cleared.title.is_empty(), "the title is gone, not blank");
+    assert!(cleared.track_no.is_none(), "the track number is gone");
+    assert_eq!(
+        cleared.artist, "New Artist",
+        "fields this edit did not name are untouched"
+    );
+    assert_eq!(cleared.rating, 0, "and the rating is not collateral damage");
+
+    // The app's own reader cannot see the difference between a blank frame and no
+    // frame — both read as an empty string — so the claim has to be made against
+    // the file itself. This is the assertion that makes the removal worth having.
+    let tagged = lofty::read_from_path(&mp3).expect("the rewritten file parses");
+    let tag = tagged.primary_tag().expect("the tag we just wrote");
+    assert_eq!(
+        tag.get_string(ItemKey::TrackTitle),
+        None,
+        "the title frame is gone, not present and blank"
+    );
+    assert_eq!(
+        tag.get_string(ItemKey::TrackNumber),
+        None,
+        "the track number frame too"
+    );
+    assert_eq!(
+        tag.get_string(ItemKey::TrackArtist),
+        Some("New Artist"),
+        "and the frame we did not touch is still there"
+    );
+
+    fs::remove_dir_all(&dir).unwrap();
 }

@@ -293,7 +293,13 @@ fn an_edit_lands_in_the_cache_and_a_refusal_changes_nothing() {
     write_wav(&file);
 
     t.app
-        .apply_edit(&file, Edit { rating: Some(5) })
+        .apply_edit(
+            &file,
+            Edit {
+                rating: Some(5),
+                ..Default::default()
+            },
+        )
         .expect("a local track is writable");
     assert_eq!(
         t.app.db().cache().get(&file).expect("cached").rating,
@@ -303,7 +309,13 @@ fn an_edit_lands_in_the_cache_and_a_refusal_changes_nothing() {
 
     let uri = PathBuf::from("smb://nas/media/remote.wav");
     t.app
-        .apply_edit(&uri, Edit { rating: Some(1) })
+        .apply_edit(
+            &uri,
+            Edit {
+                rating: Some(1),
+                ..Default::default()
+            },
+        )
         .expect_err("a remote track is refused");
     assert!(
         t.app.db().cache().get(&uri).is_none(),
@@ -567,6 +579,7 @@ fn a_view_replaces_the_playlist_and_tracks_no_file() {
                     &p,
                     Edit {
                         rating: Some(stars),
+                        ..Default::default()
                     },
                 )
                 .unwrap();
@@ -599,5 +612,65 @@ fn a_view_replaces_the_playlist_and_tracks_no_file() {
         !t.app.playlist_dirty(),
         "a fresh selection has no unsaved edits"
     );
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The claim phase 2 could not test: a rating is not a sort column, so the
+/// re-sort inside `apply_edit` had no observable effect and no test could fail
+/// without it. A title is one of `SORT_OPTIONS`, so now it does.
+///
+/// Two rows, both untagged so the file list orders them by stem — `a` before `b` —
+/// and one edit that turns `b` into "Aardvark". If the entries were not re-sorted
+/// in place, the row would keep its old position and the file list would be
+/// showing a stale order behind a fresh tag.
+#[test]
+fn an_edit_moves_the_row_it_belongs_on() {
+    use tplay::tracks::Edit;
+
+    let mut t = TestApp::new("an_edit_moves_the_row_it_belongs_on");
+    let dir = t.app.library().dir().to_path_buf();
+    for name in ["a.wav", "b.wav"] {
+        write_wav(&dir.join(name));
+    }
+    // The listing was taken when the folder was still empty, so re-list now that
+    // the files exist — the same thing opening the folder again would do.
+    t.app.navigate_to(dir.clone());
+    // `navigate_to` is what the first frame does, but the test drives `new`, so
+    // the listing exists; assert it rather than assume it.
+    let order = |t: &TestApp| {
+        t.app
+            .library()
+            .entries()
+            .iter()
+            .filter(|e| !e.is_dir)
+            .map(|e| e.path.file_stem().unwrap().to_string_lossy().into_owned())
+            .collect::<Vec<String>>()
+    };
+    assert_eq!(order(&t), ["a", "b"], "premise: untagged rows sort by stem");
+
+    // "Zebra" sorts after "b", so the edited row has to *move down*. A title that
+    // merely started with a different letter would not do: an untagged key is the
+    // bare stem, so titling `a` "Aardvark" leaves it ahead of "b"... and ahead of
+    // its own former self.
+    t.app
+        .apply_edit(
+            &dir.join("a.wav"),
+            Edit {
+                title: Some("Zebra"),
+                ..Default::default()
+            },
+        )
+        .expect("a local write");
+
+    assert_eq!(
+        order(&t),
+        ["b", "a"],
+        "the edited row moved to where its new title sorts"
+    );
+    assert_eq!(
+        t.app.db().cache().get(&dir.join("a.wav")).unwrap().title,
+        "Zebra"
+    );
+    assert_eq!(order(&t).len(), 2, "and no row was duplicated or dropped");
     fs::remove_dir_all(&dir).unwrap();
 }
