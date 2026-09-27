@@ -356,8 +356,7 @@ fn edit_modal(app: &mut TPlayApp, themes: &ThemeState, ctx: &egui::Context) {
                 } else {
                     star_off.as_ref()
                 };
-                if theme::icon_button(ui, tex, theme::Icon::StarOn, PICKER_STAR, true, on).clicked()
-                {
+                if theme::icon_toggle(ui, tex, theme::Icon::StarOn, PICKER_STAR, on).clicked() {
                     // The same star again clears, which is what makes that
                     // reachable without a separate control.
                     stars = Some(if n == armed.rating { 0 } else { n });

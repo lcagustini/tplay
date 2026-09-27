@@ -107,3 +107,98 @@ fn default_eq_floor_is_below_minimum_window() {
     assert!(10.0 * layout.eq_band_w_min <= 320.0);
     assert_eq!(10.0 * layout.eq_band_w_min, 300.0);
 }
+
+/// The shape that made `icon_button`'s two trailing `bool`s unreadable must not
+/// come back at a call site.
+///
+/// Every lit mode toggle read `true, app.shuffle()` — two bare `bool`s at the end
+/// of a five-argument call, where a stray `true` and the state beside it are
+/// indistinguishable and a swap is invisible. `icon_toggle` takes one, so a new
+/// toggle has to reach for it.
+///
+/// What makes this worth a test is that the mistake is invisible in every other
+/// way: it compiles, clippy is silent, and the button lights when the mode is
+/// off. Only the call site can see it, which is the same reason
+/// `the_layout_reads_live_inside_the_menu_closure` reads the source.
+#[test]
+fn no_icon_button_call_site_passes_two_bare_bools() {
+    let root =
+        std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("src/gui");
+    let mut offenders = Vec::new();
+    let mut checked = 0;
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let text = std::fs::read_to_string(&path).unwrap();
+                // Byte offsets are absolute, so a line number and a range check
+                // both mean what they say. Walking a shrinking slice instead
+                // silently compared positions from two different strings.
+                let toggle_at = text.find("pub fn icon_toggle");
+                // The search starts *past* the match, not at it: `text[s..]`
+                // begins with `pub fn ` itself, so searching from there finds the
+                // function we already found and yields an empty range.
+                let toggle_end = toggle_at
+                    .map(|s| {
+                        text[s + "pub fn icon_toggle".len()..]
+                            .find("pub fn ")
+                            .map_or(text.len(), |n| s + "pub fn icon_toggle".len() + n)
+                    })
+                    .unwrap_or(0);
+                let mut at = 0;
+                while let Some(found) = text[at..].find("icon_button(") {
+                    let call_at = at + found;
+                    let open = call_at + "icon_button(".len();
+                    let mut depth = 1;
+                    let mut i = open;
+                    let bytes = text.as_bytes();
+                    while depth > 0 {
+                        match bytes[i] {
+                            b'(' => depth += 1,
+                            b')' => depth -= 1,
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                    let body = &text[open..i - 1];
+                    at = i;
+                    // The definition itself, and `icon_toggle`'s one forwarding
+                    // call — which has the shape by definition, since that is the
+                    // whole of what it does.
+                    if body.contains("ui: &mut egui::Ui")
+                        || toggle_at.is_some_and(|s| (s..toggle_end).contains(&call_at))
+                    {
+                        continue;
+                    }
+                    let line = text[..call_at].lines().count() + 1;
+                    let args: Vec<&str> = body
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|a| !a.is_empty())
+                        .collect();
+                    checked += 1;
+                    if args.len() == 6 && args[4] == "true" && args[5] != "false" {
+                        offenders.push(format!(
+                            "{}:{line} passes `true, {}` — use icon_toggle, which \
+                             takes one bool",
+                            path.display(),
+                            args[5]
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        checked >= 15,
+        "expected the whole gui tree, found {checked} calls"
+    );
+    assert!(
+        offenders.is_empty(),
+        "a lit toggle should read as one value:\n  {}",
+        offenders.join("\n  ")
+    );
+}

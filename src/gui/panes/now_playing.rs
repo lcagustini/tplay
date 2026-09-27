@@ -228,24 +228,22 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
 
                 // Shuffle / repeat — lit while active.
                 ui.separator();
-                if theme::icon_button(
+                if theme::icon_toggle(
                     ui,
                     themes.icon(Icon::Shuffle),
                     Icon::Shuffle,
                     18.0,
-                    true,
                     app.shuffle(),
                 )
                 .clicked()
                 {
                     app.toggle_shuffle();
                 }
-                if theme::icon_button(
+                if theme::icon_toggle(
                     ui,
                     themes.icon(Icon::Repeat),
                     Icon::Repeat,
                     18.0,
-                    true,
                     app.repeat(),
                 )
                 .clicked()
@@ -292,12 +290,11 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Crossfade toggle (icon button, lit while active)
-                if theme::icon_button(
+                if theme::icon_toggle(
                     ui,
                     themes.icon(Icon::Crossfade),
                     Icon::Crossfade,
                     18.0,
-                    true,
                     app.prefs().crossfade(),
                 )
                 .clicked()
@@ -305,12 +302,11 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                     app.prefs_mut().toggle_crossfade();
                 }
                 // Gapless toggle (icon button, lit while active)
-                if theme::icon_button(
+                if theme::icon_toggle(
                     ui,
                     themes.icon(Icon::Gapless),
                     Icon::Gapless,
                     18.0,
-                    true,
                     app.prefs().gapless(),
                 )
                 .clicked()

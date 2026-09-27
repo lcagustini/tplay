@@ -622,6 +622,24 @@ pub fn icon_button(
     ui.add_enabled(enabled, button.selected(selected))
 }
 
+/// An always-enabled icon button whose *lit* state is one value — the mode
+/// toggles: shuffle, repeat, gapless, crossfade.
+///
+/// `icon_button`'s two `bool`s sit at the end of a five-argument call where a
+/// stray `true` is indistinguishable from the one beside it, and every one of
+/// these sites read `true, app.shuffle()`. A sibling with a single `bool` is the
+/// whole fix, and it is the same reason `sidebar::Row` exists rather than four
+/// more positional parameters: a shape that cannot be filled in wrongly.
+pub fn icon_toggle(
+    ui: &mut egui::Ui,
+    tex: Option<&TextureHandle>,
+    icon: Icon,
+    size: f32,
+    on: bool,
+) -> egui::Response {
+    icon_button(ui, tex, icon, size, true, on)
+}
+
 /// Standalone icon (e.g. the volume speaker beside its slider).
 pub fn icon(
     ui: &mut egui::Ui,
