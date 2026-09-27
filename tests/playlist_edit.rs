@@ -473,3 +473,56 @@ fn removing_an_unrelated_track_leaves_a_directly_opened_file_alone() {
         "the directly-opened track is still in the sink"
     );
 }
+
+/// The one playlist index that reaches the app from somewhere that can outlive it.
+///
+/// `drag_from`/`drag_hover` are egui *temp* values, and egui clears those at
+/// shutdown rather than per frame — so a press index survives a list that
+/// shrank underneath it. `apply_playlist` is the reachable way that happens: an
+/// in-flight remote `.tplay` lands on its worker thread at an arbitrary moment.
+///
+/// `Vec::remove` panics on an out-of-range index, and a panic on the UI thread is
+/// a dead process, so the guard is the whole claim. `drag_drop.rs` cannot reach
+/// this one: a guard is not index arithmetic, so there is nothing to mirror.
+#[test]
+fn a_stale_drag_index_is_a_no_op_rather_than_a_panic() {
+    let (mut t, paths) = playable("stale-drag", &["a.wav", "b.wav", "c.wav"]);
+    let before = t.app.playlist().to_vec();
+    // `add_files` already marked the list dirty, so the claim is that a stale
+    // move leaves that flag *alone* — not that the list is clean.
+    let dirty_before = t.app.playlist_dirty();
+    assert!(dirty_before, "premise: populating a playlist is an edit");
+
+    // Every way the index can be out of range: past the end as a source, as a
+    // destination, and exactly one past the end as a source (which is where a
+    // three-row drag lands on a two-row list).
+    for (from, to) in [(99, 0), (0, 99), (3, 0), (0, 3), (usize::MAX, usize::MAX)] {
+        t.app.move_track(from, to);
+    }
+
+    assert_eq!(
+        t.app.playlist(),
+        before.as_slice(),
+        "a stale drag must not reorder, drop or duplicate a track"
+    );
+    assert_eq!(
+        t.app.playlist_dirty(),
+        dirty_before,
+        "a move that did not happen is not a new edit"
+    );
+    assert_eq!(
+        t.app.current_index(),
+        None,
+        "and it must not fabricate a playing index"
+    );
+
+    // Premise: the guard is not simply disabling the operation. A valid move
+    // still reorders, and it is the *only* thing that made this list dirty.
+    t.app.move_track(0, 2);
+    assert_eq!(
+        t.app.playlist(),
+        [paths[1].clone(), paths[2].clone(), paths[0].clone()],
+        "a valid drag still reorders"
+    );
+    assert!(t.app.playlist_dirty(), "a real move is an edit");
+}

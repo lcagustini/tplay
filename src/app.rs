@@ -864,7 +864,27 @@ impl TPlayApp {
         self.reset_shuffle();
     }
 
+    /// Reorder one track, dragging it from `from` to `to`.
+    ///
+    /// `to` is a destination *slot*, not `to - 1`: dragging item 1 over item 3
+    /// puts it at position 3.
+    ///
+    /// Both indices arrive from egui memory, which egui clears only at shutdown —
+    /// so they outlive the rows that produced them, and the list can be replaced
+    /// under a held drag. `apply_playlist` is the reachable way that happens: an
+    /// in-flight remote `.tplay` lands on its worker thread at an arbitrary
+    /// moment. Both `remove` and `insert` panic on an out-of-range index, and a
+    /// panic here is a dead process, so a stale index is dropped instead — the
+    /// same guard the armed `ConfirmAction::RemoveTrack` index gets at its call
+    /// site.
+    ///
+    /// `to` is bounded by the list *before* the removal, which is what makes
+    /// "drag item 1 over item 3" mean position 3: the `remove` has already
+    /// shortened the list by the time `insert` runs.
     pub fn move_track(&mut self, from: usize, to: usize) {
+        if from >= self.playlist.len() || to >= self.playlist.len() {
+            return;
+        }
         if from != to {
             self.playlist_dirty = true;
             let item = self.playlist.remove(from);
