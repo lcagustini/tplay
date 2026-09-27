@@ -6,7 +6,7 @@ use eframe::egui::{self, Color32, FontFamily};
 use std::path::Path;
 use tplay::app::Pane;
 use tplay::audio::eq::EqShared;
-use tplay::gui::theme::{rasterize_icon, Base, Icon, Layout, ThemeState, Themes, DEFAULT_THEME_ID};
+use tplay::gui::theme::{rasterize_icon, Base, Icon, Layout, Themes, DEFAULT_THEME_ID};
 
 #[test]
 fn themes_loads_builtin_dark_theme() {

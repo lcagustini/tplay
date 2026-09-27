@@ -62,7 +62,12 @@ fn apply_maps_palette_tokens_to_visuals() {
 /// load_from with the JSON values winning over code defaults.
 #[test]
 fn new_layout_tokens_round_trip_from_json() {
-    let base = std::env::temp_dir().join(format!("tplay-test-{}", std::process::id()));
+    // Its own directory, not the shared per-pid root: cargo runs a binary's
+    // tests in parallel, and a `remove_dir_all` on the root deletes every other
+    // test's fixture mid-run. Same fix as `settings_owners.rs`'s `theme_fixture`.
+    let base = std::env::temp_dir()
+        .join(format!("tplay-test-{}", std::process::id()))
+        .join("layout-tokens");
     let dir = base.join("tokens");
     std::fs::create_dir_all(dir.join("tok")).unwrap();
     std::fs::write(
