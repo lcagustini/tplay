@@ -15,6 +15,7 @@ use crate::app::{Pane, TPlayApp};
 use crate::gui::coordinator;
 use crate::gui::theme::{self, ThemeState};
 use crate::library;
+use crate::library_db::SmartView;
 use crate::network;
 use crate::tracks;
 use eframe::egui;
@@ -49,6 +50,10 @@ pub enum ConfirmAction {
         remote: bool,
     },
     DeleteLayout(PathBuf),
+    /// Replace the playlist with a Smart View's selection. Carries the view by
+    /// value because a rule is plain data — an armed one must survive the modal
+    /// waiting for an answer, and a view can be deleted meanwhile.
+    LoadSmartView(SmartView),
 }
 
 /// An armed Yes/No, waiting for an answer.
@@ -187,6 +192,7 @@ fn run(app: &mut TPlayApp, ctx: &egui::Context, action: ConfirmAction) {
             }
         }
         ConfirmAction::NewPlaylist => app.new_playlist(),
+        ConfirmAction::LoadSmartView(view) => app.load_smart_view(&view),
         ConfirmAction::LoadPlaylist { path, remote } => {
             if remote {
                 app.network_mut().fetch(path.to_string_lossy().into_owned());

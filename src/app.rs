@@ -1007,7 +1007,7 @@ impl TPlayApp {
         let Some(paths) = library::read_playlist(&path, base) else {
             return;
         };
-        self.apply_playlist(paths, path);
+        self.apply_playlist(paths, Some(path));
     }
 
     /// Apply a downloaded remote playlist. `base` is the share directory the
@@ -1019,11 +1019,41 @@ impl TPlayApp {
             eprintln!("tplay: could not parse playlist {uri}");
             return;
         };
-        self.apply_playlist(paths, PathBuf::from(uri));
+        self.apply_playlist(paths, Some(PathBuf::from(uri)));
     }
 
-    /// Shared tail of both playlist-load paths: filter, stop, scan, track.
-    fn apply_playlist(&mut self, paths: Vec<PathBuf>, file: PathBuf) {
+    /// Replace the playlist with what a Smart View selects.
+    ///
+    /// The same machinery a `.tplay` load uses, reached through the same tail, and
+    /// with **no tracked file** — a view is a query, not something to Save over, so
+    /// Save asks where to go exactly as it does for a new playlist.
+    ///
+    /// A view that selects nothing replaces the playlist with nothing. That is the
+    /// consistent reading of "the playlist is this view", and the alternative —
+    /// quietly leaving the old playlist in place — makes an empty view look like a
+    /// click that did not work.
+    pub fn load_smart_view(&mut self, view: &library_db::SmartView) {
+        let tracks = self.db.select(&view.rule, now_epoch());
+        self.apply_playlist(tracks, None);
+    }
+
+    /// The saved Smart Views, in sidebar order.
+    pub fn smart_views(&self) -> &[library_db::SmartView] {
+        self.db.views()
+    }
+
+    /// Save a view, replacing one of the same name.
+    pub fn add_smart_view(&mut self, view: library_db::SmartView) {
+        self.db.add_view(view);
+    }
+
+    /// Forget a view by name, reporting whether there was one to forget.
+    pub fn remove_smart_view(&mut self, name: &str) -> bool {
+        self.db.remove_view(name)
+    }
+
+    /// Shared tail of every playlist-load path: filter, stop, scan, track.
+    fn apply_playlist(&mut self, paths: Vec<PathBuf>, file: Option<PathBuf>) {
         // Remote tracks can't canonicalize and are kept verbatim; local paths
         // that no longer exist are dropped.
         self.playlist = paths.into_iter().filter_map(tracks::normalize).collect();
@@ -1033,7 +1063,7 @@ impl TPlayApp {
         playlist::dedup(&mut self.playlist);
         self.stop();
         self.ensure_tags(self.playlist.clone());
-        self.playlist_file = Some(file);
+        self.playlist_file = file;
         self.playlist_dirty = false;
     }
 

@@ -9,6 +9,7 @@ use super::dir_name;
 use crate::app::TPlayApp;
 use crate::gui::theme::{self, ThemeState};
 use crate::library;
+use crate::library_db::{self, SmartView};
 use crate::network;
 use eframe::egui;
 use std::path::{Path, PathBuf};
@@ -422,6 +423,91 @@ pub fn sidebar_ui(
                     // Entering a local folder exits network browse mode.
                     app.network_mut().leave_network();
                     app.navigate_to(dir);
+                }
+
+                // Smart Views: the saved queries. A view row is the `sidebar_row`
+                // shape with its own label, and the ✕ forgets it rather than
+                // un-bookmarking a folder — hence the separate deferred slot
+                // instead of reusing `jump`.
+                {
+                    let mut add: Option<SmartView> = None;
+                    let mut open: Option<SmartView> = None;
+                    let mut forget: Option<String> = None;
+
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("Smart Views")
+                                .small()
+                                .strong()
+                                .color(p.text_secondary),
+                        );
+                        // A popup rather than a form or a ComboBox: the preset
+                        // labels are longer than the 120px column, and a popup
+                        // draws outside it, so nothing here can widen the sidebar
+                        // (see the note above) and no egui-memory key is needed
+                        // for an open/closed flag.
+                        ui.menu_button("+", |ui| {
+                            for (label, view) in library_db::presets() {
+                                if ui.button(label).clicked() {
+                                    add = Some(view.clone());
+                                }
+                            }
+                        })
+                        .response
+                        .on_hover_text("New view from a preset");
+                    });
+                    ui.add_space(2.0);
+
+                    for view in app.smart_views().to_vec() {
+                        match sidebar_row(
+                            ui,
+                            themes,
+                            theme,
+                            &layout,
+                            Row {
+                                label: &view.name,
+                                path: Path::new(""),
+                                active: false,
+                                removable: true,
+                            },
+                        ) {
+                            Some(RowClick::Jump) => {
+                                // A dirty playlist is about to lose its unsaved
+                                // edits, so it asks first — the same gate a
+                                // `.tplay` load uses, and a clean switch is silent.
+                                if app.playlist_dirty() {
+                                    crate::gui::dialogs::ask(
+                                        ui.ctx(),
+                                        crate::gui::dialogs::ConfirmAction::LoadSmartView(
+                                            view.clone(),
+                                        ),
+                                        "Load smart view",
+                                        &format!(
+                                            "Replace the current playlist with '{}'?",
+                                            view.name
+                                        ),
+                                    );
+                                } else {
+                                    open = Some(view.clone());
+                                }
+                            }
+                            Some(RowClick::Remove) => forget = Some(view.name.clone()),
+                            None => {}
+                        }
+                    }
+                    if !app.smart_views().is_empty() {
+                        ui.add_space(8.0);
+                    }
+
+                    if let Some(view) = add {
+                        app.add_smart_view(view);
+                    }
+                    if let Some(view) = open {
+                        app.load_smart_view(&view);
+                    }
+                    if let Some(name) = forget {
+                        app.remove_smart_view(&name);
+                    }
                 }
             });
     });
