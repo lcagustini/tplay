@@ -72,7 +72,7 @@ pub struct TPlayApp {
     /// Output stream buffer size in frames, requested at stream open.
     buffer_size: u32,
     /// Spool cache ceiling in MB (`Config::spool_cache_mb`). A field so
-    /// `save_config` writes the user's value back instead of resetting it.
+    /// `flush_config` writes the user's value back instead of resetting it.
     spool_cache_mb: u32,
 
     /// Pins the slider at the intended position until get_pos() catches up, so a
@@ -280,9 +280,8 @@ impl TPlayApp {
             .note_written(&self.db.persist(now_epoch()), now);
     }
 
-    /// The database: the tag cache every pane reads, and the play history.
-    /// Writing it is the app's own business — a pane reads, `apply_edit` and
-    /// `start_track` write — so there is deliberately no `db_mut`.
+    /// The database: the tag cache every pane reads, and the play history. No
+    /// `db_mut` on purpose — a pane reads it; `apply_edit` and `start_track` write.
     pub fn db(&self) -> &library_db::TrackDb {
         &self.db
     }

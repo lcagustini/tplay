@@ -400,9 +400,9 @@ pub fn load_icons(
 /// The selected theme, the list, and the loaded icon textures — one group.
 ///
 /// These were three `TPlayApp` fields, and the awkward part was never the fields:
-/// it was `set_theme`, which had to know that switching a theme means re-decoding
+/// it was the setter, which had to know that switching a theme means re-decoding
 /// every icon texture and did it inline. That coupling belongs next to
-/// `load_icons`.
+/// `load_icons`, and `set` is where it lives.
 pub struct ThemeState {
     current: Arc<Theme>,
     themes: Themes,

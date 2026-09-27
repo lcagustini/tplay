@@ -135,6 +135,15 @@ pub fn local_file_in(track: &Path, dir: &Path) -> Option<PathBuf> {
 /// The local file for `track` **if it is readable right now** — the pre-buffer
 /// question, i.e. can this track be opened synchronously.
 ///
+/// Private because `is_ready` is its public form: a caller asking the pre-buffer
+/// question wants a yes/no, not a path it could pass somewhere it should not.
+fn local_file_now(track: &Path) -> Option<PathBuf> {
+    local_file_now_in(track, &network::spool_dir())
+}
+
+/// `local_file_now` against an injected spool dir — the form tests use, and the
+/// one the contract belongs on, since this is what a caller actually reaches.
+///
 /// Deliberately separate from `local_file_in`, which answers a different
 /// question. For a *local* track with no file yet (mid-load, or deleted off
 /// disk) the two disagree: art and tags should still be attempted — the track's
@@ -142,14 +151,6 @@ pub fn local_file_in(track: &Path, dir: &Path) -> Option<PathBuf> {
 /// whereas pre-buffering has nothing to open and must wait. Collapsing them
 /// would blank the art and tags of every track that fails to open, and turn
 /// "there is no file to pre-buffer" into "this is a remote track".
-///
-/// Private because `is_ready` is its public form: a caller asking the pre-buffer
-/// question wants a yes/no, not a path it could pass somewhere it should not.
-fn local_file_now(track: &Path) -> Option<PathBuf> {
-    local_file_now_in(track, &network::spool_dir())
-}
-
-/// `local_file_now` against an injected spool dir.
 pub fn local_file_now_in(track: &Path, dir: &Path) -> Option<PathBuf> {
     local_file_in(track, dir).filter(|f| f.is_file())
 }
@@ -159,12 +160,11 @@ pub fn local_file_now_in(track: &Path, dir: &Path) -> Option<PathBuf> {
 /// The tag changes one write applies. `None` leaves a field alone; an **empty**
 /// string removes that tag rather than writing a blank one.
 ///
-/// This struct is the whole reason the app has one tag-write path. The rating
-/// arrived first and the text fields came later, and neither added a second
-/// function: a new editable field is one line here and one line in `write_tags`.
-/// `Default` is derived, so a caller writing only the rating spells
-/// `..Default::default()` — which is also what makes that the *common* case, and
-/// the reason the fields are ordered rating-last.
+/// This struct is the whole reason the app has one tag-write path: a new editable
+/// field is one line here and one line in `write_tags`, and no caller grows a
+/// second way to change a track. `Default` is derived, so a caller writing one
+/// field spells `..Default::default()` — which makes the common case cheap, and
+/// is why `rating` is ordered last.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Edit<'a> {
     pub title: Option<&'a str>,

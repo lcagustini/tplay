@@ -204,7 +204,7 @@ pub fn sidebar_ui(
                 });
 
                 // The local row to highlight — and `None` while a share is open.
-                // Entering network mode does NOT change `library_dir`, so
+                // Entering network mode does NOT change the browsed dir, so
                 // comparing against it directly kept the last local folder lit
                 // *alongside* the server row. Exactly one row is active at a
                 // time: the server when browsing, else the local folder. (The
@@ -293,9 +293,10 @@ pub fn sidebar_ui(
                     if let Some(host) = form.as_mut() {
                         // Enter submits — see `login_form_ui` in listing.rs.
                         let mut enter = false;
-                        let mut submit: Option<bool> = None; // Some(true) = Add, Some(false) = Cancel
-                                                             // Fixed-rect child, as the column above: the TextEdit
-                                                             // overflow allocation must not reach the scroll content.
+                        // Some(true) = Add, Some(false) = Cancel.
+                        let mut submit: Option<bool> = None;
+                        // Fixed-rect child, as the column above: the TextEdit
+                        // overflow allocation must not reach the scroll content.
                         let gap = ui.spacing().item_spacing.y;
                         let form_h = FORM_FIELD_H + gap + ui.spacing().interact_size.y;
                         let (_, form_rect) = ui.allocate_space(egui::vec2(FORM_W, form_h));

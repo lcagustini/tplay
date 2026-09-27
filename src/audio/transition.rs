@@ -152,9 +152,10 @@ pub fn fade_gains(p: f32) -> (f32, f32) {
 /// has ended), linearly in remaining time — not a wall clock, so pause- and
 /// seek-safe. Duration-probe drift can push `remaining` past the window, making
 /// `p` overshoot [0, 1]; `fade_gains` clamps there, so this does not repeat it.
-/// (`f32::FRAC_PI_2` also rounds up, so `fade_gains(1.0)` is `(-4.37e-8, 1.0)`
-/// rather than exactly `(0.0, 1.0)` — the outgoing sink is set to that on the
-/// last frame before the swap, i.e. −4e-8 of full volume, inaudible.)
+/// (It does not land on exactly `(0, 1)` at `p = 1` — `f32::FRAC_PI_2` rounds up,
+/// and the outgoing sink is set to −4e-8 of full volume on the last frame before
+/// the swap. Inaudible, and asserted to the digit by
+/// `xf_gains_advances_monotonically`.)
 ///
 /// Gapless has no fade to run: the incoming track is held at zero and the swap
 /// is instant, so this returns `(1.0, 0.0)` — full out, silence in — for any

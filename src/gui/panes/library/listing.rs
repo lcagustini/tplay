@@ -745,13 +745,11 @@ pub fn remote_list_ui(
     match act {
         Some(Act::Nav(path)) => {
             // The shared list hands back `entry.path()`, which for a share is the
-            // FULL child URI the entry was built from — not a bare folder name.
-            // Re-joining it with `child_browse` appended the whole URI as a name
-            // segment, giving a `rel` of "music/smb://nas/media/music/Rock" and a
-            // PATH_NOT_FOUND from the server. Split it instead: for a URI already
-            // in child form that is a no-op round trip. (See
-            // `nav_uri_round_trips_but_renaming_one_does_not` in
-            // `tests/smb_helpers.rs`.)
+            // FULL child URI, not a bare folder name — so split it rather than
+            // re-joining it as a name, which is what a `child_browse`-shaped
+            // helper invites and what cost a PATH_NOT_FOUND here once. For a URI
+            // already in child form this is a no-op round trip, pinned by
+            // `nav_uri_round_trips_but_renaming_one_does_not`.
             let uri = path.to_string_lossy().into_owned();
             if let Some((_host, share, rel)) = network::split_uri(&uri) {
                 app.network_mut().browse_open(uri, share, rel);

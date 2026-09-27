@@ -1,9 +1,15 @@
-//! Flame view — the band array as a filled ridgeline, the `flam3`/audialsense
-//! look.
+//! Flame view — the band array as a filled ridgeline.
 //!
 //! No new DSP: one `compute_bands` call. Where Bars draws 32 separate columns,
 //! this closes them into one contour, which reads as a spectrum's *shape* and
 //! its evolution rather than as 32 unrelated heights.
+//!
+//! The look is the ridgeline used by audio-spectrum visualisers (the effect
+//! usually credited to the `flam3` renderer). Named in the past with a link to
+//! that name's source; left unnamed here on purpose, because "flame" resolves to
+//! Brendan Gregg's *profiling* flame graph, which is a different thing built from
+//! stack traces, and a wrong reference is worse than none. What the view draws is
+//! the sentence above.
 
 use crate::audio::viz::{compute_bands, VizBuf, VIZ_BANDS};
 use crate::gui::theme::Palette;

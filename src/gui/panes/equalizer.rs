@@ -16,8 +16,9 @@ pub fn equalizer_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui
     let gains = app.eq().gains();
     let layout = theme.layout;
 
-    // Header — grouped controls; the tab already names the pane. Measured via
-    // a scope so `min_content_h` below is exact, not guessed.
+    // Header — grouped controls; the tab already names the pane. Measured via a
+    // scope so the content height recorded under `tplay.pane_content_h` below is
+    // exact, not guessed.
     let header_h = ui
         .scope(|ui| {
             ui.horizontal(|ui| {

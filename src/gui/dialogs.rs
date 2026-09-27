@@ -1,6 +1,7 @@
 //! The app's only dialogs: a Yes/No confirm, a save-name prompt, and a track
-//! editor (a 5-star row plus the four text tags). All are in-app `egui::Modal`s — there is no native OS file or
-//! message browser, so a target is always a name typed here over a directory the
+//! editor (a 5-star row plus the four text tags). All are in-app `egui::Modal`s —
+//! there is no native OS file or message browser, so a target is always a name
+//! typed here over a directory the
 //! app already knows (the Library's current folder, a share directory on screen,
 //! the layouts dir).
 //!

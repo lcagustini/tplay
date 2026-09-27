@@ -20,7 +20,7 @@ use crate::gui::theme::ThemeState;
 use eframe::egui;
 use std::path::Path;
 
-/// egui memory: has the pane listed `library_dir` at least once this session.
+/// egui memory: has the pane listed the browsed dir at least once this session.
 const LIB_INIT: &str = "tplay.library.init";
 /// egui memory: the SMB add-server form state (the host field).
 /// `None` = closed; `Some` = open with the field being edited.
