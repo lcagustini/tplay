@@ -454,7 +454,20 @@ impl TPlayApp {
         }
 
         // Shuffle: random from the unplayed pool.
-        let unplayed: Vec<usize> = (0..len).filter(|i| !self.played.contains(i)).collect();
+        //
+        // One membership pass rather than a `played.contains` scan per candidate:
+        // this runs every frame (the transport's `has_next_track`, and again all
+        // through the crossfade arm), and `len` linear scans of a `Vec` is
+        // quadratic in exactly the mode whose purpose is playing long lists. The
+        // `get_mut` is the same bounds tolerance the guard in `move_track` exists
+        // for: a stale entry is skipped rather than indexing past the end.
+        let mut taken = vec![false; len];
+        for &i in &self.played {
+            if let Some(slot) = taken.get_mut(i) {
+                *slot = true;
+            }
+        }
+        let unplayed: Vec<usize> = (0..len).filter(|i| !taken[*i]).collect();
         let mut rng = self.rng_state;
         let idx = if unplayed.is_empty() {
             // Repeat restarts the cycle, so the draw covers the whole playlist;

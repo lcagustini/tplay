@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 use std::time::Duration;
-use tplay::library::{sort_key, Entry, TrackInfo};
+use tplay::library::{sort_key, Entry, TrackInfo, SORT_OPTIONS};
 
 fn file(name: &str) -> Entry {
     Entry {
@@ -94,4 +94,34 @@ fn sort_key_folders_sink_on_tag_columns_below_files() {
         ..Default::default()
     };
     assert!(sort_key(&file("a.wav"), Some(&long), 3) < sort_key(&f, None, 3));
+}
+
+/// `sort_key`'s last arm falls back to the filename, and a `debug_assert!` sits in
+/// it to catch the one case where that fallback is wrong: a column *inside*
+/// `SORT_OPTIONS` with no arm of its own. Adding such a column compiles, passes
+/// every test, and orders the new column by filename — so the assert is the only
+/// thing that says so.
+///
+/// There is nothing to assert about that today, because every current column has
+/// an arm: no `col` exists that the guard rejects. That is the guard working, and
+/// it is why this fix is the only one in the batch with no mutation check. What
+/// *is* testable is the other half — the arm must stay a safe fallback, so a
+/// genuine out-of-range column keeps sorting by filename rather than tripping the
+/// assert and turning a wrong order into a debug panic. That is the claim worth
+/// pinning, because the assert is the thing that could break it.
+#[test]
+fn an_out_of_range_column_still_falls_back_to_the_filename() {
+    let e = Entry {
+        path: PathBuf::from("/music/zebra.mp3"),
+        is_dir: false,
+    };
+    // Well past the end, and one past the last real column: both are the
+    // defensive case the filename answer exists for, and neither may panic.
+    for col in [SORT_OPTIONS.len(), SORT_OPTIONS.len() + 1, 99] {
+        assert_eq!(
+            sort_key(&e, None, col),
+            "zebra.mp3",
+            "column {col} is out of range and must fall back, not panic"
+        );
+    }
 }

@@ -592,12 +592,25 @@ pub fn sort_key(e: &Entry, info: Option<&TrackInfo>, col: usize) -> String {
                 "~".to_string()
             }
         }
-        _ => e
-            .path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default()
-            .to_string(),
+        _ => {
+            // A new `SORT_OPTIONS` entry compiles, passes every test, and silently
+            // orders the new column by filename, because this arm is the fallback
+            // and nothing else notices. `SORT_OPTIONS` has gained and lost entries
+            // before — Year and Genre were removed — so this assert is the only
+            // thing that says so. Written against `SORT_OPTIONS.len()` rather than
+            // a literal so adding a fifth *arm* above keeps it satisfied: by then
+            // this one is only reached past the end.
+            debug_assert!(
+                col >= SORT_OPTIONS.len(),
+                "no sort_key arm for SORT_OPTIONS[{col}] — a column was added \
+                 without a sort key, so it would order by filename"
+            );
+            e.path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default()
+                .to_string()
+        }
     };
     // \x7f (DEL) prefixes an empty string so it sorts after normal content
     if s.is_empty() {

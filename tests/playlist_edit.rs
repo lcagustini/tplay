@@ -526,3 +526,58 @@ fn a_stale_drag_index_is_a_no_op_rather_than_a_panic() {
     );
     assert!(t.app.playlist_dirty(), "a real move is an edit");
 }
+
+/// The one claim about the shuffle pool that only the app can answer.
+///
+/// `playlist_shuffle.rs` mirrors `peek_next_index` branch for branch, which pins
+/// the *algorithm* but never runs it — so the real function had no direct
+/// coverage, and two mutations of it (inverting the membership set, off-by-one
+/// on the mark) left all seventeen mirror tests green. A mirror is a second copy
+/// that can drift; this is the copy that ships.
+///
+/// The claim: one shuffle cycle through the real app visits every track exactly
+/// once. That is what a wrong membership set breaks — a track repeated means a
+/// live one was wrongly marked as played, and a track skipped means one was
+/// wrongly left in the pool — and neither shows up as a wrong *order*, which is
+/// all a mirror can compare.
+#[test]
+fn a_shuffle_cycle_through_the_app_is_a_permutation() {
+    let (mut t, _tracks) = scrambled_playlist("shuffle-permutation");
+    let n = t.app.playlist().len();
+    t.app.toggle_shuffle();
+
+    // `play_track` *resets* the shuffle history rather than joining it, so the
+    // manual play is a pre-cycle start and the cycle is exactly the `n` draws
+    // below. Asserting on both together would be wrong: drawing the track the
+    // user just clicked is legal, because the click cleared the history.
+    t.app.play_track(0);
+    assert!(
+        t.app.current_index().is_some(),
+        "premise: something is playing"
+    );
+
+    let mut seen = Vec::new();
+    for i in 0..n {
+        t.app.next_track();
+        seen.push(
+            t.app
+                .current_index()
+                .unwrap_or_else(|| panic!("draw {i}: next_track must land somewhere")),
+        );
+    }
+
+    let mut sorted = seen.clone();
+    sorted.sort_unstable();
+    assert_eq!(
+        sorted,
+        (0..n).collect::<Vec<usize>>(),
+        "a shuffle cycle must visit every track exactly once; saw {seen:?}"
+    );
+
+    // The cycle is spent, so there is no unplayed track left to draw. Without
+    // repeat that reads as "no next", which is the button's own answer.
+    assert!(
+        !t.app.has_next_track(),
+        "premise: an exhausted cycle has nowhere to go"
+    );
+}
