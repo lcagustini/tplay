@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use tplay::library::TrackInfo;
+use tplay::library::{TagCache, TrackInfo};
 use tplay::network::{self, Network};
 use tplay::tracks::{self, TagReader};
 #[path = "common.rs"]
@@ -206,7 +206,7 @@ fn split_for_tags_splits_a_mixed_batch() {
     .map(PathBuf::from)
     .collect();
 
-    let (local, remote) = tracks::split_for_tags(batch);
+    let (local, remote) = tracks::split_for_tags(&batch, &TagCache::new());
     assert_eq!(
         local,
         vec![
@@ -226,8 +226,41 @@ fn split_for_tags_splits_a_mixed_batch() {
     );
 
     // Nothing in, nothing out — no empty batch should reach a transport.
-    let (local, remote) = tracks::split_for_tags(vec![]);
+    let (local, remote) = tracks::split_for_tags(&[], &TagCache::new());
     assert!(local.is_empty() && remote.is_empty());
+
+    // The cache test moved into the split, and this is what it bought: the share
+    // browser asks for every row every frame, so a cached row must not reach
+    // either transport or the worker is re-queued forever.
+    let mut cache = TagCache::new();
+    cache.insert(
+        PathBuf::from("/music/a.wav"),
+        TrackInfo {
+            title: "Cached".into(),
+            ..Default::default()
+        },
+    );
+    cache.insert(
+        PathBuf::from("smb://nas/media/b.mp3"),
+        TrackInfo {
+            title: "Cached".into(),
+            ..Default::default()
+        },
+    );
+    let (local, remote) = tracks::split_for_tags(&batch, &cache);
+    assert_eq!(
+        local,
+        vec![
+            PathBuf::from("/music/c.flac"),
+            PathBuf::from("/music/e.wav")
+        ],
+        "a cached local row is not re-scanned"
+    );
+    assert_eq!(
+        remote,
+        vec!["smb://nas/media/d.tplay-not-a-track".to_string()],
+        "and a cached remote row is not re-queued for the worker"
+    );
 }
 
 /// The local half of the tag pipeline, end to end: `request` skips what the

@@ -38,7 +38,7 @@
 //! `write_tags`.
 
 use crate::audio;
-use crate::library::{self, TrackInfo};
+use crate::library::{self, TagCache, TrackInfo};
 use crate::network;
 use lofty::config::WriteOptions;
 use lofty::file::{AudioFile, FileType, TaggedFileExt};
@@ -306,20 +306,34 @@ pub fn normalize(track: PathBuf) -> Option<PathBuf> {
 
 // ── Splitting a batch across the two tag transports ──────────────────────────
 
-/// Split a batch of wanted tracks into its local and remote halves.
+/// Split a batch of wanted tracks into its local and remote halves, skipping any
+/// the cache already has.
 ///
 /// Pure, so it is the tested unit and `TagReader::request` stays a thin wrapper.
 /// The halves are genuinely different machines — a thread with an mpsc, an SMB
 /// worker command with a reply `Event` — so the split is real; it just does not
 /// belong to the caller.
-pub fn split_for_tags(paths: Vec<PathBuf>) -> (Vec<PathBuf>, Vec<String>) {
+///
+/// The cache test lives *here* rather than in the caller, and that is the point:
+/// the share browser asks for every uncached track every frame, and filtering into
+/// a `missing` vector first meant a `PathBuf` clone per uncached row per frame
+/// before the split even started. One pass, and a remote row costs the one
+/// `String` the worker command needs rather than a clone plus a String.
+///
+/// The local half still clones, because it moves into a spawned thread and has to
+/// be `'static`. One clone per uncached row is the floor here without changing
+/// `scan_files` to take references, which would just move the clone.
+pub fn split_for_tags(wanted: &[PathBuf], cache: &TagCache) -> (Vec<PathBuf>, Vec<String>) {
     let mut local = Vec::new();
     let mut remote = Vec::new();
-    for p in paths {
-        if network::is_remote(&p) {
+    for p in wanted {
+        if cache.contains_key(p) {
+            continue;
+        }
+        if network::is_remote(p) {
             remote.push(p.to_string_lossy().into_owned());
         } else {
-            local.push(p);
+            local.push(p.clone());
         }
     }
     (local, remote)
@@ -370,12 +384,7 @@ impl TagReader {
         network: &mut network::Network,
         wanted: &[PathBuf],
     ) -> bool {
-        let missing: Vec<PathBuf> = wanted
-            .iter()
-            .filter(|p| !cache.contains_key(*p))
-            .cloned()
-            .collect();
-        let (local, remote) = split_for_tags(missing);
+        let (local, remote) = split_for_tags(wanted, cache);
 
         if !remote.is_empty() {
             network.fetch_tags(remote);
