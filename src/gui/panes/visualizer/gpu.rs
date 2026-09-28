@@ -176,6 +176,8 @@ pub fn add_fullscreen(
 pub struct Feedback {
     built: Arc<Mutex<Option<Pair>>>,
     parity: bool,
+    /// Set once target creation has failed, so it is not retried every frame.
+    failed: Arc<AtomicBool>,
 }
 
 /// The two targets, as `(source, destination)` for the frame about to be drawn.
@@ -215,7 +217,15 @@ impl Feedback {
         present: &'static str,
         uniforms: Uniforms,
     ) {
-        let wanted = fbo_size((rect.width(), rect.height()));
+        // A driver that cannot give us a framebuffer is asked **once**. Without
+        // this, a failure means two textures and two framebuffers created and
+        // released 60 times a second, for ever — the same class of runaway as the
+        // per-frame rebuild this function used to do. The program cache learned
+        // this lesson; the feedback path did not.
+        if self.failed.load(Ordering::Relaxed) {
+            return;
+        }
+        let wanted = target_size(rect, painter.ctx().pixels_per_point());
         let ready = {
             let slot = self.slot();
             slot.as_ref()
@@ -258,21 +268,73 @@ impl Feedback {
         }));
     }
 
-    /// Build the pair in the one place that has a GL context.
+    /// Build the pair in the one place that has a GL context, releasing whatever
+    /// it replaces.
+    ///
+    /// **The old pair is destroyed here, in the callback, because that is the only
+    /// place a context exists.** An `Fbo` cannot implement `Drop` — deleting a GL
+    /// object needs the context, which `Drop` has no way to reach — so before this,
+    /// the only way to lose a target was for the pane's size to change, and every
+    /// one of those leaked two textures and two framebuffers. See [`target_size`]
+    /// for why the size used to change far more often than it should have.
     fn create(&self, painter: &egui::Painter, rect: egui::Rect, size: (i32, i32)) {
         let slot = self.built.clone();
+        let failed = self.failed.clone();
         painter.add(egui::Shape::Callback(egui::PaintCallback {
             rect,
             callback: Arc::new(egui_glow::CallbackFn::new(move |_info, painter| {
                 let gl = painter.gl();
-                let pixels = (size.0 as f32, size.1 as f32);
-                if let (Some(a), Some(b)) = (Fbo::new(gl, pixels), Fbo::new(gl, pixels)) {
-                    *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some((a, b));
+                let mut guard = slot.lock().unwrap_or_else(PoisonError::into_inner);
+                // Released before the new pair is made, so the peak is one pair
+                // rather than two.
+                if let Some((a, b)) = guard.take() {
+                    a.destroy(gl);
+                    b.destroy(gl);
+                }
+                match (Fbo::new(gl, size), Fbo::new(gl, size)) {
+                    (Some(a), Some(b)) => *guard = Some((a, b)),
+                    _ => failed.store(true, Ordering::Relaxed),
                 }
             })),
         }));
     }
 }
+
+/// The pixel size a feedback target should be, quantised.
+///
+/// **Physical pixels, not points.** The pane rect is in points and the screen is
+/// in physical pixels, and on a HiDPI display those differ by the scale factor —
+/// so sizing a render target from the rect alone gives a target a *quarter* of
+/// the on-screen area at 2x, and the trail is drawn at a quarter of the
+/// resolution and stretched. That reads as a soft low-resolution smear rather
+/// than as a bug.
+///
+/// **Quantised to a multiple of [`TARGET_GRID`], and that half is the
+/// load-bearing one.** A dock's pane rect jitters by fractions of a pixel as a
+/// splitter settles, and an exact size check reads that jitter as "the targets
+/// are the wrong size" — so every jitter rebuilt both targets, and each rebuild
+/// leaked the pair it replaced. Rounding to a coarse grid means the size changes
+/// only when the pane really did, which is the one event that should cost a
+/// rebuild.
+///
+/// Coarse rather than exact because the content is a soft accumulating trail: a
+/// few pixels of upscale is invisible, whereas being wrong by a pixel every frame
+/// is not.
+pub fn target_size(rect: egui::Rect, pixels_per_point: f32) -> (i32, i32) {
+    let quantise = |points: f32| {
+        let cells = (points * pixels_per_point / TARGET_GRID as f32).ceil();
+        // The floor is a whole grid cell, so a zero or negative extent — which a
+        // pane really does report for a frame while a splitter is dragged —
+        // cannot produce a zero-sized target. GL rejects one with `INVALID_VALUE`
+        // and a driver reporting an error on a path nobody checks leaves nothing
+        // in any log, so the symptom is a blank pane and nothing else.
+        ((cells as i32).max(1) * TARGET_GRID).max(TARGET_GRID)
+    };
+    (quantise(rect.width()), quantise(rect.height()))
+}
+
+/// The grid [`target_size`] rounds to, in physical pixels.
+const TARGET_GRID: i32 = 64;
 
 /// An owned RGBA8 framebuffer and the texture it renders into.
 ///
@@ -320,8 +382,10 @@ impl Fbo {
     /// Returns `None` rather than a zero-sized framebuffer, which GL rejects
     /// with `INVALID_VALUE` and which would otherwise surface as a blank pane
     /// with nothing in the log.
-    pub fn new(gl: &glow::Context, size: (f32, f32)) -> Option<Arc<Fbo>> {
-        let (w, h) = fbo_size(size);
+    /// `size` must come from [`target_size`], which floors it — see there for why
+    /// a zero dimension is the failure mode worth designing out.
+    pub fn new(gl: &glow::Context, size: (i32, i32)) -> Option<Arc<Fbo>> {
+        let (w, h) = size;
         // SAFETY: `gl` is the context egui is painting with. Every object created
         // here is deleted on every failure path below, so a rejected framebuffer
         // leaks nothing; a successful one lives for the process, as documented on
@@ -427,23 +491,24 @@ impl Fbo {
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.framebuffer));
         }
     }
-}
 
-/// The render target's pixel size: rounded up, and **never zero**.
-///
-/// Both halves matter and neither is cosmetic. A pane can legitimately measure
-/// zero on one side for a frame while a splitter is dragged, and GL's
-/// `texImage2D` and `glFramebufferTexture2D` both reject a zero dimension with
-/// `INVALID_VALUE` — so a round-down, or a bare pass-through of the pane's size,
-/// makes the whole view blank with nothing in any log. A floor of 1 keeps the
-/// call valid, and the accumulation pass then has somewhere to write.
-pub fn fbo_size(size: (f32, f32)) -> (i32, i32) {
-    let px = |v: f32| {
-        // `ceil` rather than `round`: a target one pixel short of the pane is
-        // stretched by the sampler, and one pixel over costs nothing.
-        (v.ceil() as i32).max(1)
-    };
-    (px(size.0), px(size.1))
+    /// Release the GL objects.
+    ///
+    /// A free function rather than a `Drop` because deleting a GL object needs the
+    /// context and `Drop` has no way to reach it — so any target that went out of
+    /// scope without this leaked both its framebuffer and its texture. Called from
+    /// the one place that has a context, when a target is replaced.
+    pub fn destroy(&self, gl: &glow::Context) {
+        // SAFETY: both objects were created by `Fbo::new`, and nothing reachable
+        // still refers to them — `Feedback::create` has taken the pair out of the
+        // slot, and the other `Arc` to each target died with the frame that queued
+        // the callback. Deleting a still-bound name is defined by GL (it unbinds),
+        // and egui restores its own state after the callback regardless.
+        unsafe {
+            gl.delete_framebuffer(self.framebuffer);
+            gl.delete_texture(self.texture);
+        }
+    }
 }
 
 /// How much of the previous frame survives into this one, given a frame time.
@@ -492,6 +557,16 @@ void main() {
 }
 "#;
 
+/// The complete vertex shader source, for a test that links against it.
+///
+/// `pub` only so `every_shader_compiles_and_links` can build the same pair the
+/// driver does. Nothing in the app reads this — and the `main` binary compiles
+/// this module too, which is the only reason the exemption needs saying aloud.
+#[allow(dead_code)]
+pub fn vertex_source() -> String {
+    format!("{VERSION}{VERT}")
+}
+
 /// A compiled program plus every uniform location in the superset.
 ///
 /// `Copy` so it can be handed out from under the cache's lock. Every location is
@@ -530,6 +605,22 @@ static GL: LazyLock<Mutex<Gl>> = LazyLock::new(|| {
     })
 });
 
+static REPORTED: LazyLock<Mutex<std::collections::HashSet<&'static str>>> =
+    LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
+
+/// Print `msg` the first time `key` is seen, and never again.
+///
+/// The project cannot look at the window, so a shader view's only way to report
+/// anything is stderr. A blank pane has two very different causes — a program
+/// that would not build, and one that builds but is handed a viewport of zero —
+/// and they are indistinguishable from outside, so the harness says which.
+fn diag(key: &'static str, msg: impl FnOnce() -> String) {
+    let mut seen = REPORTED.lock().unwrap_or_else(PoisonError::into_inner);
+    if seen.insert(key) {
+        eprintln!("tplay: [shader] {}", msg());
+    }
+}
+
 fn draw(
     painter: &egui_glow::Painter,
     info: &egui::PaintCallbackInfo,
@@ -556,6 +647,26 @@ fn run_pass(
 
     let viewport = info.viewport_in_pixels();
     let clip = info.clip_rect_in_pixels();
+    // One-shot, because a per-frame path that reports is a per-frame path that
+    // spams — and because a shader that draws nothing and a shader that is never
+    // reached look identical from outside the window.
+    diag("first-draw", || {
+        format!(
+            "first draw: viewport {}x{} px, clip {}x{}, resolution uniform {:.0}x{:.0}, \
+             {} program",
+            viewport.width_px,
+            viewport.height_px,
+            clip.width_px,
+            clip.height_px,
+            uniforms.resolution[0],
+            uniforms.resolution[1],
+            if sample.is_some() {
+                "feedback"
+            } else {
+                "screen"
+            },
+        )
+    });
     // SAFETY: the context is current on the thread egui is painting on, and
     // `egui_glow`'s own doc for `PaintCallback` promises the state changed here
     // is restored afterwards — which `paint_primitives` does by re-running
@@ -568,7 +679,13 @@ fn run_pass(
     // correct-by-accident.
     unsafe {
         match target {
-            Target::Screen => {} // egui already bound the framebuffer to draw into
+            // **Bind the default framebuffer, do not assume it.** For a single
+            // pass egui has it bound already, but a feedback view's first pass
+            // rebinds to its own target, and the second pass then draws the
+            // *present* into that offscreen texture instead of onto the screen —
+            // which renders correctly, raises no error, and shows a blank pane.
+            // `None` is the default framebuffer, which is where egui paints.
+            Target::Screen => gl.bind_framebuffer(glow::FRAMEBUFFER, None),
             Target::Offscreen(fbo) => fbo.bind(gl),
         }
         if let Some(src) = sample {
@@ -654,16 +771,27 @@ fn resources(
 /// Compile and link one program, or record why it could not be built.
 fn build(gl: &glow::Context, frag: &'static str) -> Option<Program> {
     // SAFETY: `gl` is the context egui is painting with. Every object created
-    // here is deleted on the failure paths, and a program that links is kept
-    // for the process — its shaders are detached and deleted immediately, which
-    // is what leaves the program itself valid.
+    // here is released on every failure path, and on success the two shader
+    // objects are detached and deleted *after* linking, which leaves the program
+    // itself valid and holding its own copy of the compiled code.
     unsafe {
         let program = gl.create_program().ok()?;
+        // Held so they can be released after the link. **A shader must stay
+        // attached until then**: `glAttachShader` before a link only records the
+        // association, and `glDetachShader` undoes it, so detaching straight away
+        // — which this did, to avoid leaking the object — leaves the program with
+        // nothing attached and `glLinkProgram` fails with "no shaders attached to
+        // the program". The shaders are freed on the line below the link, which is
+        // the earliest that is legal.
+        let mut shaders: Vec<glow::Shader> = Vec::with_capacity(2);
         for (stage, source) in [
             (glow::VERTEX_SHADER, format!("{VERSION}{VERT}")),
             (glow::FRAGMENT_SHADER, fragment_source(frag)),
         ] {
             let Some(shader) = gl.create_shader(stage).ok() else {
+                for s in &shaders {
+                    gl.delete_shader(*s);
+                }
                 gl.delete_program(program);
                 return None;
             };
@@ -675,25 +803,42 @@ fn build(gl: &glow::Context, frag: &'static str) -> Option<Program> {
                     stage_name(stage),
                     gl.get_shader_info_log(shader).trim()
                 );
+                for s in &shaders {
+                    gl.delete_shader(*s);
+                }
                 gl.delete_shader(shader);
                 gl.delete_program(program);
                 return None;
             }
             gl.attach_shader(program, shader);
-            // The program holds what it needs once attached, so the shader object
-            // goes now rather than leaking one pair per view for the session.
-            gl.detach_shader(program, shader);
-            gl.delete_shader(shader);
+            shaders.push(shader);
         }
+
         gl.link_program(program);
-        if !gl.get_program_link_status(program) {
+        let linked = gl.get_program_link_status(program);
+        if !linked {
             eprintln!(
                 "tplay: shader program failed to link: {}",
                 gl.get_program_info_log(program).trim()
             );
+        }
+        // Detach and delete whether or not it linked: a linked program keeps its
+        // own copy of the compiled code, and an unlinked one is about to be
+        // deleted anyway.
+        for shader in &shaders {
+            gl.detach_shader(program, *shader);
+            gl.delete_shader(*shader);
+        }
+        if !linked {
             gl.delete_program(program);
             return None;
         }
+        diag("program-built", || {
+            format!(
+                "linked a program from {} bytes of fragment source",
+                frag.len()
+            )
+        });
         let loc = |name: &str| gl.get_uniform_location(program, name);
         Some(Program {
             handle: program,
@@ -729,7 +874,11 @@ fn stage_name(stage: u32) -> &'static str {
 /// ones read as undefined. And a shader cannot reference an input the harness
 /// does not upload, because the harness owns this list, so no test is needed to
 /// keep the two in step.
-fn fragment_source(frag: &str) -> String {
+///
+/// `pub` so `every_shader_compiles_and_links` can validate **exactly** the source
+/// the driver gets, assembled by this same function, rather than a hand-copied
+/// approximation in a test that could drift from the real thing.
+pub fn fragment_source(frag: &str) -> String {
     let mut out = String::with_capacity(frag.len() + 512);
     out.push_str(VERSION);
     out.push_str("out vec4 frag_color;\n");

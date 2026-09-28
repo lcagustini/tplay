@@ -22,7 +22,6 @@ use crate::audio::viz::{compute_bands, VizBuf, VIZ_BANDS};
 use crate::gui::panes::visualizer::gpu::{self, Feedback};
 use crate::gui::theme::Palette;
 use eframe::egui;
-use std::sync::LazyLock;
 
 fn prev_id() -> egui::Id {
     egui::Id::new("tplay.viz.prev.trails")
@@ -43,33 +42,34 @@ fn feedback_id() -> egui::Id {
 /// (frame-rate independence) is pinned on `feedback_for_a_dt` directly.
 const HOLD_SECS: f32 = 1.6;
 
-/// The per-frame zoom, as a fraction. Kept small and **constant** rather than
-/// tied to `dt`: a scale that varied with the frame rate would make the trail's
-/// *shape* frame-rate dependent too, and unlike its length that is not something
-/// a user would read as "the same picture, slower".
-const ZOOM: f32 = 0.0035;
-/// The per-frame rotation, radians. Slow enough to read as a drift.
-const SPIN: f32 = 0.004;
-
 /// Pass one: the new frame, mixed with a transformed copy of the previous one.
 ///
-/// The two constants are substituted in by [`accumulate_shader`] rather than
-/// written into the GLSL, so the numbers this file reasons about and the ones the
-/// shader uses cannot drift. The substitution is textual and runs **once**, into a
-/// `LazyLock`, because the program cache is keyed by the assembled source and a
-/// per-frame `String` would both defeat it and allocate.
-pub const ACCUMULATE_BODY: &str = r#"
+/// `SPIN` and `ZOOM` are written into the GLSL as literals rather than
+/// substituted from Rust constants, and that is a deliberate reversal. The first
+/// version kept them as `const`s and textually replaced them into a `LazyLock`
+/// string, so the program cache keyed on the *substituted* source while
+/// `SHADER_VIEWS` listed the *unsubstituted* one — the test table named a shader
+/// the app never ran, which is exactly the drift the table exists to prevent, and
+/// the substitution is what caused it. Two numbers in a shader body, each with
+/// its value and its reason in a comment beside it, is a smaller risk than the
+/// machinery that was guarding them.
+pub const FRAG: &str = r#"
 void main() {
     vec2 uv = gl_FragCoord.xy / u_resolution;
     vec2 centred = uv - 0.5;
 
-    float c = cos(SPIN);
-    float s = sin(SPIN);
+    // SPIN: the per-frame rotation, radians. Slow enough to read as a drift, and
+    // constant rather than tied to `dt` — a scale that varied with the frame rate
+    // would make the trail's *shape* frame-rate dependent too, and unlike its
+    // length that is not something a user reads as "the same picture, slower".
+    float c = cos(0.004);
+    float s = sin(0.004);
     vec2 spun = vec2(centred.x * c - centred.y * s, centred.x * s + centred.y * c);
     // The inverse transform, sampled: a point in the *new* frame asks where it
     // was in the old one. A positive ZOOM shrinks the trail inward, so the image
     // appears to expand — which is the direction a zoom reads correctly.
-    vec2 prev = (spun * (1.0 - ZOOM) - centred) + 0.5;
+    // ZOOM: the per-frame shrink of the sampled copy, 0.35% a frame.
+    vec2 prev = (spun * (1.0 - 0.0035) - centred) + 0.5;
 
     // Outside the old frame there is nothing to keep. Zeroed rather than
     // discarded so the edge does not sample a clamp-to-edge texel and smear a
@@ -101,18 +101,20 @@ void main() {
 
     float r = length(centred);
     float ring = exp(-pow((r - 0.34) * 7.0, 2.0));
-    vec3 fresh = mix(u_bg.rgb, u_accent.rgb, band) * ring * (0.25 + 1.5 * energy);
+    // **Emission, in the accent token, never tinted toward the background.** The
+    // buffer is cleared to black and this is added to it, so `fresh` is light
+    // being deposited. Multiplying by `mix(u_bg.rgb, u_accent.rgb, band)` — which
+    // is what this did — means that with a flat spectrum, where every band
+    // normalises to 0 and the mix returns the *background* colour, the view
+    // deposits background-coloured light and is therefore invisible against the
+    // background it is drawn on. The spectrum drives how *bright* the ring is,
+    // not what colour it is: a silent passage still shows a dim ring, which is
+    // the idle state every other view here has.
+    vec3 fresh = u_accent.rgb * ring * (0.22 + 1.7 * band) * (0.45 + 0.9 * energy);
 
     frag_color = vec4(old + fresh, 1.0);
 }
 "#;
-
-/// The assembled accumulate pass, with the two constants in.
-static ACCUMULATE: LazyLock<String> = LazyLock::new(|| {
-    ACCUMULATE_BODY
-        .replace("SPIN", &format!("{SPIN:.6}"))
-        .replace("ZOOM", &format!("{ZOOM:.6}"))
-});
 
 /// Pass two: the accumulated target, presented.
 ///
@@ -169,7 +171,7 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &P
 
     let mut uniforms = gpu::Uniforms::pack(viz, prev, palette, rect, painter.ctx());
     uniforms.feedback = gpu::feedback_for_a_dt(uniforms.dt, HOLD_SECS);
-    feedback.draw(painter, rect, ACCUMULATE.as_str(), PRESENT, uniforms);
+    feedback.draw(painter, rect, FRAG, PRESENT, uniforms);
     painter
         .ctx()
         .memory_mut(|m| m.data.insert_temp(feedback_id(), feedback));

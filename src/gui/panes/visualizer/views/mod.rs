@@ -63,10 +63,10 @@ pub const SHADER_VIEWS: &[ShaderView] = &[
         draw: chladni3d::draw,
     },
     // Both passes, because both are programs this view runs and both go through
-    // the same colour and declaration-order sweeps.
+    // the same colour, declaration-order and compile sweeps.
     ShaderView {
         name: "Trails",
-        frags: &[trails::ACCUMULATE_BODY, trails::PRESENT],
+        frags: &[trails::FRAG, trails::PRESENT],
         draw: trails::draw,
     },
 ];

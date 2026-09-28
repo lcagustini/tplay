@@ -25,13 +25,15 @@ float level(float d) {
     return clamp((d + 60.0) / 60.0, 0.0, 1.0);
 }
 
-float hash21(vec2 p) {
-    p = fract(p * vec2(123.34, 456.21));
+// A local, not the parameter: GLSL parameters are `in` and read-only, and
+// `inout` is no escape because every call site passes an expression.
+float hash21(vec2 v) {
+    vec2 p = fract(v * vec2(123.34, 456.21));
     p += dot(p, p + 45.32);
     return fract(p.x * p.y);
 }
 
-float noise2(vec2 p) {
+float vnoise2(vec2 p) {
     vec2 i = floor(p);
     vec2 f = fract(p);
     f = f * f * (3.0 - 2.0 * f);
@@ -48,7 +50,7 @@ float fbm(vec2 p) {
     float sum = 0.0;
     float amp = 0.5;
     for (int i = 0; i < 6; i++) {
-        sum += amp * noise2(p);
+        sum += amp * vnoise2(p);
         p = p * 2.03 + 17.1;
         amp *= 0.5;
     }

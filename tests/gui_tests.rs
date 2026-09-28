@@ -1364,42 +1364,72 @@ mod shader_views {
         }
     }
 
-    /// A framebuffer target is never zero-sized, and always covers the pane.
+    /// A feedback target is never zero-sized, and survives sub-pixel jitter.
     ///
-    /// Both halves are silent failures. `texImage2D` and `glFramebufferTexture2D`
-    /// both reject a zero dimension with `INVALID_VALUE`, and a driver that
-    /// reports an error on a path nobody checks leaves nothing in any log — the
-    /// view is simply blank. And a *smaller* target is not an error at all: the
-    /// sampler stretches it, so the feedback view quietly renders at the wrong
-    /// resolution instead of failing.
+    /// Two failure modes, and the second is the one that bit.
     ///
-    /// The rounding is asserted as "at least the pane", not "equal to the pane",
-    /// because `ceil` is the right direction: a target one pixel short is
-    /// stretched, and one pixel over costs nothing.
+    /// **Zero is a silent blank.** A pane legitimately measures zero on one side
+    /// for a frame while a splitter is dragged, and GL's `texImage2D` and
+    /// `glFramebufferTexture2D` both reject a zero dimension with
+    /// `INVALID_VALUE` — which a driver reports on a path nobody checks, so the
+    /// view is simply blank. `target_size` floors at a whole grid cell, so this is
+    /// now structurally impossible rather than guarded against.
+    ///
+    /// **Jitter is a per-frame rebuild that leaks.** A dock's pane rect moves by
+    /// fractions of a pixel as a splitter settles. An exact size check reads that
+    /// as "the targets are the wrong size", so both targets are rebuilt — and each
+    /// rebuild leaked the pair it replaced, because an `Fbo` cannot implement
+    /// `Drop` (deleting a GL object needs a context). At ~3.5M pixels a pane on a
+    /// HiDPI display that is tens of megabytes per rebuild, sixty times a second.
+    /// The grid is what makes the size change only when the pane really did.
     #[test]
-    fn fbo_size_covers_the_pane_and_is_never_zero() {
-        // Zero, negative and fractional sizes: a pane really does measure zero on
-        // one side for a frame while a splitter is dragged, and that is the case
-        // this exists for.
-        for size in [
-            (0.0, 300.0),
-            (400.0, 0.0),
-            (0.0, 0.0),
-            (-4.0, 300.0),
-            (400.0, -1.0),
-        ] {
-            let (w, h) = gpu::fbo_size(size);
+    fn a_feedback_target_is_quantised_and_never_zero() {
+        let rect = |w: f32, h: f32| egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h));
+        // A collapsed pane, on both axes, and negative for good measure.
+        for r in [rect(0.0, 300.0), rect(400.0, 0.0), rect(0.0, 0.0)] {
+            let (w, h) = gpu::target_size(r, 2.0);
             assert!(
                 w >= 1 && h >= 1,
-                "fbo_size({size:?}) = ({w}, {h}) — a zero dimension is INVALID_VALUE \
-                 and the view is blank with nothing in the log"
+                "target_size({:?}) = ({w}, {h}) — a zero dimension is INVALID_VALUE and \
+                 the view is blank with nothing in the log",
+                r.size()
             );
         }
-        // A fractional pane, which a HiDPI display always is.
-        let (w, h) = gpu::fbo_size((600.4, 300.2));
-        assert!(w >= 601 && h >= 301, "({w}, {h}) must round up, never down");
-        // Exactly integral still covers.
-        assert_eq!(gpu::fbo_size((400.0, 300.0)), (400, 300));
+        // Jitter: the same pane measured a hundredth of a pixel apart must give
+        // the same size, or every frame rebuilds and leaks the pair it replaced.
+        let base = gpu::target_size(rect(400.0, 300.0), 2.0);
+        for dw in [-0.01f32, -0.004, 0.004, 0.01, 0.4] {
+            for dh in [-0.01f32, 0.01, 0.4] {
+                let got = gpu::target_size(rect(400.0 + dw, 300.0 + dh), 2.0);
+                assert_eq!(
+                    got, base,
+                    "a {dw}x{dh} px change moved the target from {base:?} to {got:?} — \
+                     the pane jitters by fractions of a pixel, and every flip rebuilds \
+                     both targets and leaks the pair it replaced"
+                );
+            }
+        }
+        // And it does track a real resize.
+        assert_ne!(gpu::target_size(rect(800.0, 300.0), 2.0), base);
+    }
+
+    /// A feedback target is sized in **physical** pixels, not points.
+    ///
+    /// The pane rect is in points and the screen is in physical pixels; on a
+    /// HiDPI display they differ by the scale factor. Sizing a render target from
+    /// the rect alone therefore gives a target a quarter of the on-screen area at
+    /// 2x, and the trail is drawn at a quarter of the resolution and stretched —
+    /// which looks like a soft, low-resolution smear rather than like a bug.
+    #[test]
+    fn a_feedback_target_scales_with_the_display() {
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0));
+        let at_1x = gpu::target_size(rect, 1.0);
+        let at_2x = gpu::target_size(rect, 2.0);
+        assert!(
+            at_2x.0 >= at_1x.0 * 2 - 64 && at_2x.0 <= at_1x.0 * 2 + 64,
+            "the same pane at 2x scale gave {at_1x:?} and {at_2x:?} — a render target \
+             sized in points is a quarter of the on-screen area on a HiDPI display"
+        );
     }
 
     /// A feedback view's decay is a function of elapsed time, not of frames.
@@ -1542,6 +1572,155 @@ mod shader_views {
             at += line.len() + 1;
         }
         out
+    }
+
+    /// Every shipped shader compiles **and links** against the shared vertex shader.
+    ///
+    /// This is the test that had to exist. Two real defects shipped in the first
+    /// version of these views and *nothing* in the suite could see either:
+    ///
+    /// 1. A function named `noise3`, which is a **GLSL built-in** (`vec3
+    ///    noise3(vec3)`). Overloading it with a `float` return is a hard error —
+    ///    glslang words it as "overloaded functions must have the same return
+    ///    type", which reads like a duplicate definition and is not one.
+    /// 2. `p *= 17.0;` on a function **parameter**, which is `in` and read-only.
+    ///
+    /// Both are invisible to every other check: the shaders are strings, the app
+    /// is headless, and the pane's only symptom is a blank background — which is
+    /// exactly what the documented failure path renders, so a broken shader and
+    /// a working one look the same to every other instrument in the repo. So the
+    /// claim that "shader compilation cannot be tested" was only half true: it
+    /// cannot be tested *in CI*, which has no `glslang`, but it can be tested
+    /// **wherever a validator exists**, and that is every developer machine.
+    ///
+    /// Skipped, not failed, when `glslangValidator` is absent — CI must stay green
+    /// and has no GPU toolchain. A test that hard-failed on a missing external
+    /// tool would be deleted the first time somebody's machine lacked it.
+    ///
+    /// It validates `gpu::fragment_source`'s own output rather than a
+    /// hand-assembled copy, so what is checked is what ships.
+    #[test]
+    fn every_shader_compiles_and_links() {
+        let Ok(validator) = which("glslangValidator") else {
+            eprintln!("skipping: glslangValidator is not installed");
+            return;
+        };
+        let dir = common::test_dir("shader-glsl");
+        let vert = dir.join("vert.vert");
+        std::fs::write(&vert, gpu::vertex_source()).unwrap();
+
+        for (name, body) in bodies() {
+            let path = dir.join(format!("{}.frag", name.replace(' ', "_")));
+            std::fs::write(&path, gpu::fragment_source(body)).unwrap();
+            let out = std::process::Command::new(&validator)
+                .arg("-l")
+                .arg(&vert)
+                .arg(&path)
+                .output()
+                .expect("glslangValidator runs");
+            assert!(
+                out.status.success(),
+                "{name}: the shader does not compile or does not link against the shared \
+                 vertex shader.\n{}\nThe assembled source is at {}",
+                String::from_utf8_lossy(&out.stdout),
+                path.display()
+            );
+        }
+    }
+
+    /// The first `glslangValidator` on `PATH`, or `None`.
+    fn which(tool: &str) -> Result<std::path::PathBuf, ()> {
+        let path = std::env::var_os("PATH").ok_or(())?;
+        std::env::split_paths(&path)
+            .map(|dir| dir.join(tool))
+            .find(|p| p.is_file())
+            .ok_or(())
+    }
+
+    /// No shader's march is expensive enough to stop the window presenting.
+    ///
+    /// The one failure mode with no other guard, because it is invisible *and* it
+    /// takes the whole app down rather than the one view: a shader asking for
+    /// more arithmetic per fragment than a GPU can retire in a frame-time does not
+    /// draw slowly, it stops presenting. Nebula's first version was 10752 noise
+    /// evaluations per fragment — 7.7 billion a frame at 720k fragments — because
+    /// a two-round domain warp is *quadratic* in `fbm` calls and that was
+    /// evaluated inside a 48-step march. The symptom was the entire window
+    /// flashing, and nothing in the repo could see it, because a shader that never
+    /// finishes a frame looks exactly like one that drew nothing.
+    ///
+    /// **This started as a call-graph cost estimator and was deleted.** It was
+    /// wrong twice in ways that made it *pass* — it stopped a function body at the
+    /// first `}` at any indentation, and it could not resolve `const int STEPS`, so
+    /// the loop multiplier silently became 1. Both bugs made the guard useless in
+    /// exactly the situation it existed for, which is the worst failure a test can
+    /// have: not a false alarm, but false confidence. So this counts the two
+    /// things that actually caused the blowup, with substring counting that can be
+    /// verified by reading: how many times the march's field function calls `fbm`,
+    /// and the largest step count in the shader. Their product is a crude proxy for
+    /// per-fragment cost — it cannot tell a cheap call from an expensive one, and
+    /// it does not model octaves — and it is here because a crude check that fires
+    /// beats a precise one that does not.
+    ///
+    /// The real check is whether the view runs at 60 Hz, which needs a GPU and a
+    /// human eye. This is the thing that stops the next 100x from being typed.
+    #[test]
+    fn no_shader_marches_further_than_it_can_afford() {
+        /// `fbm` call sites x the largest step count. Nebula as fixed is 1 x 24;
+        /// the version that broke the window was 7 x 48.
+        const BUDGET: u64 = 150;
+        /// A march longer than this is never worth its cost at 720k fragments,
+        /// whatever the field does.
+        const MAX_STEPS: u64 = 64;
+        for (name, body) in bodies() {
+            let (sites, steps) = march_cost(body);
+            assert!(
+                sites * steps <= BUDGET,
+                "{name}: {sites} `fbm` call sites in the march x {steps} steps is over the \
+                 {BUDGET} budget. This does not slow the view down — it stops the whole \
+                 window presenting, because no frame ever finishes. A domain warp is \
+                 quadratic in fbm calls, and that is what broke this once already."
+            );
+            assert!(
+                steps <= MAX_STEPS,
+                "{name}: {steps} steps is over the {MAX_STEPS} ceiling — at 720k fragments \
+                 every step is a full noise evaluation per pixel"
+            );
+        }
+    }
+
+    /// `(fbm call sites, largest step count)` for a shader, by counting
+    /// substrings. Crude on purpose — see the test's doc comment.
+    fn march_cost(src: &str) -> (u64, u64) {
+        let sites = src.matches("fbm(").count() as u64;
+        // `const int NAME = N;` in this shader, so a loop bounded by `i < STEPS`
+        // resolves. A bound the harness injects (`VIZ_BANDS`) is not in the
+        // source to read, so it is skipped rather than guessed at.
+        let consts: std::collections::HashMap<&str, u64> = src
+            .lines()
+            .filter_map(|l| {
+                let rest = l.trim().strip_prefix("const int ")?;
+                let (name, value) = rest.split_once(" = ")?;
+                Some((
+                    name.trim(),
+                    value.trim().trim_end_matches(';').parse::<u64>().ok()?,
+                ))
+            })
+            .collect();
+        let steps = src
+            .lines()
+            .filter(|l| l.trim_start().starts_with("for"))
+            .filter_map(|l| l.split_once("i < "))
+            .filter_map(|(_, rest)| rest.split_whitespace().next())
+            .filter_map(|tok| {
+                tok.trim_end_matches(';')
+                    .parse::<u64>()
+                    .ok()
+                    .or_else(|| consts.get(tok.trim_end_matches(';')).copied())
+            })
+            .max()
+            .unwrap_or(1);
+        (sites, steps)
     }
 
     /// A theme switch reaches the uniforms.

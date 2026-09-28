@@ -38,15 +38,19 @@ float band_at(float t) {
     return mix(level(u_bands[lo]), level(u_bands[hi]), fract(f));
 }
 
-float hash13(vec3 p) {
-    p = fract(p * 0.3183099 + vec3(0.1, 0.2, 0.3));
+// A local, not the parameter. GLSL function parameters are `in` — read-only — so
+// writing to one is a compile error, and `inout` is not an option either because
+// every call site passes an expression like `i + vec3(1.0, 0.0, 0.0)` and `inout`
+// needs an lvalue.
+float hash13(vec3 v) {
+    vec3 p = fract(v * 0.3183099 + vec3(0.1, 0.2, 0.3));
     p *= 17.0;
     return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
 }
 
 // 3D value noise, one octave. Trilinear-interpolated lattice, which is cheap
 // enough to afford the octave count below and has no gradient to evaluate.
-float noise3(vec3 p) {
+float vnoise3(vec3 p) {
     vec3 i = floor(p);
     vec3 f = fract(p);
     f = f * f * (3.0 - 2.0 * f);
@@ -66,47 +70,34 @@ float noise3(vec3 p) {
 }
 
 
-// Four octaves. Three is visibly coarser at this scale and five is a fifth of
-// the frame budget for detail the march's own stepping hides.
+// Three octaves. See the budget in `main` — this is the multiplier, and it is
+// the cheapest thing to give up when the picture is too expensive.
 float fbm(vec3 p) {
     float sum = 0.0;
     float amp = 0.5;
-    for (int i = 0; i < 4; i++) {
-        sum += amp * noise3(p);
+    for (int i = 0; i < 3; i++) {
+        sum += amp * vnoise3(p);
         p *= 2.02;
         amp *= 0.5;
     }
     return sum;
 }
 
-// The field itself: a domain warp whose strength is the spectrum, so a loud
-// passage shears the volume and a quiet one leaves it smooth. Two warp rounds
-// is what turns fbm's isotropic blobs into the filament structure that reads as
-// a nebula rather than as fog.
-float field(vec3 p) {
-    // Overall energy: the mean of the spectrum, so a passage that is loud
-    // everywhere shears the volume and a quiet one leaves it smooth.
-    float energy = 0.0;
-    for (int i = 0; i < VIZ_BANDS; i++) {
-        energy += level(u_bands[i]);
-    }
-    energy /= float(VIZ_BANDS);
-
-    // The warp's scale follows the band at the height being sampled, so the
-    // volume is fine-grained where the top end is loud and coarse at the bass.
+// The field itself: one fbm, at a frequency the spectrum sets.
+//
+// **No domain warp, and that is the whole point of this function.** The first
+// version had two warp rounds, which is seven `fbm` calls per sample — a domain
+// warp is quadratic in fbm calls — evaluated inside a 48-step march. That is
+// 10752 hash13 per fragment, ~7.7 billion a frame at 720k fragments, and the
+// symptom was not a slow view: it was the whole window flashing, because frames
+// took longer than a compositor swap. The budget is written out in `main` where
+// the step count lives; this is the number that has to respect it.
+float field(vec3 p, float energy) {
+    // The volume's scale follows the band at this sample's height, so it is
+    // fine-grained where the top end is loud and coarse at the bass. Two array
+    // reads — a warp would have cost seven fbm evaluations to do the same job.
     float w = 2.4 + 2.6 * band_at(p.y * 0.5 + 0.5);
-    vec3 q = vec3(
-        fbm(p + vec3(0.0, 0.0, u_time * 0.05)),
-        fbm(p + vec3(3.7, 1.2, u_time * 0.04)),
-        fbm(p + vec3(1.3, 4.1, u_time * 0.06))
-    );
-    vec3 r = vec3(
-        fbm(p + 3.0 * q + vec3(1.7, 9.2, 0.0)),
-        fbm(p + 3.0 * q + vec3(8.3, 2.8, 0.0)),
-        fbm(p + 3.0 * q + vec3(0.0, 4.1, 5.9))
-    );
-    float base = fbm(p + 2.4 * r);
-    return base - (1.0 - energy) * 0.25;
+    return fbm(p * w) - (1.0 - energy) * 0.25;
 }
 
 void main() {
@@ -115,25 +106,39 @@ void main() {
     vec2 uv = gl_FragCoord.xy / u_resolution;
     vec2 centred = (uv - 0.5) * vec2(u_resolution.x / max(u_resolution.y, 1.0), 1.0);
 
-    // A ray per fragment, from a fixed eye through the volume. The march is a
-    // fixed step count: a loop bounded by a varying distance would need a
-    // uniform branch, and a constant count is what makes the cost predictable
-    // enough to survive a 3x-DPI display.
+    // The spectrum's mean, **once per fragment**. It is the same number at
+    // every step of the march, so computing it inside the loop was 48 redundant
+    // passes over the band array per pixel.
+    float energy = 0.0;
+    for (int i = 0; i < VIZ_BANDS; i++) {
+        energy += level(u_bands[i]);
+    }
+    energy /= float(VIZ_BANDS);
+
+    // A ray per fragment, from a fixed eye through the volume. The step count is
+    // the budget, so it is written as the arithmetic rather than picked:
+    // 24 steps x 1 fbm x 3 octaves x 8 hash13 = 576 hash13 per fragment, which
+    // at 720k fragments (a 600x300 pane on a 2x display) is a few milliseconds.
+    // Three octaves rather than four because the fourth is invisible at this
+    // scale and costs a third more; the march's own stepping hides the rest.
+    const int STEPS = 24;
+    const float STEP = 0.14;
     vec3 ro = vec3(0.0, 0.0, -3.2);
     vec3 rd = normalize(vec3(centred, 1.6));
 
     float acc = 0.0;
     float depth = 0.0;
-    const int STEPS = 48;
-    const float STEP = 0.14;
     for (int i = 0; i < STEPS; i++) {
-        vec3 p = ro + rd * depth;
-        float d = field(p);
+        float d = field(ro + rd * depth, energy);
         // A soft density ramp rather than a threshold: a hard one aliases badly
         // because the field is sampled at a fixed step, not at its own scale.
         acc += smoothstep(0.62, 0.98, d) * STEP;
         depth += STEP;
-        if (depth > 3.0) {
+        // Two exits, and the second is the expensive one: a ray that has left
+        // the volume, or that has already accumulated more density than the
+        // 0..1 ramp can show, can never contribute again. Without the second,
+        // every ray pays for the full depth regardless of what it found.
+        if (depth > 3.0 || acc > 1.0) {
             break;
         }
     }
