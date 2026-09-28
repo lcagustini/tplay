@@ -3975,6 +3975,8 @@ dependencies = [
  "dirs",
  "eframe",
  "egui_dock",
+ "egui_glow",
+ "glow 0.16.0",
  "image",
  "lofty",
  "resvg",

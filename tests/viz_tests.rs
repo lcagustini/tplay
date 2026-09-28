@@ -9,12 +9,10 @@
 use eframe::egui;
 use std::f32::consts::PI;
 use tplay::audio::viz::{
-    chladni_field, compute_bands, compute_level, compute_wave, fft_magnitude, VizBuf, FFT_SIZE,
-    VIZ_BANDS,
+    chladni_field, compute_bands, compute_level, compute_wave, fft_magnitude, pick_mode, VizBuf,
+    FFT_SIZE, MARGIN_DB, MAX_MODE, VIZ_BANDS,
 };
-use tplay::gui::panes::visualizer::views::chladni::{
-    pick_mode, segments, GRID, MARGIN_DB, MAX_MODE,
-};
+use tplay::gui::panes::visualizer::views::chladni::{segments, GRID};
 
 /// A band array with the given `(index, dB)` entries and silence everywhere
 /// else, which is what the floored bottom of the range looks like.

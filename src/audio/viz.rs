@@ -353,6 +353,95 @@ pub fn chladni_field(n: usize, m: usize, gx: f32, gy: f32) -> f32 {
     (pi_n_gx.sin() * pi_m_gy.sin() - pi_m_gx.sin() * pi_n_gy.sin()).abs()
 }
 
+/// The highest band index eligible to be a mode number, and so the highest mode
+/// number drawn. Not a taste call: the marching-squares grid cannot resolve a
+/// mode much above this (at mode 30 an oscillation is 1.6 cells, so the
+/// interpolated lines land in the wrong place), and the high bands are single
+/// FFT bins of noise with no music in them, so they are the last thing that
+/// should be choosing a figure.
+pub const MAX_MODE: usize = 10;
+/// `pick_mode` seeds two slots from one band, so it needs a second eligible
+/// band, and it indexes `bands` directly, so it needs a band that exists.
+const _: () = assert!(MAX_MODE >= 2 && MAX_MODE < VIZ_BANDS);
+
+/// How much louder a challenger has to be before the figure changes, in dB.
+pub const MARGIN_DB: f32 = 3.0;
+/// Frames the figure is pinned after a switch — 1.5 s at 60 fps. The insurance
+/// against a genuine two-cycle, which hysteresis always permits, and with the
+/// spectrum now tracked briskly it is the *only* thing bounding how often the
+/// figure can change. It costs no latency: a switch happens the moment the
+/// margin is cleared, and only the switch *after* it waits.
+///
+/// `pub` because the countdown is the caller's to own, and there are now two
+/// callers — each view keeps its own egui-memory key, so switching between them
+/// cannot carry a half-spent hold into the other.
+pub const HOLD_FRAMES: u32 = 90;
+
+/// Pick the plate's mode pair from the smoothed band levels, sticking to the
+/// current one.
+///
+/// The mode numbers are a **discrete** pick, so a bare top-two repaints the
+/// whole plate as a different figure whenever two bands are near-equal at the
+/// top — most frames of most music, and every frame of a quiet passage, where
+/// all 32 bands sit on the `-60` floor and the order is decided by hundredths of
+/// a dB of FFT noise. Measured against the real smoothing constants over a
+/// drifting bass line, a bare top-two switched 60 times in 15 s: four
+/// whole-figure redraws a second.
+///
+/// Smoothing cannot fix that, and the cost of it here is not a taste call
+/// either — a discrete pick has nothing for a smoother to average. So the figure
+/// sticks: keep the current pair unless a challenger is louder by
+/// `MARGIN_DB`, and pin it for `hold` frames after a switch. `hold` is a frame
+/// count rather than a clock, so the caller owns the decrement.
+///
+/// Candidates are band indices `1..=MAX_MODE`, and **the band index is the mode
+/// number**. Band 0 is excluded because `chladni_field` clamps mode 0 to 1, so
+/// it could only ever redraw mode 1's figure — a free source of the exact
+/// strobing this exists to stop.
+pub fn pick_mode(
+    bands: &[f32; VIZ_BANDS],
+    current: Option<(usize, usize)>,
+    hold: u32,
+) -> (usize, usize) {
+    // The top two eligible bands, in one pass and without allocating: this runs
+    // every frame. Seeding both slots with band 1 costs nothing because the
+    // second slot is necessarily overwritten by band 2 (MAX_MODE >= 2).
+    let mut top: [(usize, f32); 2] = [(1, f32::MIN); 2];
+    for (i, &level) in bands.iter().enumerate().skip(1).take(MAX_MODE) {
+        if level > top[0].1 {
+            top[1] = top[0];
+            top[0] = (i, level);
+        } else if level > top[1].1 {
+            top[1] = (i, level);
+        }
+    }
+    let cand = if top[0].0 > top[1].0 {
+        (top[1].0, top[0].0)
+    } else {
+        (top[0].0, top[1].0)
+    };
+
+    let Some((n, m)) = current else { return cand };
+    let eligible = |i: usize| (1..=MAX_MODE).contains(&i);
+    // A stored pair outside the range, or degenerate, is stale — an edited
+    // MAX_MODE, or egui memory that outlived the build that wrote it — and
+    // re-picking beats drawing a blank or an unresolvable plate.
+    if !eligible(n) || !eligible(m) || n == m {
+        return cand;
+    }
+    if hold > 0 || cand == (n, m) {
+        return (n, m);
+    }
+    // The *weaker* band of each pair, not the louder one: a pair is only as
+    // loud as its quieter member, so that is the honest comparison to make.
+    let weak = |p: (usize, usize)| f32::min(bands[p.0], bands[p.1]);
+    if weak(cand) > weak((n, m)) + MARGIN_DB {
+        cand
+    } else {
+        (n, m)
+    }
+}
+
 /// Compute a mirrored wave envelope from the ring buffer for the "wave" view.
 /// Returns `buckets` values in [0, 1] — the peak |sample| per bucket over a
 /// wider time window (~23 ms at 44.1 kHz). One bucket per display column gives

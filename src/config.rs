@@ -33,6 +33,17 @@ pub enum VizView {
     Flame,
     Vu,
     Chladni,
+    /// Drawn by a fragment shader rather than by egui's painter — see
+    /// `gui/panes/visualizer/gpu.rs` for the harness and the two-tier rule.
+    Nebula,
+    Plasma,
+    /// The volumetric reading of the same figure `Chladni` draws as a contour.
+    /// Beside it rather than instead of it: a nodal contour and a settled plate
+    /// are two reads of one field, and a wireframe cannot become a plate.
+    Chladni3D,
+    /// A feedback accumulation — the one view that samples its own previous
+    /// frame, which is why it is the only one needing an owned render target.
+    Trails,
 }
 
 /// Read a `VizView` by name, falling back to the default on one this build has
@@ -60,7 +71,7 @@ fn de_viz_view<'de, D: serde::Deserializer<'de>>(d: D) -> Result<VizView, D::Err
 }
 
 impl VizView {
-    pub const ALL: [VizView; 7] = [
+    pub const ALL: [VizView; 11] = [
         VizView::Bars,
         VizView::Wave,
         VizView::Radial,
@@ -68,6 +79,10 @@ impl VizView {
         VizView::Flame,
         VizView::Vu,
         VizView::Chladni,
+        VizView::Nebula,
+        VizView::Plasma,
+        VizView::Chladni3D,
+        VizView::Trails,
     ];
 
     /// Dropdown label in the visualizer pane header.
@@ -80,6 +95,10 @@ impl VizView {
             VizView::Flame => "Flame",
             VizView::Vu => "VU meter",
             VizView::Chladni => "Chladni",
+            VizView::Nebula => "Nebula",
+            VizView::Plasma => "Plasma",
+            VizView::Chladni3D => "Chladni 3D",
+            VizView::Trails => "Trails",
         }
     }
 }

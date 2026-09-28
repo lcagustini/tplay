@@ -18,6 +18,11 @@ serde_json = "1.0"
 dirs      = "5.0"
 # Docking layout: tab drag/split/tear-off; serde for layout persistence
 egui_dock = { version = "0.15", features = ["serde"] }
+# The visualizer's shader views. Both are already in the tree as eframe's `glow`
+# rendering backend, so naming them compiles nothing new — and the version is
+# load-bearing: the lock also holds a `glow 0.14` that `HasContext` cannot unify.
+glow     = "0.16"
+egui_glow = "0.30"
 # PNG+JPEG decode for album covers
 image     = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 # Theme icon rasterization. default-features = false drops `text` + `system-fonts`,

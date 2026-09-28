@@ -6,6 +6,7 @@ use crate::app::{TPlayApp, VizView};
 use crate::gui::theme::ThemeState;
 use eframe::egui;
 
+pub mod gpu;
 pub mod views;
 
 pub fn visualizer_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui) {
@@ -57,5 +58,16 @@ pub fn visualizer_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::U
         VizView::Flame => views::flame::draw(painter, rect, app.viz(), &p),
         VizView::Vu => views::vu::draw(painter, rect, app.viz(), &p),
         VizView::Chladni => views::chladni::draw(painter, rect, app.viz(), &p),
+        // A shader view is dispatched through the table rather than by a direct
+        // call, so the table is the registry the app itself reads and cannot fall
+        // behind what ships. The match stays exhaustive over `VizView`, so adding
+        // a variant without an arm does not build; and a name in the table that
+        // does not match any variant routes nothing, which is what
+        // `the_shader_table_and_the_view_match_agree` is for.
+        other => {
+            if let Some(view) = views::SHADER_VIEWS.iter().find(|v| v.name == other.name()) {
+                (view.draw)(painter, rect, app.viz(), &p);
+            }
+        }
     }
 }

@@ -4,8 +4,10 @@ mod common;
 
 use eframe::egui::{self, Color32, FontFamily};
 use std::path::Path;
-use tplay::app::Pane;
+use tplay::app::{Pane, VizView};
 use tplay::audio::eq::EqShared;
+use tplay::audio::viz::{VizBuf, VIZ_BANDS};
+use tplay::gui::panes::visualizer::views::SHADER_VIEWS;
 use tplay::gui::theme::{rasterize_icon, Base, Icon, Layout, Themes, DEFAULT_THEME_ID};
 
 #[test]
@@ -979,6 +981,599 @@ fn no_view_fills_a_closed_path() {
                  + one `epaint::Mesh`.",
                 path.display()
             );
+        }
+    }
+}
+
+/// The shader-drawn views: the four properties that hold them together, and the
+/// three ways a new one could quietly break.
+///
+/// A shader view's whole interface is a `draw` fn and a shader string, identical
+/// in shape to a CPU view's `draw`. That is what makes adding one the same six
+/// steps as adding a CPU view — but it is also a property of *convention*, so
+/// nothing but a test holds it: a view that reached around the harness, or
+/// painted its own background, or named a colour, would compile, pass every
+/// behavioural test, and look correct in every other respect.
+///
+/// The colour rule is the one with a real user-visible failure. A hardcoded hex
+/// ignores `theme.json`, so that view is the only one that does not follow a
+/// mid-session theme switch — and nothing else in the app can see that, which is
+/// exactly why `contrast_tests.rs` and `recolor_icons.py --check` both exist as
+/// separate gates for the same reason.
+mod shader_views {
+    use super::*;
+    use tplay::gui::panes::visualizer::gpu;
+    use tplay::gui::theme::Palette;
+
+    fn src(relative: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+
+    /// A pane-sized rect and a real `VizBuf`, so `draw` runs its whole CPU half.
+    fn pane() -> (egui::Rect, VizBuf) {
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0));
+        let viz = VizBuf::new();
+        // A window rather than silence: a view that reads the buffer should see
+        // a full-scale tone, so a smoothing key left unset is distinguishable
+        // from one that is working.
+        for _ in 0..4096 {
+            viz.push(0.5);
+        }
+        (rect, viz)
+    }
+
+    type ShaderDraw = fn(&egui::Painter, egui::Rect, &VizBuf, &Palette);
+
+    /// Run one shader view's real `draw` in a headless `Context` and hand back
+    /// the primitives it produced.
+    ///
+    /// The callback body never runs — there is no GL context here — and that is
+    /// the point. Everything a view does on the CPU (the band smoothing, the
+    /// uniform packing, the single queued callback and the rect it names) all
+    /// happens in `draw`, so the whole testable half of a shader view is
+    /// reachable without a GPU. The half that is not reachable is the shader
+    /// itself, and no amount of headless testing changes that.
+    fn primitives(
+        draw: Option<ShaderDraw>,
+        viz: &VizBuf,
+        rect: egui::Rect,
+    ) -> Vec<egui::epaint::ClippedShape> {
+        let ctx = egui::Context::default();
+        let palette = Themes::load()
+            .get(DEFAULT_THEME_ID)
+            .expect("the default theme is always present")
+            .palette;
+        ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                if let Some(draw) = draw {
+                    draw(ui.painter(), rect, viz, &palette);
+                }
+            });
+        })
+        .shapes
+    }
+
+    fn callbacks(shapes: &[egui::epaint::ClippedShape]) -> Vec<&egui::PaintCallback> {
+        shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Callback(cb) => Some(cb),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A view contributes exactly one callback, and it covers exactly the pane.
+    ///
+    /// One is what makes this cheap: the callback runs inside a paint, so a
+    /// hundred of them would be a hundred fullscreen draws. Covering the pane is
+    /// what makes it *visible* — a callback whose rect is the panel rather than
+    /// the drawing area paints over the header, and a zero-sized one paints
+    /// nothing at all, and neither shows up anywhere but here.
+    #[test]
+    fn every_shader_view_asks_for_exactly_one_callback() {
+        assert!(
+            !SHADER_VIEWS.is_empty(),
+            "the table is empty, so this sweep would pass vacuously"
+        );
+        let (rect, viz) = pane();
+        for view in SHADER_VIEWS {
+            let shapes = primitives(Some(view.draw), &viz, rect);
+            let cbs = callbacks(&shapes);
+            assert_eq!(
+                cbs.len(),
+                1,
+                "{}: a shader view must queue exactly one callback — the callback body \
+                 runs inside the paint, so more than one is more than one fullscreen \
+                 draw (got {} callbacks in {} primitives)",
+                view.name,
+                cbs.len(),
+                shapes.len()
+            );
+            assert_eq!(
+                cbs[0].rect, rect,
+                "{}: the callback must cover the pane rect it was handed, or it paints \
+                 over the header or nothing at all",
+                view.name
+            );
+        }
+    }
+
+    /// Every shader reads the palette, so a theme switch reaches it.
+    ///
+    /// The complement to the hex check above, and the one that carries the weight:
+    /// a hardcoded *literal* is a colour someone typed, but a shader that simply
+    /// never mentions a palette uniform ignores the theme just as thoroughly and
+    /// cannot be caught by pattern-matching literals at all. This is the property
+    /// that says "palette-only" rather than "no hex".
+    #[test]
+    fn every_shader_reads_the_palette() {
+        const PALETTE_UNIFORMS: [&str; 3] = ["u_bg", "u_accent", "u_progress_fill"];
+        for (name, body) in bodies() {
+            assert!(
+                PALETTE_UNIFORMS.iter().any(|u| body.contains(u)),
+                "{name}: no palette uniform is referenced, so this view cannot follow a \
+                 mid-session theme switch — every CPU view paints from `palette`, and a \
+                 shader is the one place a colour could be a literal instead"
+            );
+        }
+    }
+
+    /// A view adds nothing of its own beyond the callback.
+    ///
+    /// Counted against an empty run of the same panel, because `CentralPanel`
+    /// emits a background of its own and that is not the view's doing. What this
+    /// rules out is a view painting anything directly — a second background
+    /// fill, a border, a placeholder for "no GL here" — which would either cover
+    /// the shader or stand in for it, and in both cases the shader view would
+    /// still look deliberate.
+    #[test]
+    fn a_shader_view_queues_a_callback_and_nothing_else() {
+        let (rect, viz) = pane();
+        let baseline = primitives(None, &viz, rect).len();
+        for view in SHADER_VIEWS {
+            let shapes = primitives(Some(view.draw), &viz, rect);
+            assert_eq!(
+                shapes.len(),
+                baseline + 1,
+                "{}: a shader view must add the callback and nothing else — {} shapes \
+                 beyond the panel's own {} means it painted something itself",
+                view.name,
+                shapes.len() - baseline,
+                baseline
+            );
+        }
+    }
+
+    /// No shader hardcodes a colour.
+    ///
+    /// Every CPU view paints from `palette`, so a mid-session theme switch moves
+    /// all of them at once (`theme::apply` runs every frame). A hex literal in a
+    /// shader is the one view that does not follow — and nothing else in the app
+    /// can see it, which is why this is a separate gate for the same reason
+    /// `contrast_tests.rs` and `recolor_icons.py --check` are.
+    ///
+    /// No shader hardcodes a colour.
+    ///
+    /// Every CPU view paints from `palette`, so a mid-session theme switch moves
+    /// all of them at once (`theme::apply` runs every frame). A literal in a
+    /// shader is the one view that does not follow — and nothing else in the app
+    /// can see it, which is why this is a separate gate for the same reason
+    /// `contrast_tests.rs` and `recolor_icons.py --check` are.
+    ///
+    /// The patterns are the two unambiguous spellings, `#rrggbb` and `rgb(...)`.
+    /// A bare `vec3(0.2, 0.4, 0.9)` is deliberately **not** matched, and the
+    /// reason is that it cannot be: the eight lattice corners of a value-noise
+    /// function are written `vec3(0.0,0.0,0.0)` through `vec3(1.0,1.0,1.0)`, and
+    /// no textual rule separates those from a colour. Guessing here would either
+    /// flag every noise function or miss every dark colour, so the honest
+    /// position is that this catches the obvious spellings and a hand-written
+    /// `vec3` colour is caught by review and by `contrast_tests.rs`.
+    #[test]
+    fn no_shader_hardcodes_a_colour() {
+        for (name, body) in bodies() {
+            for (n, line) in body.lines().enumerate() {
+                let code = line.trim_start().trim_start_matches("//");
+                for (what, hit) in [
+                    ("a hex literal", hex_in(code)),
+                    ("an rgb() literal", code.contains("rgb(")),
+                ] {
+                    assert!(
+                        !hit,
+                        "{}:{} has {what} — `{line}`\nA shader colour must come from the \
+                         palette uniform, or this view ignores a mid-session theme switch.",
+                        name,
+                        n + 1
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every GLSL body the app ships, as `(view name, source)`.
+    ///
+    /// Flattened from the table's `frags` rather than reading one `frag` per view:
+    /// `Trails` runs two programs, and a sweep that only saw the first would leave
+    /// the second — which is half of what that view draws — unchecked.
+    fn bodies() -> Vec<(&'static str, &'static str)> {
+        let mut out = Vec::new();
+        for view in SHADER_VIEWS {
+            for body in view.frags {
+                out.push((view.name, *body));
+            }
+        }
+        out
+    }
+
+    /// `#abc` or `#aabbcc`, and not a `#` in a preprocessor line or a comment.
+    fn hex_in(line: &str) -> bool {
+        if line.trim_start().starts_with('#') && !line.contains(' ') {
+            return false; // `#version`, `#define`
+        }
+        let bytes = line.as_bytes();
+        bytes.iter().enumerate().any(|(at, &b)| {
+            b == b'#'
+                && bytes
+                    .get(at + 1..at + 7)
+                    .is_some_and(|rest| rest.iter().all(u8::is_ascii_hexdigit))
+                && bytes.get(at + 7).is_none_or(|c| !c.is_ascii_hexdigit())
+        })
+    }
+
+    /// The harness names no view.
+    ///
+    /// "A new visualization never means editing the harness" is the load-bearing
+    /// claim of the whole design, and it is invisible in every other way: a
+    /// harness that grew one view's uniform or special-cased one view's shader
+    /// would compile, pass every behavioural test, and render correctly. So the
+    /// only thing that can see it is the harness's own source.
+    ///
+    /// The `SHADER_VIEWS`/`Uniforms` names are the permitted vocabulary — the
+    /// harness is *supposed* to know what a shader view is. What it may not do
+    /// is name one.
+    #[test]
+    fn the_gl_harness_never_names_a_view() {
+        let text = src("src/gui/panes/visualizer/gpu.rs");
+        // Strip comment lines, so the module docs may discuss views by name.
+        let code: String = text
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for name in VizView::ALL.iter().map(|v| v.name()) {
+            assert!(
+                !code.contains(name),
+                "gpu.rs names the view `{name}` — the harness is handed a shader and a \
+                 rect and must not know which look it is drawing. A view-specific \
+                 uniform or special case here is what this test exists to stop."
+            );
+        }
+    }
+
+    /// Every shader view is reachable, and the table has nothing unreachable.
+    ///
+    /// Three ways to get this wrong, all silent: a table row whose `draw` is never
+    /// called (the view exists and is invisible), a `VizView` variant that draws
+    /// nothing, and a name in one list that is not in the other.
+    #[test]
+    fn the_shader_table_and_the_view_match_agree() {
+        let names: Vec<&str> = VizView::ALL.iter().map(|v| v.name()).collect();
+        let table: Vec<&str> = SHADER_VIEWS.iter().map(|v| v.name).collect();
+        for name in &table {
+            assert!(
+                names.contains(name),
+                "SHADER_VIEWS has `{name}`, which is not a VizView name — the dispatch \
+                 looks the row up by `VizView::name()`, so this row is unreachable"
+            );
+        }
+        // The match arm that dispatches them. Not a name check: a shader view is
+        // reached through the table, so no view name appears in the pane at all.
+        // What has to be there is the fall-through arm, and it is the *only* thing
+        // that can route a table row — a match with seven direct calls and no
+        // fall-through compiles, and every shader view renders nothing.
+        let pane = src("src/gui/panes/visualizer.rs");
+        let code: String = pane
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            code.contains("SHADER_VIEWS"),
+            "visualizer.rs has no arm dispatching through SHADER_VIEWS, so every shader \
+             view in the table is unreachable — the match is exhaustive over the seven \
+             CPU views and silently draws nothing for the rest"
+        );
+    }
+
+    /// Every view has its own egui-memory key.
+    ///
+    /// A smoothing buffer shared between two views means switching from one to
+    /// the other starts the new view off holding the old view's history, and
+    /// switching back finds a buffer neither of them fully owns. Nothing shows
+    /// that: both views animate, and the artifact is one frame of the wrong
+    /// values at the moment of the switch.
+    #[test]
+    fn every_view_keys_its_own_memory() {
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/gui/panes/visualizer/views");
+        let mut seen: Vec<(String, String)> = Vec::new();
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            let owner = path.file_stem().unwrap().to_string_lossy().into_owned();
+            let text = std::fs::read_to_string(&path).unwrap();
+            // Only the quoted form counts: an unquoted mention is prose in a
+            // comment, and a key is always a string literal. The match text is
+            // the prefix *including* its opening quote, so the key is read from
+            // just past it — taking the match itself would yield the same
+            // truncated string for every key in the tree.
+            const PREFIX: &str = "\"tplay.viz.";
+            for (at, _) in text.match_indices(PREFIX) {
+                let key: String = text[at + PREFIX.len()..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '_')
+                    .collect();
+                assert!(
+                    !seen.iter().any(|(k, _)| *k == key),
+                    "egui-memory key `{key}` is claimed by two views ({} and {owner}) — \
+                     each view owns its own, or switching between them carries one's \
+                     state into the other",
+                    seen.iter()
+                        .find(|(k, _)| *k == key)
+                        .map(|(_, o)| o.as_str())
+                        .unwrap_or("?")
+                );
+                seen.push((key, owner.clone()));
+            }
+        }
+        assert!(
+            !seen.is_empty(),
+            "no view declares an egui-memory key, so this sweep is checking nothing"
+        );
+    }
+
+    /// A view that reads a superset uniform is reading what the view packed.
+    ///
+    /// The general form of "does `u_modes` reach the GPU", and the reason a
+    /// per-view test would be a maintenance tax: `u_modes` is only meaningful to
+    /// a view whose shader uses it, and a shader that silently stopped using it
+    /// would pass a test written against the *old* shader. Matching the shader's
+    /// own reference against the view's packing means the test is about the
+    /// contract rather than about one view's current source.
+    ///
+    /// `u_prev` is excluded on purpose: it is a sampler and the harness owns it,
+    /// and no shipped view declares one.
+    #[test]
+    fn a_superset_uniform_reaches_a_view_that_uses_it() {
+        for view in SHADER_VIEWS {
+            if !view.frags.iter().any(|f| f.contains("u_modes")) {
+                continue;
+            }
+            let text = src(&format!(
+                "src/gui/panes/visualizer/views/{}.rs",
+                view.name.to_lowercase().replace(' ', "")
+            ));
+            assert!(
+                text.contains("uniforms.modes"),
+                "{}: its shader reads `u_modes`, so it must pack the mode pair into them",
+                view.name
+            );
+        }
+    }
+
+    /// A framebuffer target is never zero-sized, and always covers the pane.
+    ///
+    /// Both halves are silent failures. `texImage2D` and `glFramebufferTexture2D`
+    /// both reject a zero dimension with `INVALID_VALUE`, and a driver that
+    /// reports an error on a path nobody checks leaves nothing in any log — the
+    /// view is simply blank. And a *smaller* target is not an error at all: the
+    /// sampler stretches it, so the feedback view quietly renders at the wrong
+    /// resolution instead of failing.
+    ///
+    /// The rounding is asserted as "at least the pane", not "equal to the pane",
+    /// because `ceil` is the right direction: a target one pixel short is
+    /// stretched, and one pixel over costs nothing.
+    #[test]
+    fn fbo_size_covers_the_pane_and_is_never_zero() {
+        // Zero, negative and fractional sizes: a pane really does measure zero on
+        // one side for a frame while a splitter is dragged, and that is the case
+        // this exists for.
+        for size in [
+            (0.0, 300.0),
+            (400.0, 0.0),
+            (0.0, 0.0),
+            (-4.0, 300.0),
+            (400.0, -1.0),
+        ] {
+            let (w, h) = gpu::fbo_size(size);
+            assert!(
+                w >= 1 && h >= 1,
+                "fbo_size({size:?}) = ({w}, {h}) — a zero dimension is INVALID_VALUE \
+                 and the view is blank with nothing in the log"
+            );
+        }
+        // A fractional pane, which a HiDPI display always is.
+        let (w, h) = gpu::fbo_size((600.4, 300.2));
+        assert!(w >= 601 && h >= 301, "({w}, {h}) must round up, never down");
+        // Exactly integral still covers.
+        assert_eq!(gpu::fbo_size((400.0, 300.0)), (400, 300));
+    }
+
+    /// A feedback view's decay is a function of elapsed time, not of frames.
+    ///
+    /// This is the whole reason `feedback_for_a_dt` is a function at all. A
+    /// per-frame multiplier is a fixed fraction per frame, so a trail computed as
+    /// `frame * 0.95` is 20 frames of history at 60 Hz and 40 at 30 Hz — twice as
+    /// long — and nothing about the result looks wrong. A screenshot cannot see
+    /// it, a frame counter cannot see it, and it is the only thing that decides
+    /// whether the trail means the same duration on any machine.
+    ///
+    /// Asserted as a *product over a fixed wall-clock duration* rather than as a
+    /// per-frame comparison, because that is the property: the same number of
+    /// milliseconds of decay must leave the same amount behind.
+    #[test]
+    fn feedback_for_a_dt_is_frame_rate_independent() {
+        const HOLD: f32 = 1.6;
+        /// How much survives half a second of decay, at each rate.
+        fn survivors_per_half_second(rate: f32) -> f32 {
+            let dt = 1.0 / rate;
+            let mut kept = 1.0f32;
+            // 0.5s at `rate` fps, by repeated application — which is exactly what
+            // the shader accumulates over.
+            for _ in 0..(0.5 * rate).round() as u32 {
+                kept *= gpu::feedback_for_a_dt(dt, HOLD);
+            }
+            kept
+        }
+        let at_30 = survivors_per_half_second(30.0);
+        let at_60 = survivors_per_half_second(60.0);
+        let at_144 = survivors_per_half_second(144.0);
+        // 1e-4 is 0.01% — three orders of magnitude tighter than the frame-rate
+        // gap being ruled out, and loose enough for float rounding over 500
+        // multiplications.
+        assert!(
+            (at_30 - at_60).abs() < 1e-4 && (at_60 - at_144).abs() < 1e-4,
+            "half a second of decay must leave the same amount at any rate — \
+             30fps {at_30:.6}, 60fps {at_60:.6}, 144fps {at_144:.6}"
+        );
+
+        // And the constant is the time constant, so `HOLD_SECS` of decay is
+        // 1/e of the frame by construction rather than by a fitted number.
+        let after_hold = gpu::feedback_for_a_dt(HOLD, HOLD);
+        assert!(
+            (after_hold - std::f32::consts::E.min(1.0 / std::f32::consts::E)).abs() < 1e-5,
+            "after one HOLD_SECS, {after_hold} of the frame should remain"
+        );
+    }
+
+    /// A degenerate frame time cannot resurrect a frame that should be gone.
+    ///
+    /// `dt` is read from egui's input, so on the first frame of a session it can
+    /// be zero, and a predicted value is never negative in a way the app intends.
+    /// `(dt / hold).exp()` with `dt == 0` is exactly 1.0 — the *whole* previous
+    /// frame kept, which is the permanent smear the decay exists to prevent. The
+    /// guard is what stops a hitch from turning the view into a frozen frame.
+    #[test]
+    fn feedback_refuses_a_degenerate_dt() {
+        const HOLD: f32 = 1.6;
+        for dt in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(
+                gpu::feedback_for_a_dt(dt, HOLD),
+                0.0,
+                "dt {dt} must decay to nothing, not keep the previous frame"
+            );
+        }
+        // A real dt never returns a full-strength frame either.
+        assert!(gpu::feedback_for_a_dt(1e-9, HOLD) < 1.0);
+    }
+
+    /// Every GLSL function is declared before the first use of it.
+    ///
+    /// **This is the one shader defect a compiler catches and CI never will**, and
+    /// it shipped in two of the four views on the day they were written: `noise3`
+    /// called `hash13` from below it, and `fbm` called `noise2` from below it.
+    /// GLSL has no forward declarations, so both are hard compile errors — on
+    /// every driver, every machine, every run — and the headless tests cannot see
+    /// either. This is the same gap as everything else about shader compilation,
+    /// except that this one has a *cheap deterministic answer* and needs no
+    /// context to get it.
+    ///
+    /// The rule is that a function's name must appear as a definition before any
+    /// use, so each definition's first mention in the whole source must be itself.
+    /// Comment lines are skipped, so a comment may legitimately mention a
+    /// function before it exists.
+    #[test]
+    fn every_glsl_function_is_declared_before_use() {
+        for (view, body) in bodies() {
+            for (line, name, at) in glsl_definitions(body) {
+                assert_eq!(
+                    body.find(&format!("{name}(")),
+                    Some(at),
+                    "{}:{} defines `{name}`, which GLSL requires to appear before its first \
+                     use. GLSL has no forward declarations, so this is a hard compile error on \
+                     every driver, and the headless tests cannot see it.",
+                    view,
+                    line
+                );
+            }
+        }
+    }
+
+    /// Every GLSL function definition in `src`, as `(line number, name, byte offset)`.
+    ///
+    /// Recognised by a **return type**, not by a `(` and a `{`: `for (int i = 0;
+    /// i < 4; i++) {` matches that shape and is not a definition. The offset is
+    /// returned rather than recomputed by a second helper, because two parsers of
+    /// the same source are two answers and this test compares them.
+    fn glsl_definitions(src: &str) -> Vec<(usize, String, usize)> {
+        const TYPES: [&str; 10] = [
+            "float", "int", "uint", "bool", "void", "vec2", "vec3", "vec4", "mat3", "mat4",
+        ];
+        let mut out = Vec::new();
+        let mut at = 0usize;
+        for (n, line) in src.lines().enumerate() {
+            let trimmed = line.trim_start();
+            let code = trimmed.trim_start_matches("//");
+            let mut words = code.split_whitespace();
+            if TYPES.contains(&words.next().unwrap_or_default()) {
+                if let Some(head) = words.next() {
+                    let name = head.split('(').next().unwrap_or_default();
+                    let is_name = !name.is_empty()
+                        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+                    if is_name
+                        && head.contains('(')
+                        && code[code.find('(').unwrap_or(0)..].contains(") {")
+                    {
+                        // The offset of the *name*, not of the line: that is what
+                        // `find("name(")` reports, and the two have to be the same
+                        // number for the comparison to mean anything.
+                        let within = code.find(name).unwrap_or(0);
+                        out.push((
+                            n + 1,
+                            name.to_owned(),
+                            at + (line.len() - trimmed.len()) + within,
+                        ));
+                    }
+                }
+            }
+            at += line.len() + 1;
+        }
+        out
+    }
+
+    /// A theme switch reaches the uniforms.
+    ///
+    /// The colour rule is only real if the palette actually arrives, and the
+    /// direction that matters is the one a screenshot cannot show: a view drawn
+    /// under `dark` must differ from the same view under `retro`, or it is
+    /// ignoring the theme whatever its shader says.
+    #[test]
+    fn a_shader_view_reads_its_palette() {
+        let (rect, viz) = pane();
+        let mut seen: Vec<[f32; 4]> = Vec::new();
+        for id in ["dark", "retro", "neon"] {
+            let themes = Themes::load();
+            let theme = themes.get(id).expect("a bundled theme");
+            let u = gpu::Uniforms::pack(
+                &viz,
+                [-60.0; VIZ_BANDS],
+                &theme.palette,
+                rect,
+                &egui::Context::default(),
+            );
+            assert_ne!(
+                u.accent, [0.0; 4],
+                "{id}: the accent uniform is black, so a shader using it would draw nothing"
+            );
+            assert!(
+                !seen.contains(&u.accent),
+                "{id}: the same accent as another bundled theme — the pack is not reading \
+                 the palette it was handed"
+            );
+            seen.push(u.accent);
         }
     }
 }
