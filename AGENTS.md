@@ -78,7 +78,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window. LAN-
 - `cargo test` — runs all tests.
 - `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` — what CI gates on, so run them before pushing.
 - `[profile.release] opt-level` is deliberately absent — 3 is Cargo's default.
-- **CI** (`.github/workflows/ci.yml`) — one job on `ubuntu-latest`: `fmt` → `clippy -D warnings` → `test`, then, **only on a push to `main` and only because those passed**, a release build packaged as `tplay-linux-x86_64.tar.gz` (the binary + `themes/`, because `theme_dirs()` looks in `<exe_dir>/themes`) and attached to a GitHub release. The tag is `v<minor from Cargo.toml>.<run_number>`, so the version needs no bot commit to bump it. `libasound2-dev` is the only system package: X11/xkbcommon/wayland/GL all arrive via dlopen, and the tests are headless, so there is no xvfb and no audio device.
+- **CI** (`.github/workflows/ci.yml`) — **a `v*` tag push is the only trigger**: one job on `ubuntu-latest` runs `fmt` → `clippy -D warnings` → `test`, then, **only because those passed**, a release build packaged as `tplay-linux-x86_64.tar.gz` (the binary + `themes/`, because `theme_dirs()` looks in `<exe_dir>/themes`) and attached to a GitHub release at that tag. The version is the tag you pushed, so nothing is bumped in `Cargo.toml` to release — but there is also **no CI on plain pushes or pull requests**, so nothing checks a commit before it is tagged. `libasound2-dev` is the only system package: X11/xkbcommon/wayland/GL all arrive via dlopen, and the tests are headless, so there is no xvfb and no audio device.
 
 ## Dependencies — each one is load-bearing
 

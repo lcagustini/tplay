@@ -1,14 +1,16 @@
 name: CI
 
+# A version tag is the only trigger: pushing v1.4.0 runs the gates, and — only
+# because they passed — the release. The version is the tag you typed, so
+# nothing has to be bumped in Cargo.toml to release.
+
 on:
   push:
-    branches: [main]
-  pull_request:
+    tags: ["v*"]
 
 jobs:
   ci:
     runs-on: ubuntu-latest
-    # Only the release step needs this; the gates above are read-only.
     permissions:
       contents: write
     steps:
@@ -28,29 +30,16 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
 
-      # Release: a push to main, and only because the three gates above passed.
-      # The tag's series is the minor in Cargo.toml and the counter is the run
-      # number, so the version needs no commit to bump it.
-      - if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        id: ver
-        run: |
-          series=$(sed -n 's/^version = "\([0-9]*\.[0-9]*\)\..*/\1/p' Cargo.toml)
-          echo "tag=v${series}.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
-
       # themes/ ships because theme_dirs() looks in <exe_dir>/themes — without
       # it the binary renders with no icons.
-      - if: steps.ver.outputs.tag
-        run: |
+      - run: |
           cargo build --release --locked
           mkdir -p dist/tplay
           cp target/release/tplay dist/tplay/
           cp -r themes dist/tplay/
           tar -czf dist/tplay-linux-x86_64.tar.gz -C dist tplay
 
-      - if: steps.ver.outputs.tag
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.ver.outputs.tag }}
-          name: tplay ${{ steps.ver.outputs.tag }}
           generate_release_notes: true
           files: dist/tplay-linux-x86_64.tar.gz
