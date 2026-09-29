@@ -31,18 +31,12 @@ pub enum VizView {
     Radial,
     Spectrogram,
     Flame,
-    Vu,
     Chladni,
-    /// Drawn by a fragment shader rather than by egui's painter — see
-    /// `gui/panes/visualizer/gpu.rs` for the harness and the two-tier rule.
     Nebula,
     Plasma,
-    /// The volumetric reading of the same figure `Chladni` draws as a contour.
-    /// Beside it rather than instead of it: a nodal contour and a settled plate
-    /// are two reads of one field, and a wireframe cannot become a plate.
-    Chladni3D,
-    /// A feedback accumulation — the one view that samples its own previous
-    /// frame, which is why it is the only one needing an owned render target.
+    /// A feedback accumulation, and the view that keeps its own previous frame
+    /// rather than only the current one. So does `Spectrogram`, which is why
+    /// both need an owned render target.
     Trails,
 }
 
@@ -62,26 +56,45 @@ pub enum VizView {
 /// the one other place the two answers disagreed.
 fn de_viz_view<'de, D: serde::Deserializer<'de>>(d: D) -> Result<VizView, D::Error> {
     String::deserialize(d).map_or(Ok(VizView::default()), |name| {
-        // `from_value` rather than `from_str`: serde has already decoded the
-        // JSON string, so the text still has quoting applied before the variant
-        // name is matched. This is the stdlib's own way to re-enter the derived
+        // **The dropdown's label first, then the Rust variant name.**
+        //
+        // These are two spellings of one value and they are not always the same
+        // string: `VizView::name()` is what the picker shows, and a view spelled
+        // for people does not match the derived `Serialize`, which writes the
+        // variant name. Every shipped view currently agrees, and this is what
+        // keeps the next one honest. This
+        // function used to try only the variant spelling, so a hand-edited config
+        // naming a view the way the UI spells it read as *unrecognised* and fell
+        // back to the default. That is the exact failure `de_viz_view` exists to
+        // prevent, arriving through the door it was built to guard — and it was
+        // invisible until the visualizer's dispatch started keying on `name()` as
+        // well, which is the only reason it was ever found.
+        //
+        // Both spellings are accepted, so no config either way stops loading, and
+        // `Serialize` is left writing the variant name, so the on-disk format does
+        // not move. `every_view_name_round_trips_through_the_config` keeps the two
+        // in step.
+        if let Some(v) = VizView::ALL.iter().copied().find(|v| v.name() == name) {
+            return Ok(v);
+        }
+        // `from_value` rather than `from_str`: serde has already decoded the JSON
+        // string, so the text still needs quoting applied before the variant name
+        // is matched. This is the stdlib's own way to re-enter the derived
         // `Deserialize` with a value it already holds.
         Ok(serde_json::from_value(serde_json::Value::String(name)).unwrap_or_default())
     })
 }
 
 impl VizView {
-    pub const ALL: [VizView; 11] = [
+    pub const ALL: [VizView; 9] = [
         VizView::Bars,
         VizView::Wave,
         VizView::Radial,
         VizView::Spectrogram,
         VizView::Flame,
-        VizView::Vu,
         VizView::Chladni,
         VizView::Nebula,
         VizView::Plasma,
-        VizView::Chladni3D,
         VizView::Trails,
     ];
 
@@ -93,11 +106,9 @@ impl VizView {
             VizView::Radial => "Radial",
             VizView::Spectrogram => "Spectrogram",
             VizView::Flame => "Flame",
-            VizView::Vu => "VU meter",
             VizView::Chladni => "Chladni",
             VizView::Nebula => "Nebula",
             VizView::Plasma => "Plasma",
-            VizView::Chladni3D => "Chladni 3D",
             VizView::Trails => "Trails",
         }
     }

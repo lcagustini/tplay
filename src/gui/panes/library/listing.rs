@@ -12,6 +12,7 @@
 use super::dir_name;
 use crate::app::TPlayApp;
 use crate::gui::dialogs;
+use crate::gui::panes::row_visible;
 use crate::gui::theme::{self, ThemeState};
 use crate::library;
 use crate::network;
@@ -172,6 +173,10 @@ enum Act {
     /// only it knows whether the row came from disk or from a share: a share row's
     /// rating is display-only, since a spool-cache copy is not the track.
     Edit(PathBuf),
+    /// A sortable header cell was clicked. The **caller** carries it out, for the
+    /// same reason `file_list_ui` is a reader: one `&mut` here would force the
+    /// caller to clone the folder's whole entry list to pass a borrow alongside it.
+    Sort(usize),
 }
 
 // Nine arguments, and a params struct would be longer than the call sites it
@@ -318,8 +323,15 @@ fn draw_file_row(
 /// it knows whether a `Nav` means `navigate_to` or `browse_open`. `remote` says
 /// which browser this is — the share list's paths are `smb://` URIs, so arming a
 /// playlist load needs to know which transport to run it through.
+/// **`&TPlayApp`, and that is the whole reason the caller does not clone the entry
+/// list.** It needed `&mut` for exactly one call — `set_library_sort` from the
+/// header — and that one mutation is now returned as an [`Act::Sort`] for the
+/// caller to carry out, which is how every other action in this enum already
+/// worked. What the borrow cost was a **deep clone of every `PathBuf` in the
+/// folder, every frame**: a 2 000-track library allocated 2 000 paths sixty
+/// times a second to hand a slice to a function that only reads it.
 fn file_list_ui(
-    app: &mut TPlayApp,
+    app: &TPlayApp,
     themes: &ThemeState,
     ui: &mut egui::Ui,
     theme: &theme::Theme,
@@ -332,6 +344,11 @@ fn file_list_ui(
     let star_on = themes.icon(theme::Icon::StarOn).cloned();
     let star_off = themes.icon(theme::Icon::StarOff).cloned();
     let mut out = None;
+    // The sortable header is drawn *above* the scroll area, so its click cannot
+    // return the way a row does. It parks here and is folded into `out` after the
+    // rows, which is the same one-action-out-of-the-bottom rule every other
+    // `Act` follows.
+    let mut action_sort: Option<usize> = None;
 
     // Search box. State is the one `LIB_QUERY` key, so the query deliberately
     // survives a trip between the local and share browsers.
@@ -395,7 +412,7 @@ fn file_list_ui(
                     None
                 };
                 if header_cell(&mut h, p, label, key == cur, arrow, w, 22.0) {
-                    app.set_library_sort(key);
+                    action_sort = Some(key);
                 }
             }
         });
@@ -419,12 +436,27 @@ fn file_list_ui(
                         i += 1;
                         continue;
                     }
-                    if draw_dir_row(ui, theme, row_h, i, &name, folder_tex.as_ref()) {
-                        action = Some(Act::Nav(path.to_path_buf()));
+                    // A `ScrollArea` lays out and paints **every** row it is
+                    // given, scrolled out of sight or not, and a row here is a
+                    // dozen widgets and several text layouts. A 2 000-file folder
+                    // was doing all of that on every frame to show the ~30 that
+                    // fit. The height is still reserved off-screen — reserve
+                    // nothing and the scrollbar collapses to the visible slice.
+                    if row_visible(ui, row_h) {
+                        if draw_dir_row(ui, theme, row_h, i, &name, folder_tex.as_ref()) {
+                            action = Some(Act::Nav(path.to_path_buf()));
+                        }
+                    } else {
+                        ui.allocate_space(egui::vec2(0.0, row_h));
                     }
                 } else if library::is_playlist(path) {
                     if !query.is_empty() && !path.to_string_lossy().to_lowercase().contains(&query)
                     {
+                        i += 1;
+                        continue;
+                    }
+                    if !row_visible(ui, row_h) {
+                        ui.allocate_space(egui::vec2(0.0, row_h));
                         i += 1;
                         continue;
                     }
@@ -452,6 +484,11 @@ fn file_list_ui(
                 } else {
                     let info = app.db().cache().get(path);
                     if !library::entry_matches(path, info, &query) {
+                        i += 1;
+                        continue;
+                    }
+                    if !row_visible(ui, row_h) {
+                        ui.allocate_space(egui::vec2(0.0, row_h));
                         i += 1;
                         continue;
                     }
@@ -491,6 +528,11 @@ fn file_list_ui(
                 out = action;
             }
         });
+    if let Some(key) = action_sort {
+        // A sort click wins over any row click: the header was drawn first, so
+        // it cannot be the later of the two.
+        out = Some(Act::Sort(key));
+    }
     if let Some(note) = scan_note {
         ui.label(egui::RichText::new(note).small().color(p.text_secondary));
     }
@@ -506,16 +548,19 @@ pub fn local_list_ui(
     ui: &mut egui::Ui,
     theme: &theme::Theme,
 ) {
-    let entries = app.library().entries().to_vec();
-    list_header_right(app, ui, theme.palette, &entries);
+    // A borrow, not a clone. The clone existed only because both calls below
+    // wanted `&mut TPlayApp` while `entries` came out of it; both are readers
+    // now, so the folder is not walked at all.
+    list_header_right(app, ui, theme.palette, Counts::of(app.library().entries()));
     ui.add_space(4.0);
+    let scanning = app.library_scanning();
     let act = file_list_ui(
         app,
         themes,
         ui,
         theme,
-        &entries,
-        app.library_scanning().then(|| "Scanning…".to_string()),
+        app.library().entries(),
+        scanning.then(|| "Scanning…".to_string()),
         false,
     );
     match act {
@@ -524,6 +569,7 @@ pub fn local_list_ui(
         Some(Act::Add(path)) => app.add_files(vec![path]),
         Some(Act::LoadPlaylist(path)) => app.load_playlist_from(path),
         Some(Act::Edit(path)) => arm_edit(ui, app, path),
+        Some(Act::Sort(key)) => app.set_library_sort(key),
         None => {}
     }
 }
@@ -558,43 +604,73 @@ fn arm_edit(ui: &egui::Ui, app: &TPlayApp, path: PathBuf) {
 /// an already-short height.
 /// Regression test: `right_to_left_center_does_not_swallow_the_column` in
 /// `tests/gui_tests.rs`.
-fn list_header_right(
-    app: &mut TPlayApp,
-    ui: &mut egui::Ui,
-    p: theme::Palette,
-    entries: &[library::Entry],
-) {
+/// What a folder is made of, for the "N tracks · M folders · K playlists" line.
+///
+/// A named struct rather than three `usize` arguments because the three are
+/// adjacent and interchangeable: `list_header_right(app, ui, p, d, t, pl)` compiles,
+/// and the only symptom is the header reporting the wrong folder. One value is
+/// also what let the counting move out of both callers — it is the *same* count
+/// for the local list and the share browser, and having it inlined in each meant
+/// two copies of a loop that both had to be right.
+#[derive(Clone, Copy)]
+struct Counts {
+    tracks: usize,
+    dirs: usize,
+    playlists: usize,
+}
+
+impl Counts {
+    /// One pass, and the entry kinds are mutually exclusive: a row is a directory,
+    /// a playlist file, or a track, which is the same partition both browsers'
+    /// rows already make when they draw them.
+    fn of(entries: &[library::Entry]) -> Self {
+        let mut c = Self {
+            tracks: 0,
+            dirs: 0,
+            playlists: 0,
+        };
+        for e in entries {
+            if e.is_dir() {
+                c.dirs += 1;
+            } else if library::is_playlist(e.path()) {
+                c.playlists += 1;
+            } else {
+                c.tracks += 1;
+            }
+        }
+        c
+    }
+}
+
+fn list_header_right(app: &mut TPlayApp, ui: &mut egui::Ui, p: theme::Palette, c: Counts) {
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
         if ui
             .button("Add All")
             .on_hover_text("Add this folder's tracks to the playlist")
             .clicked()
         {
-            let files: Vec<PathBuf> = entries
+            // Walked only on the click, and the borrow ends before `add_files` —
+            // the other half of why this is a reader: a slice of the entries
+            // could not be held across that call.
+            let files: Vec<PathBuf> = app
+                .library()
+                .entries()
                 .iter()
                 .filter(|e| !e.is_dir() && !library::is_playlist(e.path()))
                 .map(|e| e.path().to_path_buf())
                 .collect();
             app.add_files(files);
         }
-        // "1 track" stays singular.
+        // "1 track" stays singular. The three counts arrive as numbers: they are
+        // identical for both callers, and counting them here meant either a slice
+        // the caller had to own or a walk repeated on every frame.
         let n = |n: usize, s: &str| format!("{n} {s}{}", if n == 1 { "" } else { "s" });
-        let (mut tracks, mut dirs, mut playlists) = (0usize, 0usize, 0usize);
-        for e in entries {
-            if e.is_dir() {
-                dirs += 1;
-            } else if library::is_playlist(e.path()) {
-                playlists += 1;
-            } else {
-                tracks += 1;
-            }
-        }
         ui.label(
             egui::RichText::new(format!(
                 "{} · {} · {}",
-                n(tracks, "track"),
-                n(dirs, "folder"),
-                n(playlists, "playlist"),
+                n(c.tracks, "track"),
+                n(c.dirs, "folder"),
+                n(c.playlists, "playlist"),
             ))
             .small()
             .color(p.text_secondary),
@@ -738,7 +814,7 @@ pub fn remote_list_ui(
         }
     });
 
-    list_header_right(app, ui, p, &entries);
+    list_header_right(app, ui, p, Counts::of(&entries));
     ui.add_space(4.0);
     let act = file_list_ui(app, themes, ui, theme, &entries, note, true);
 
@@ -758,6 +834,9 @@ pub fn remote_list_ui(
         Some(Act::Play(path)) => app.play_file(path),
         Some(Act::Add(path)) => app.add_files(vec![path]),
         Some(Act::LoadPlaylist(uri)) => app.network_mut().fetch(uri.to_string_lossy().into_owned()),
+        // The header is the shared one, so the sort is the same call as on disk —
+        // `sort_entries` reads a track id and an `smb://` URI is one.
+        Some(Act::Sort(key)) => app.set_library_sort(key),
         // Unreachable: `file_list_ui` drops an `Edit` when `remote` is set, since a
         // spool-cache copy is not the track. Named so that is a compile-time fact
         // rather than a comment.

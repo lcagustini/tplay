@@ -18,7 +18,7 @@
 //! cannot be two `Shape::Callback`s, because egui restores GL state between
 //! primitives and would draw the second pass over whatever landed in between.
 
-use crate::audio::viz::{compute_bands, VizBuf, VIZ_BANDS};
+use crate::audio::viz::{compute_bands, VizBuf, DB_FLOOR, VIZ_BANDS};
 use crate::gui::panes::visualizer::gpu::{self, Feedback};
 use crate::gui::theme::Palette;
 use eframe::egui;
@@ -55,7 +55,7 @@ const HOLD_SECS: f32 = 1.6;
 /// machinery that was guarding them.
 pub const FRAG: &str = r#"
 void main() {
-    vec2 uv = gl_FragCoord.xy / u_resolution;
+    vec2 uv = v_uv;
     vec2 centred = uv - 0.5;
 
     // SPIN: the per-frame rotation, radians. Slow enough to read as a drift, and
@@ -71,33 +71,49 @@ void main() {
     // ZOOM: the per-frame shrink of the sampled copy, 0.35% a frame.
     vec2 prev = (spun * (1.0 - 0.0035) - centred) + 0.5;
 
-    // Outside the old frame there is nothing to keep. Zeroed rather than
-    // discarded so the edge does not sample a clamp-to-edge texel and smear a
-    // bright border inward every frame.
-    float inside = step(0.0, prev.x) * step(prev.x, 1.0)
-                 * step(0.0, prev.y) * step(prev.y, 1.0);
-    vec3 old = texture(u_prev, clamp(prev, 0.0, 1.0)).rgb * inside * u_feedback;
+    // Outside the old frame there is nothing to keep — but **a hard cut there is
+    // a visible vertical seam down the pane**: the trail stopped dead at one
+    // column, which reads as a clipping artefact rather than as the trail leaving
+    // the frame. Fading over a few percent of the width makes the boundary a
+    // gradient instead. The fade is also why the sample is clamped rather than
+    // discarded: a clamp-to-edge texel at zero contribution is free, whereas
+    // sampling outside the target is undefined.
+    //
+    // **The fade is keyed on `uv`, the fragment's own position — not on `prev`,
+    // where it was.** The trail is a shrink toward the centre, so the sample
+    // coordinate is nowhere near the screen coordinate at the pane's edges: at
+    // `centred.x = -0.5`, `prev.x` is about `0.502`, the middle of the pane. So a
+    // fade on `prev` put a ramp in the middle of the picture, left the actual left
+    // edge at full weight, and the `clamp` then held that edge texel at full
+    // strength for the whole fade — which is the hard line that was left. The
+    // thing being faded is the *contribution*, and the contribution is a function
+    // of where the fragment is, so `uv` is the coordinate it belongs to. This is
+    // the same "which space is this coordinate in" trap as the waterfall's `y`
+    // flip, and the two views are the only two that reach for a coordinate other
+    // than the fragment's own.
+    const float EDGE = 0.07;
+    vec2 fade = smoothstep(vec2(0.0), vec2(EDGE), uv)
+              * (vec2(1.0) - smoothstep(vec2(1.0 - EDGE), vec2(1.0), uv));
+    vec3 old = texture(u_prev, clamp(prev, 0.0, 1.0)).rgb * fade.x * fade.y * u_feedback;
 
     // The new frame's shape: a ring of energy whose brightness and thickness
     // follow the spectrum, so this is still a music visualisation and not a
     // screensaver.
     float energy = 0.0;
     for (int i = 0; i < VIZ_BANDS; i++) {
-        energy += clamp((u_bands[i] + 60.0) / 60.0, 0.0, 1.0);
+        energy += level(u_bands[i]);
     }
     energy /= float(VIZ_BANDS);
 
     // The band at this pixel's angle, so the ring varies with the spectrum's
     // *shape* rather than pulsing on its level alone.
-    float f = clamp(atan(centred.y, centred.x) / 6.2831853 + 0.5, 0.0, 1.0)
-            * float(VIZ_BANDS - 1);
-    int lo = int(floor(f));
-    int hi = min(lo + 1, VIZ_BANDS - 1);
-    float band = mix(
-        clamp((u_bands[lo] + 60.0) / 60.0, 0.0, 1.0),
-        clamp((u_bands[hi] + 60.0) / 60.0, 0.0, 1.0),
-        fract(f)
-    );
+    //
+    // The harness's projection, not an `atan` indexed into the band array: `atan`
+    // branches along `centred.x < 0` at `centred.y == 0`, which is the pane's
+    // left edge, and `fresh` is *added* to the buffer every frame — so the step
+    // was deposited as a permanent vertical line rather than merely drawn once.
+    // See `gpu::BEARING`.
+    float band = spectrum_at_bearing(centred);
 
     float r = length(centred);
     float ring = exp(-pow((r - 0.34) * 7.0, 2.0));
@@ -124,7 +140,7 @@ void main() {
 /// other view in this set can have.
 pub const PRESENT: &str = r#"
 void main() {
-    vec3 c = texture(u_prev, gl_FragCoord.xy / u_resolution).rgb;
+    vec3 c = texture(u_prev, v_uv).rgb;
     // Reinhard on the accumulated value: keeps a long trail inside the palette's
     // range instead of clipping to white.
     c = c / (c + 1.0);
@@ -136,7 +152,7 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &P
     let mut prev: [f32; VIZ_BANDS] = painter.ctx().memory_mut(|m| {
         m.data
             .get_temp::<[f32; VIZ_BANDS]>(prev_id())
-            .unwrap_or([-60.0; VIZ_BANDS])
+            .unwrap_or([DB_FLOOR; VIZ_BANDS])
     });
 
     // Snappy in both directions: an accumulation smears whatever it is given, so

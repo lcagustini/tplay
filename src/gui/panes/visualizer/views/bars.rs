@@ -1,21 +1,66 @@
 //! Bars view — FFT bands (32 log-spaced, dB-normalized) with attack/release
 //! smoothing for the classic WMP bars feel.
+//!
+//! The classic 32-column bar chart is the one view here that was never a
+//! candidate for a field problem, and that was the point of converting it
+//! anyway: **everything** in this set is now one fragment shader over the pane,
+//! so there is one code path to understand, one set of failure modes, and no
+//! question about which views work on a driver with no GL.
+//!
+//! What the CPU version cost here: 32 `rect_filled` calls plus 8 `hline`s a
+//! frame, and a smooth `fbm`-free shader is ~15 instructions per fragment, so
+//! the whole thing went from geometry to a comparison.
 
-use crate::audio::viz::{compute_bands, VizBuf, VIZ_BANDS};
+use crate::audio::viz::{compute_bands, VizBuf, DB_FLOOR, VIZ_BANDS};
+use crate::gui::panes::visualizer::gpu::{self, Target};
 use crate::gui::theme::Palette;
 use eframe::egui;
 
-/// egui memory id for the previous (smoothed) band values — this view's private
-/// per-frame state.
 fn prev_id() -> egui::Id {
     egui::Id::new("tplay.viz.prev.bars")
 }
+
+pub const FRAG: &str = r#"
+void main() {
+    vec2 uv = v_uv;
+
+    // Which column this fragment is in, and where inside it. The cell is
+    // VIZ_BANDS wide, so the bar occupies 10%..90% of its cell — the gap the CPU
+    // version left by insetting the rect by a fifth on each side.
+    float x = uv.x * float(VIZ_BANDS);
+    int idx = min(int(floor(x)), VIZ_BANDS - 1);
+    float within = fract(x);
+    float in_bar = step(0.1, within) * step(within, 0.9);
+
+    // 0 at the centre line, 1 at the pane's top and bottom edges, so the mirrored
+    // half-height is a direct comparison against the level.
+    float across = abs(uv.y - 0.5) * 2.0;
+    float lvl = level(u_bands[idx]);
+    // 0.9 of the full height, which is the 0.45 half-height the CPU version
+    // scaled its rects by.
+    float body = step(across, lvl * 0.9) * in_bar;
+
+    // The centre tick every fourth column. `mod` rather than an integer cast
+    // because `idx` is already an int and `%` on a negative is not a thing here
+    // — but the value is fractional-safe either way at this magnitude.
+    float tick_col = step(0.5, mod(float(idx), 4.0));
+    float tick = step(across, 0.012) * in_bar * tick_col;
+
+    // Alpha composited by hand, because the harness disables blending for a
+    // callback (egui blends its own primitives; a fullscreen quad must not be
+    // blended over the background it is replacing).
+    vec3 col = u_bg.rgb;
+    col = mix(col, u_accent.rgb, body * (0.4 + 0.6 * lvl));
+    col = mix(col, u_accent.rgb * 0.5, tick);
+    frag_color = vec4(col, 1.0);
+}
+"#;
 
 pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &Palette) {
     let mut prev: [f32; VIZ_BANDS] = painter.ctx().memory_mut(|m| {
         m.data
             .get_temp::<[f32; VIZ_BANDS]>(prev_id())
-            .unwrap_or([-60.0; VIZ_BANDS])
+            .unwrap_or([DB_FLOOR; VIZ_BANDS])
     });
 
     // Attack/release constants (per-frame, 60 FPS assumed)
@@ -27,44 +72,11 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &P
         .ctx()
         .memory_mut(|m| m.data.insert_temp(prev_id(), prev));
 
-    let n = prev.len();
-    let bar_w = (rect.width() / n as f32).max(1.0);
-    let mid_y = rect.center().y;
-    let max_h = rect.height() * 0.45; // leave margins top/bottom
-
-    for (i, &db) in prev.iter().enumerate() {
-        let level = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
-        let h = level * max_h;
-
-        let x = rect.left() + i as f32 * bar_w;
-        let w = (bar_w * 0.8).max(1.0);
-        let gap = bar_w - w;
-
-        let top = mid_y - h;
-        let bottom = mid_y + h;
-
-        let bar_rect = egui::Rect::from_min_max(
-            egui::pos2(x + gap * 0.5, top),
-            egui::pos2(x + gap * 0.5 + w, bottom),
-        );
-
-        // Gradient-like: accent at center, fading toward edges
-        let alpha = (0.4 + 0.6 * level).clamp(0.0, 1.0);
-        let color = egui::Color32::from_rgba_unmultiplied(
-            palette.accent.r(),
-            palette.accent.g(),
-            palette.accent.b(),
-            (alpha * 255.0) as u8,
-        );
-        painter.rect_filled(bar_rect, 1.0, color);
-
-        // Subtle center line
-        if i % 4 == 0 {
-            painter.hline(
-                x + gap * 0.5..=x + gap * 0.5 + w,
-                mid_y,
-                egui::Stroke::new(0.5_f32, palette.accent.gamma_multiply(0.5)),
-            );
-        }
-    }
+    gpu::add_fullscreen(
+        painter,
+        rect,
+        FRAG,
+        gpu::Uniforms::pack(viz, prev, palette, rect, painter.ctx()),
+        Target::Screen,
+    );
 }

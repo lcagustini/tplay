@@ -6,13 +6,11 @@
 //! device for nothing: the tap source is covered at Source level in
 //! `eq_live.rs`-style suites, and everything here is pure.
 
-use eframe::egui;
 use std::f32::consts::PI;
 use tplay::audio::viz::{
-    chladni_field, compute_bands, compute_level, compute_wave, fft_magnitude, pick_mode, VizBuf,
-    FFT_SIZE, MARGIN_DB, MAX_MODE, VIZ_BANDS,
+    compute_bands, compute_wave, fft_magnitude, hold_tick, pick_mode, VizBuf, FFT_SIZE, HOLD_SECS,
+    MARGIN_DB, MAX_MODE, VIZ_BANDS,
 };
-use tplay::gui::panes::visualizer::views::chladni::{segments, GRID};
 
 /// A band array with the given `(index, dB)` entries and silence everywhere
 /// else, which is what the floored bottom of the range looks like.
@@ -197,90 +195,75 @@ fn compute_wave_reaches_last_bucket() {
     assert!(wave.iter().all(|&v| v == 1.0));
 }
 
-/// Silence must report zero rather than NaN: the VU view scales by these without
-/// a guard, and NaN through a scale propagates into every painted coordinate.
-#[test]
-fn compute_level_on_silence_is_zero_not_nan() {
-    let (rms, peak) = compute_level(&VizBuf::new());
-    assert_eq!((rms, peak), (0.0, 0.0));
-}
+// --- the hold --------------------------------------------------------------
+//
+// The Chladni figure's anti-strobe mechanism has two parts: a margin on how much
+// louder a challenger has to be, and a *duration* for which the incumbent is
+// pinned. The duration was a frame count, which is a duration only at one frame
+// rate, and on the 120 Hz display this was reported on it came out at half its
+// intended length — so the figure changed at 1.3 Hz against a hold written to
+// mean 0.67 Hz, and the symptom was "the visualizer is running at 2 fps" when the
+// app was in fact at 120.
 
+/// The same wall-clock time is the same hold, at any frame rate.
+///
+/// The property, stated as a simulation rather than a comparison, because a
+/// comparison can only say "these two numbers match" — the thing that has to be
+/// true is that ninety frames at 60 Hz and at 120 Hz spend the same *seconds*.
 #[test]
-fn compute_level_of_a_full_scale_constant() {
-    let buf = VizBuf::new();
-    for _ in 0..512 {
-        buf.push(1.0);
+fn the_hold_is_a_duration_not_a_frame_count() {
+    /// Seconds a full hold lasts, spent one frame at a time.
+    fn seconds_to_spend(rate: f32) -> f32 {
+        let mut hold = HOLD_SECS;
+        let mut elapsed = 0.0f32;
+        // A minute is far longer than any hold, and a frame count at any rate
+        // the pane has ever run at empties well inside it.
+        while hold > 0.0 && elapsed < 60.0 {
+            hold = hold_tick(hold, 1.0 / rate);
+            elapsed += 1.0 / rate;
+        }
+        elapsed
     }
-    let (rms, peak) = compute_level(&buf);
-    assert!((rms - 1.0).abs() < 1e-6, "rms {rms}");
-    assert!((peak - 1.0).abs() < 1e-6, "peak {peak}");
-}
-
-/// A half-duty square is the cheapest signal that separates the two numbers: a
-/// meter that reported `rms == peak` would be measuring the wrong one, and a
-/// half-square RMS is exactly `sqrt(0.5)` with no tolerance to argue about.
-#[test]
-fn compute_level_separates_rms_from_peak() {
-    let buf = VizBuf::new();
-    for i in 0..512 {
-        buf.push(if i % 2 == 0 { 1.0 } else { 0.0 });
-    }
-    let (rms, peak) = compute_level(&buf);
-    assert!(
-        (rms - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6,
-        "rms {rms}"
-    );
-    assert_eq!(peak, 1.0);
-    assert!(
-        rms < peak,
-        "rms must sit below the peak or the meter's two needles agree"
-    );
-}
-
-/// The diagonal is the figure's mirror line, and the view relies on the field
-/// vanishing there to read as a symmetric pattern.
-#[test]
-fn chladni_field_vanishes_on_the_diagonal() {
-    for &t in &[0.1f32, 0.25, 0.5, 0.75, 0.9] {
+    let at_30 = seconds_to_spend(30.0);
+    let at_60 = seconds_to_spend(60.0);
+    let at_120 = seconds_to_spend(120.0);
+    let at_144 = seconds_to_spend(144.0);
+    // One frame of slack, so this is about the shape and not about rounding.
+    let slack = 1.0 / 20.0;
+    for (rate, spent) in [
+        (30.0, at_30),
+        (60.0, at_60),
+        (120.0, at_120),
+        (144.0, at_144),
+    ] {
         assert!(
-            chladni_field(2, 1, t, t) < 1e-6,
-            "not zero on the diagonal at {t}"
+            (spent - HOLD_SECS).abs() < slack,
+            "a {HOLD_SECS}s hold spent at {rate} fps took {spent:.3}s — the hold is \
+             being counted in frames, so it is twice as short on a 120 Hz display as \
+             it is on a 60 Hz one"
         );
     }
 }
 
-/// `n == m` is a degenerate mode: the two antisymmetric terms are identical and
-/// cancel everywhere, so the figure would be blank. The view has to keep the two
-/// mode numbers distinct, and this is what makes that necessary.
+/// A degenerate frame time cannot release a hold early.
 #[test]
-fn chladni_modes_must_differ() {
-    for &t in &[0.1f32, 0.25, 0.5, 0.75] {
-        let (u, _) = (t, 1.0 - t);
+fn a_degenerate_frame_time_does_not_release_the_hold() {
+    for dt in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+        let held = hold_tick(1.0, dt);
+        // `INFINITY` is the sharp end, and the reason this is not a one-liner:
+        // `dt.max(0.0)` passes it through, and `1.0 - inf` clamps to zero — so
+        // the guard itself is what released the figure, rather than what stopped
+        // it.
         assert!(
-            chladni_field(3, 3, t, u) < 1e-6,
-            "(3,3) is blank at ({t}, {u})"
+            held >= 1.0,
+            "dt {dt} must not shorten a hold, got {held} — releasing the figure early \
+             is the strobe this exists to prevent, and egui's predicted frame time is \
+             legitimately zero on a session's first frame"
         );
     }
-}
-
-/// `abs()` of the difference makes the field mirror-symmetric across `gx == gy`,
-/// which is what gives a Chladni figure its four-fold look.
-#[test]
-fn chladni_field_mirrors_across_the_diagonal() {
-    let a = chladni_field(2, 1, 0.25, 0.75);
-    let b = chladni_field(2, 1, 0.75, 0.25);
-    assert!(a > 0.5, "the (2,1) figure must have structure, got {a}");
-    assert!((a - b).abs() < 1e-6, "{a} vs {b} across the diagonal");
-}
-
-/// A mode number of 0 would make the whole term zero, so a view deriving its
-/// modes from a band index must not be handed one un-clamped.
-#[test]
-fn chladni_field_clamps_a_zero_mode() {
-    assert!(
-        chladni_field(0, 2, 0.25, 0.75) > 0.5,
-        "mode 0 must be treated as 1, not as a blank figure"
-    );
+    // And it does run out, which is the other half: a hold that never expires is
+    // a figure that never changes again.
+    assert_eq!(hold_tick(0.01, 0.5), 0.0);
 }
 
 // --- the mode pick ---------------------------------------------------------
@@ -289,6 +272,15 @@ fn chladni_field_clamps_a_zero_mode() {
 // change of that pair is a redraw of the whole plate. A bare top-two picked a
 // new pair 60 times in 15 s over a drifting bass line. These are the guard
 // against that coming back.
+//
+// The *field* these mode numbers are drawn with is no longer here. It was
+// `chladni_field`, and the four tests that pinned it went with the function when
+// the view became a fragment shader: the nodal set is now read per fragment
+// rather than searched across a lattice, so a cell cannot straddle a nodal line
+// and the properties those tests were defending cannot be violated by the
+// drawing. `pick_mode` stayed, because a *discrete pick* is a different problem
+// from a field evaluation and the hysteresis is all that is between a figure
+// that tracks the music and one that strobes.
 
 /// The regression itself: two pairs within a hair of each other, and the figure
 /// must not move. A challenger has to be `MARGIN_DB` louder on its *weaker*
@@ -299,7 +291,7 @@ fn a_near_tie_keeps_the_current_figure() {
     // 1 dB is well inside the margin.
     let bands = bands_with(&[(1, -18.0), (2, -20.0), (3, -19.0)]);
     assert_eq!(
-        pick_mode(&bands, Some((1, 2)), 0),
+        pick_mode(&bands, Some((1, 2)), 0.0),
         (1, 2),
         "a 1 dB lead must not repaint the plate"
     );
@@ -310,7 +302,7 @@ fn a_near_tie_keeps_the_current_figure() {
 #[test]
 fn a_clear_winner_does_move_the_figure() {
     let bands = bands_with(&[(1, -50.0), (2, -50.0), (3, -10.0), (4, -12.0)]);
-    assert_eq!(pick_mode(&bands, Some((1, 2)), 0), (3, 4));
+    assert_eq!(pick_mode(&bands, Some((1, 2)), 0.0), (3, 4));
 }
 
 /// The margin is measured against the weaker band, which is the half that
@@ -323,11 +315,11 @@ fn the_margin_is_measured_on_the_weaker_band() {
     // (1, 2) beats the incumbent (2, 3) by 25 dB on its *loudest* band and not
     // at all on its weakest, which is the band the margin is measured on.
     let tie = bands_with(&[(1, 0.0), (2, incumbent), (3, incumbent)]);
-    assert_eq!(pick_mode(&tie, Some((2, 3)), 0), (2, 3));
+    assert_eq!(pick_mode(&tie, Some((2, 3)), 0.0), (2, 3));
 
     // The same challenger with its weak band past the margin.
     let clear = bands_with(&[(1, 0.0), (2, incumbent + MARGIN_DB + 0.1), (3, incumbent)]);
-    assert_eq!(pick_mode(&clear, Some((2, 3)), 0), (1, 2));
+    assert_eq!(pick_mode(&clear, Some((2, 3)), 0.0), (1, 2));
 }
 
 /// The hold is the insurance against a genuine two-cycle: hysteresis always
@@ -335,9 +327,9 @@ fn the_margin_is_measured_on_the_weaker_band() {
 #[test]
 fn a_held_figure_cannot_be_moved() {
     let bands = bands_with(&[(3, -10.0), (4, -12.0)]);
-    assert_eq!(pick_mode(&bands, Some((1, 2)), 1), (1, 2));
+    assert_eq!(pick_mode(&bands, Some((1, 2)), 1.0), (1, 2));
     // The same bands, one frame after the hold expires.
-    assert_eq!(pick_mode(&bands, Some((1, 2)), 0), (3, 4));
+    assert_eq!(pick_mode(&bands, Some((1, 2)), 0.0), (3, 4));
 }
 
 /// Silence is where the strobe was worst: every band sits on the `-60` floor
@@ -370,7 +362,7 @@ fn the_quiet_floor_keeps_the_figure_rather_than_tracking_noise() {
     let mut switches = 0;
     let mut held = None;
     for frame in 0..FRAMES {
-        let (n, m) = pick_mode(&frame_bands(frame), held, 0);
+        let (n, m) = pick_mode(&frame_bands(frame), held, 0.0);
         if held.is_some_and(|p| p != (n, m)) {
             switches += 1;
         }
@@ -391,13 +383,13 @@ fn a_stale_stored_pair_is_re_picked() {
     let bands = bands_with(&[(3, -10.0), (4, -12.0)]);
     let fresh = (3, 4);
     assert_eq!(
-        pick_mode(&bands, Some((VIZ_BANDS - 1, VIZ_BANDS - 2)), 0),
+        pick_mode(&bands, Some((VIZ_BANDS - 1, VIZ_BANDS - 2)), 0.0),
         fresh
     );
-    assert_eq!(pick_mode(&bands, Some((0, 4)), 0), fresh);
-    assert_eq!(pick_mode(&bands, Some((2, 2)), 0), fresh);
+    assert_eq!(pick_mode(&bands, Some((0, 4)), 0.0), fresh);
+    assert_eq!(pick_mode(&bands, Some((2, 2)), 0.0), fresh);
     assert_eq!(
-        pick_mode(&bands, Some((VIZ_BANDS - 1, VIZ_BANDS - 2)), 5),
+        pick_mode(&bands, Some((VIZ_BANDS - 1, VIZ_BANDS - 2)), 5.0),
         fresh,
         "a hold must not pin a pair the view cannot draw"
     );
@@ -409,23 +401,25 @@ fn a_stale_stored_pair_is_re_picked() {
 /// that ties or reverses in level, and a range it has to stay inside.
 ///
 /// The upper bound is written out rather than read from `MAX_MODE`, so that
-/// raising the cap is a *visible* change here: `GRID` cannot resolve a mode much
-/// above 10, and a test that reads the constant it is checking cannot say so.
+/// raising the cap is a *visible* change here. The reason the cap exists moved
+/// with the view: it used to be that a 48-cell grid cannot resolve a mode much
+/// above 10, and the grid is gone. It is now that a nodal figure at mode 30
+/// packs ~3 cells per oscillation on a 48-cell plate — the same arithmetic, the
+/// same answer, and a different sentence because the drawing is a different one.
 #[test]
 fn the_picked_pair_is_distinct_and_inside_the_drawn_range() {
     const DRAWN_MAX: usize = 10;
     assert_eq!(
         DRAWN_MAX,
         MAX_MODE,
-        "MAX_MODE moved: {MAX_MODE} mode numbers over a {GRID}-cell grid is \
-         {} cells per oscillation, so the interpolated lines land in the wrong \
-         place. Widen the grid or leave the mode range alone.",
-        2.0 * GRID as f32 / DRAWN_MAX as f32
+        "MAX_MODE moved to {MAX_MODE}: a nodal figure at that mode packs \
+         {} oscillations per half-plate, so the lines land in the wrong place.",
+        DRAWN_MAX as f32 / 3.0
     );
     for spread in [0.0, 0.5, 3.0, 12.0, 40.0, 59.9] {
         let bands = bands_with(&[(1, -20.0), (2, -20.0 - spread)]);
         for current in [None, Some((1, 2)), Some((9, 10))] {
-            let (n, m) = pick_mode(&bands, current, 0);
+            let (n, m) = pick_mode(&bands, current, 0.0);
             assert_ne!(n, m, "spread {spread}: a degenerate pair is a blank figure");
             let in_range = |i: usize| (1..=DRAWN_MAX).contains(&i);
             assert!(
@@ -436,106 +430,15 @@ fn the_picked_pair_is_distinct_and_inside_the_drawn_range() {
     }
 }
 
-/// The range excludes band 0 for a reason, so pin it: mode 0 is clamped to 1 by
-/// `chladni_field`, so a pair using band 0 is a second spelling of a pair the
-/// view can already draw — and repainting between the two is the strobe again.
+/// The range excludes band 0 for a reason, so pin it: a mode of 0 makes the
+/// whole field term zero, so a pair using band 0 is a blank figure rather than a
+/// second spelling of a pair the view can already draw — and repainting between
+/// the two is the strobe again.
 #[test]
 fn band_zero_is_never_a_mode_number() {
     let bands = bands_with(&[(0, 0.0), (1, -10.0), (2, -12.0)]);
-    let (n, m) = pick_mode(&bands, None, 0);
-    assert_ne!(n, 0, "band 0 redraws mode 1's figure");
-    assert_ne!(m, 0, "band 0 redraws mode 1's figure");
+    let (n, m) = pick_mode(&bands, None, 0.0);
+    assert_ne!(n, 0, "band 0 draws a blank figure");
+    assert_ne!(m, 0, "band 0 draws a blank figure");
     assert_eq!((n, m), (1, 2));
-}
-
-/// The count is the frame cost — the whole figure is one mesh, two triangles per
-/// segment — so this is a tripwire, not a proof. Mode, grid and ceiling are all
-/// written out, because a budget that reads the constants it is guarding cannot
-/// report that they moved.
-#[test]
-fn the_worst_figure_stays_within_its_segment_budget() {
-    const WORST_MODE: usize = 10;
-    const CELLS: usize = 48;
-    const BUDGET: usize = 1200;
-    assert_eq!(WORST_MODE, MAX_MODE, "the worst mode moved");
-    assert_eq!(CELLS, GRID, "the grid moved");
-
-    let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0));
-    let segs = segments(WORST_MODE, WORST_MODE - 1, rect);
-    assert!(
-        segs.len() <= BUDGET,
-        "{} segments at mode {WORST_MODE} over a {CELLS}-cell grid, budget {BUDGET} — \
-         GRID, MAX_MODE or NODAL_CUTOFF moved, and so did the per-frame cost",
-        segs.len()
-    );
-}
-
-// --- the contour -----------------------------------------------------------
-//
-// The figure is drawn as one batched mesh, so the segments are the drawing. A
-// dangling end is a mark the eye reads as a speck rather than as a line, which
-// is what the per-cell dot version was: every crossing emitted twice, once by
-// each of the two cells sharing the edge.
-
-fn plate_rect() -> egui::Rect {
-    egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0))
-}
-
-/// The claim the lattice is there for. Two cells sharing an edge must read the
-/// *same* stored field value, so their interpolated join points are bit
-/// identical — which is the whole difference between a contour and a spray of
-/// dots that happens to look joined. A nodal set is a set of closed curves, so
-/// no segment end may touch only one other.
-#[test]
-fn every_segment_end_meets_another_segment() {
-    for &(n, m) in &[(1, 2), (3, 5), (5, 8), (8, 10), (10, 9)] {
-        let segs = segments(n, m, plate_rect());
-        assert!(!segs.is_empty(), "mode ({n}, {m}) drew nothing");
-        let ends: Vec<egui::Pos2> = segs.iter().flat_map(|[a, b]| [*a, *b]).collect();
-        for e in &ends {
-            let meets = ends.iter().filter(|o| o.distance(*e) < 1e-3).count();
-            assert!(
-                meets >= 2,
-                "mode ({n}, {m}): a dangling end at {e:?} — {meets} segment(s) meet there"
-            );
-        }
-    }
-}
-
-/// The figure is centred and inscribed, so a point outside the pane's short
-/// side is a coordinate mix-up rather than a shape. Cheap, and it catches the
-/// kind of bug a convexity or continuity check reads as fine.
-#[test]
-fn the_figure_stays_inside_the_pane() {
-    let rect = plate_rect();
-    let limit = rect.width().min(rect.height());
-    for &(n, m) in &[(1, 2), (4, 7), (10, 9)] {
-        for [a, b] in segments(n, m, rect) {
-            for p in [a, b] {
-                assert!(
-                    p.distance(rect.center()) <= limit,
-                    "mode ({n}, {m}): {p:?} is outside the pane"
-                );
-            }
-        }
-    }
-}
-
-/// A segment joins two crossings on *different* edges of one cell, so it spans
-/// at most the cell's diagonal. Longer than that means a crossing was placed off
-/// the edge it belongs to, which is the one way the interpolation can lie.
-#[test]
-fn every_segment_spans_at_most_one_cell() {
-    let rect = plate_rect();
-    let cell = rect.width().min(rect.height()) / GRID as f32;
-    for &(n, m) in &[(1, 2), (3, 5), (8, 10)] {
-        for [a, b] in segments(n, m, rect) {
-            let len = b.distance(a);
-            assert!(
-                len <= cell * std::f32::consts::SQRT_2,
-                "mode ({n}, {m}): a {len:.2}pt segment over a {cell:.2}pt cell \
-                 means a crossing was placed off the edge it belongs to"
-            );
-        }
-    }
 }

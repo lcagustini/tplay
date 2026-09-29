@@ -50,24 +50,13 @@ pub fn visualizer_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::U
 
     painter.rect_filled(rect, 0.0, p.bg);
 
-    match view {
-        VizView::Bars => views::bars::draw(painter, rect, app.viz(), &p),
-        VizView::Wave => views::wave::draw(painter, rect, app.viz(), &p),
-        VizView::Radial => views::radial::draw(painter, rect, app.viz(), &p),
-        VizView::Spectrogram => views::spectrogram::draw(painter, rect, app.viz(), &p),
-        VizView::Flame => views::flame::draw(painter, rect, app.viz(), &p),
-        VizView::Vu => views::vu::draw(painter, rect, app.viz(), &p),
-        VizView::Chladni => views::chladni::draw(painter, rect, app.viz(), &p),
-        // A shader view is dispatched through the table rather than by a direct
-        // call, so the table is the registry the app itself reads and cannot fall
-        // behind what ships. The match stays exhaustive over `VizView`, so adding
-        // a variant without an arm does not build; and a name in the table that
-        // does not match any variant routes nothing, which is what
-        // `the_shader_table_and_the_view_match_agree` is for.
-        other => {
-            if let Some(view) = views::SHADER_VIEWS.iter().find(|v| v.name == other.name()) {
-                (view.draw)(painter, rect, app.viz(), &p);
-            }
-        }
+    // Every view is a fragment shader, so there is one dispatch and no match.
+    // The lookup is by name rather than by an exhaustive `match` over `VizView`,
+    // which is what used to make the compiler the thing that noticed a new
+    // variant had no arm — and that check is now `every_view_has_a_shader_and_the
+    // _table_covers_them_all`, which is stronger: it also catches a `VizView` the
+    // table names but does not implement, and the reverse.
+    if let Some(entry) = views::SHADER_VIEWS.iter().find(|v| v.name == view.name()) {
+        (entry.draw)(painter, rect, app.viz(), &p);
     }
 }

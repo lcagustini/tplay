@@ -33,6 +33,56 @@ fn a_missing_config_agrees_with_one_whose_fields_are_absent() {
     assert_eq!(from_default.crossfade_secs, 3.0);
 }
 
+/// Every view name the picker shows loads back as itself.
+///
+/// **This is a regression test for a bug that shipped.** `de_viz_view` used to
+/// decode by re-entering the derived `Deserialize`, which matches the *Rust
+/// variant name* — "Vu", "Chladni3D". The picker shows `VizView::name()`, which
+/// for those two is "VU meter" and "Chladni 3D". So the two spellings disagreed,
+/// and a `config.json` written by hand with the name **as the user sees it** read
+/// as an unknown variant and fell back to `Bars`. The fallback is silent, the
+/// fallback is the default, and nothing in the app says which view is on screen
+/// beyond the dropdown — so the user selects Chladni 3D, closes the app, and
+/// comes back to Bars.
+///
+/// It was invisible for years because nothing looked a view up by name. The
+/// visualizer dispatched on an exhaustive `match` over the enum, so the two
+/// spellings were never compared. The moment the dispatch became a table lookup
+/// keyed on `name()`, the same disagreement became a view that renders nothing —
+/// which is how it was found.
+#[test]
+fn every_view_name_round_trips_through_the_config() {
+    let dir = std::env::temp_dir().join(format!("tplay-test-{}/cfg_viz_names", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.json");
+
+    for view in VizView::ALL {
+        // The label as the picker spells it.
+        std::fs::write(&path, format!(r#"{{"viz_view": {:?}}}"#, view.name())).unwrap();
+        assert_eq!(
+            load_from(Some(&path)).viz_view,
+            view,
+            "`{}` is the name the picker shows, so typing it into config.json must \
+             come back as this view — otherwise a hand-edited file silently lands on \
+             the default",
+            view.name()
+        );
+        // And the variant name, which is what `Serialize` actually writes, so
+        // the on-disk round trip this app has always done keeps working.
+        let variant = format!("{view:?}");
+        if variant != view.name() {
+            std::fs::write(&path, format!(r#"{{"viz_view": {variant:?}}}"#)).unwrap();
+            assert_eq!(
+                load_from(Some(&path)).viz_view,
+                view,
+                "`{variant}` is what this build writes to disk, so it must load back \
+                 as this view or an existing config stops restoring"
+            );
+        }
+    }
+}
+
 /// The one remaining way a hand-edited `config.json` could cost every setting.
 ///
 /// A derived `Deserialize` fails the *whole* struct on an unknown enum variant,

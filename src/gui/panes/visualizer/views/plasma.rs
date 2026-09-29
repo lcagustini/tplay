@@ -11,7 +11,7 @@
 //! genuinely different *look* rather than a variation — a filled interference
 //! pattern against Nebula's depth.
 
-use crate::audio::viz::{compute_bands, VizBuf, VIZ_BANDS};
+use crate::audio::viz::{compute_bands, VizBuf, DB_FLOOR, VIZ_BANDS};
 use crate::gui::panes::visualizer::gpu::{self, Target};
 use crate::gui::theme::Palette;
 use eframe::egui;
@@ -21,10 +21,6 @@ fn prev_id() -> egui::Id {
 }
 
 pub const FRAG: &str = r#"
-float level(float d) {
-    return clamp((d + 60.0) / 60.0, 0.0, 1.0);
-}
-
 // A local, not the parameter: GLSL parameters are `in` and read-only, and
 // `inout` is no escape because every call site passes an expression.
 float hash21(vec2 v) {
@@ -59,7 +55,7 @@ float fbm(vec2 p) {
 
 
 void main() {
-    vec2 uv = gl_FragCoord.xy / u_resolution;
+    vec2 uv = v_uv;
     vec2 p = (uv - 0.5) * vec2(u_resolution.x / max(u_resolution.y, 1.0), 1.0) * 3.0;
 
     // The warp is fed by the spectrum, read as a continuous function of angle so
@@ -74,11 +70,14 @@ void main() {
     // A radial read of the spectrum: the band at the angle this fragment sits at
     // shears the field it samples from, so the pattern's arms track the music's
     // shape rather than pulsing on its level alone.
-    float ang = atan(p.y, p.x) / 6.2831853 + 0.5;
-    float f = clamp(ang, 0.0, 1.0) * float(VIZ_BANDS - 1);
-    int lo = int(floor(f));
-    int hi = min(lo + 1, VIZ_BANDS - 1);
-    float band = mix(level(u_bands[lo]), level(u_bands[hi]), fract(f));
+    //
+    // **The harness's projection, not an `atan`.** This used to be
+    // `atan(p.y, p.x) / TAU + 0.5` indexed straight into the band array, and
+    // `atan`'s branch cut runs along `p.x < 0` at `p.y == 0` — the pane's left
+    // edge. So `f` stepped 32 → 0, `band` stepped with it, `w` stepped with that,
+    // and the whole `fbm` field stepped: a hard seam, and unfixable by a fade
+    // because the break was in the *function*. See `gpu::BEARING`.
+    float band = spectrum_at_bearing(p);
 
     // Two warp rounds is the minimum that produces the interference this is for;
     // one leaves it a plain fbm, which is a different and duller picture.
@@ -99,7 +98,7 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &P
     let mut prev: [f32; VIZ_BANDS] = painter.ctx().memory_mut(|m| {
         m.data
             .get_temp::<[f32; VIZ_BANDS]>(prev_id())
-            .unwrap_or([-60.0; VIZ_BANDS])
+            .unwrap_or([DB_FLOOR; VIZ_BANDS])
     });
 
     const ATTACK: f32 = 0.4;

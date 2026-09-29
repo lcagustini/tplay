@@ -71,7 +71,7 @@ fn pane_all_is_stable() {
 fn viz_view_registry_is_stable_and_uniquely_named() {
     // The pane's selector iterates ALL; names must stay unique and the default
     // view is what an empty config falls back to (see config_persistence).
-    assert_eq!(VizView::ALL.len(), 11);
+    assert_eq!(VizView::ALL.len(), 9);
     assert_eq!(
         VizView::ALL,
         [
@@ -80,11 +80,9 @@ fn viz_view_registry_is_stable_and_uniquely_named() {
             VizView::Radial,
             VizView::Spectrogram,
             VizView::Flame,
-            VizView::Vu,
             VizView::Chladni,
             VizView::Nebula,
             VizView::Plasma,
-            VizView::Chladni3D,
             VizView::Trails,
         ]
     );

@@ -17,6 +17,41 @@ pub const VIZ_BUFFER_CAP: usize = 4096;
 pub const FFT_SIZE: usize = 1024;
 /// Number of log-spaced output bands for drawing.
 pub const VIZ_BANDS: usize = 32;
+/// Buckets in the wave envelope handed to a shader, in [`tplay::gui::panes::visualizer::gpu::Uniforms::wave`].
+///
+/// A **constant rather than a pane measurement**, which is the whole reason the
+/// wave view became a shader's business: the uniform array's length is part of
+/// its GLSL declaration, so it cannot move with the splitter.
+///
+/// **128, and the ceiling is why.** A `float` array's elements are allowed one
+/// `vec4` slot each rather than four to one, so the array is up to 128 fragment
+/// uniform *vectors* — and GL 3.3 core only guarantees
+/// `MAX_FRAGMENT_UNIFORM_VECTORS >= 224`. With `u_bands` alongside it, 256
+/// buckets would have put the block over a floor the spec actually promises, on a
+/// limit no compiler checks: glslang links a 256-element array perfectly well and
+/// a driver that cannot place it reports it at link time, which is a blank pane
+/// with a log line on one machine and nowhere else. 128 plus 32 is 160, and
+/// `the_uniform_block_fits_the_gl_33_floor` is the test that keeps it there.
+///
+/// The visual cost is small: 128 buckets over a ~780px pane is one bucket every
+/// 6px, and the shader interpolates linearly between neighbours, so the envelope
+/// is a coarser polyline rather than a coarser signal.
+pub const WAVE_BUCKETS: usize = 128;
+
+/// The dB floor [`compute_bands`] reports, and so the floor every view's `level()`
+/// maps up from.
+///
+/// **One definition, because it is a boundary between two halves that cannot see
+/// each other.** The DSP clamps into `-60.0..=0.0` and the shaders map that range
+/// up to `0.0..=1.0` with `(d + 60.0) / 60.0` — and that expression was in six
+/// view bodies plus two inlined loops, all hand-written and all currently right.
+/// If the floor moved and only this side did, **nothing would fail**: every shader
+/// still compiles, every value still in range, and the symptom is a view that
+/// quietly compresses or clips its quiet end, differently in each one. So the
+/// constant is interpolated into the GLSL prelude rather than typed into a shader,
+/// and `the_db_floor_is_one_number_across_the_dsp_and_every_shader` is what keeps
+/// the two ends honest.
+pub const DB_FLOOR: f32 = -60.0;
 
 /// The buffer plus the rate its samples were captured at, which the band→bin
 /// mapping needs and only a source knows. Written once per track, so no
@@ -262,7 +297,7 @@ pub fn compute_bands(viz: &VizBuf, prev: &mut [f32; VIZ_BANDS], attack: f32, rel
     if samples.len() < FFT_SIZE {
         // Not enough data yet — decay previous values toward -60 dB (noise floor)
         for v in prev.iter_mut() {
-            *v = *v * release + (-60.0) * (1.0 - release);
+            *v = *v * release + DB_FLOOR * (1.0 - release);
         }
         return;
     }
@@ -307,7 +342,7 @@ pub fn compute_bands(viz: &VizBuf, prev: &mut [f32; VIZ_BANDS], attack: f32, rel
 
         // Convert to dB (full scale reference = 1.0 after normalization)
         let db: f32 = 20.0 * (avg * norm + 1e-10).log10();
-        let clamped = db.clamp(-60.0, 0.0);
+        let clamped = db.clamp(DB_FLOOR, 0.0);
 
         // Attack/release smoothing
         if clamped > *prev_b {
@@ -318,47 +353,25 @@ pub fn compute_bands(viz: &VizBuf, prev: &mut [f32; VIZ_BANDS], attack: f32, rel
     }
 }
 
-/// Overall loudness of the window: `(rms, peak)` in 0..1. The spectrum answers
-/// "what is it made of", this answers "how loud" — the pair is what a meter
-/// needs, and the ring buffer already holds the window, so it is a second pass
-/// over data the tap pushed once.
-///
-/// RMS is `sqrt(mean(x²))`; peak is the largest `|x|`. Silence is `(0.0, 0.0)`
-/// rather than NaN, so a caller can scale by it without a guard.
-pub fn compute_level(viz: &VizBuf) -> (f32, f32) {
-    /// One ring-buffer window: long enough for the RMS to be steady rather than
-    /// sample-locked, and exactly the buffer's own cap.
-    const LEVEL_WINDOW: usize = VIZ_BUFFER_CAP;
-    let samples = viz.snapshot_tail(LEVEL_WINDOW);
-    if samples.is_empty() {
-        return (0.0, 0.0);
-    }
-    let sum_squares: f32 = samples.iter().map(|s| s * s).sum();
-    let rms = (sum_squares / samples.len() as f32).sqrt();
-    let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
-    (rms.clamp(0.0, 1.0), peak.clamp(0.0, 1.0))
-}
-
-/// The Chladni (cymatic) standing-wave field at `(n, m)` — the term every
-/// Chladni figure is built from, for a point at `(gx, gy)` in 0..1.
-///
-/// Exposed per mode rather than as a whole-figure generator because the mode
-/// numbers come from the spectrum at draw time, and because the antisymmetric
-/// difference is the part a test can pin: it is zero wherever `gx == gy` and
-/// antisymmetric under swapping the two axes.
-pub fn chladni_field(n: usize, m: usize, gx: f32, gy: f32) -> f32 {
-    let (n, m) = (n.max(1) as f32, m.max(1) as f32);
-    let (pi_n_gx, pi_m_gx) = (PI * n * gx, PI * m * gx);
-    let (pi_n_gy, pi_m_gy) = (PI * n * gy, PI * m * gy);
-    (pi_n_gx.sin() * pi_m_gy.sin() - pi_m_gx.sin() * pi_n_gy.sin()).abs()
-}
+// The loudness measurement this module used to carry, gone with the VU meter.
+//
+// `(rms, peak)` over the ring buffer's last window was the one input nothing
+// else in the pane reads: a spectrum describes *shape* and this describes
+// *amount*, which is why the VU meter existed, and why removing it is a real
+// loss of a capability rather than a tidying. What is left is the argument for
+// bringing it back rather than for keeping it dormant: **a function no caller
+// reaches is not a capability, it is a per-frame pass waiting for a mistake.** The
+// only caller ran once a frame over 4 096 samples to fill a uniform that the
+// deleted view was the sole reader of, so keeping it meant keeping the cost
+// wired to nothing. A loudness view wants this back, and wants it back with its
+// own tests — `compute_level_on_silence_is_zero_not_nan` and the two beside it
+// were the specification, and they are in this file's history.
 
 /// The highest band index eligible to be a mode number, and so the highest mode
-/// number drawn. Not a taste call: the marching-squares grid cannot resolve a
-/// mode much above this (at mode 30 an oscillation is 1.6 cells, so the
-/// interpolated lines land in the wrong place), and the high bands are single
-/// FFT bins of noise with no music in them, so they are the last thing that
-/// should be choosing a figure.
+/// number drawn. Not a taste call: a nodal figure at mode 30 packs ~3 cells per
+/// oscillation on a 48-cell plate, so the lines land in the wrong place, and the
+/// high bands are single FFT bins of noise with no music in them — so they are
+/// the last thing that should be choosing a figure.
 pub const MAX_MODE: usize = 10;
 /// `pick_mode` seeds two slots from one band, so it needs a second eligible
 /// band, and it indexes `bands` directly, so it needs a band that exists.
@@ -366,16 +379,43 @@ const _: () = assert!(MAX_MODE >= 2 && MAX_MODE < VIZ_BANDS);
 
 /// How much louder a challenger has to be before the figure changes, in dB.
 pub const MARGIN_DB: f32 = 3.0;
-/// Frames the figure is pinned after a switch — 1.5 s at 60 fps. The insurance
-/// against a genuine two-cycle, which hysteresis always permits, and with the
-/// spectrum now tracked briskly it is the *only* thing bounding how often the
-/// figure can change. It costs no latency: a switch happens the moment the
+/// How long the figure stays pinned after a switch, in **seconds**. The
+/// insurance against a genuine two-cycle, which hysteresis always permits, and
+/// with the spectrum tracked briskly it is the *only* thing bounding how often
+/// the figure can change. It costs no latency: a switch happens the moment the
 /// margin is cleared, and only the switch *after* it waits.
 ///
-/// `pub` because the countdown is the caller's to own, and there are now two
-/// callers — each view keeps its own egui-memory key, so switching between them
-/// cannot carry a half-spent hold into the other.
-pub const HOLD_FRAMES: u32 = 90;
+/// **Seconds, and it used to be a frame count** — `HOLD_FRAMES = 90`, written down
+/// as "1.5 s at 60 fps". That is a duration only at one frame rate: on the 120 Hz
+/// display this was reported on, it was 0.75 s, and the figure changed at 1.3 Hz
+/// against a hold written to mean 0.67 Hz. The measured pass rate came from
+/// `gpu::probe`, and it is the reason this is a `f32`.
+///
+/// The same trap twice already in this repo: `gpu::feedback_for_a_dt` exists
+/// because a per-frame multiplier is a fixed fraction per frame, and the VU
+/// meter's hold was a clock for the same reason. Both were `dt`-injected and
+/// pure; this one was a bare integer in a view, and nothing could see it.
+pub const HOLD_SECS: f32 = 1.5;
+
+/// Spend one frame of the hold: `hold` seconds remaining after `dt` has passed.
+///
+/// The whole fix in one pure function, and pure so it can be tested.
+///
+/// **A degenerate `dt` spends nothing, and that is the safe direction.** A
+/// negative frame time is not a quantity a caller should have to reason about,
+/// and an *infinite* one — which `dt.max(0.0)` lets straight through, since
+/// infinity is not less than zero — would take `hold - inf` to zero and release
+/// the figure immediately. That is the strobe this whole mechanism exists to
+/// prevent, reached through the guard rather than around it, so the test for it
+/// is not decoration. The shape is deliberately the same as
+/// [`crate::gui::panes::visualizer::gpu::feedback_for_a_dt`], which drops its
+/// frame for the same reason.
+pub fn hold_tick(hold: f32, dt: f32) -> f32 {
+    if !dt.is_finite() || dt <= 0.0 {
+        return hold.max(0.0);
+    }
+    (hold - dt).max(0.0)
+}
 
 /// Pick the plate's mode pair from the smoothed band levels, sticking to the
 /// current one.
@@ -391,17 +431,17 @@ pub const HOLD_FRAMES: u32 = 90;
 /// Smoothing cannot fix that, and the cost of it here is not a taste call
 /// either — a discrete pick has nothing for a smoother to average. So the figure
 /// sticks: keep the current pair unless a challenger is louder by
-/// `MARGIN_DB`, and pin it for `hold` frames after a switch. `hold` is a frame
-/// count rather than a clock, so the caller owns the decrement.
+/// `MARGIN_DB`, and pin it for `hold` seconds after a switch. `hold` is a
+/// duration in seconds and the caller owns the decrement — see [`hold_tick`].
 ///
 /// Candidates are band indices `1..=MAX_MODE`, and **the band index is the mode
-/// number**. Band 0 is excluded because `chladni_field` clamps mode 0 to 1, so
-/// it could only ever redraw mode 1's figure — a free source of the exact
+/// number**. Band 0 is excluded because a mode of 0 makes the whole field term
+/// zero, so it can only ever draw a blank figure — a free source of the exact
 /// strobing this exists to stop.
 pub fn pick_mode(
     bands: &[f32; VIZ_BANDS],
     current: Option<(usize, usize)>,
-    hold: u32,
+    hold: f32,
 ) -> (usize, usize) {
     // The top two eligible bands, in one pass and without allocating: this runs
     // every frame. Seeding both slots with band 1 costs nothing because the
@@ -429,7 +469,7 @@ pub fn pick_mode(
     if !eligible(n) || !eligible(m) || n == m {
         return cand;
     }
-    if hold > 0 || cand == (n, m) {
+    if hold > 0.0 || cand == (n, m) {
         return (n, m);
     }
     // The *weaker* band of each pair, not the louder one: a pair is only as
@@ -447,6 +487,10 @@ pub fn pick_mode(
 /// wider time window (~23 ms at 44.1 kHz). One bucket per display column gives
 /// the classic WMP mirrored silhouette; the envelope smooths the raw
 /// sample-level noise that made point-sampled polygons render as garbage.
+///
+/// The only caller is the harness, at [`WAVE_BUCKETS`]. The bucket count is a
+/// parameter rather than a constant because a uniform array's length is part of
+/// its GLSL declaration and the harness interpolates that one.
 pub fn compute_wave(viz: &VizBuf, buckets: usize) -> Vec<f32> {
     const WAVE_WINDOW: usize = 1024;
     let samples = viz.snapshot_tail(WAVE_WINDOW);

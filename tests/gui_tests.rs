@@ -5,8 +5,9 @@ mod common;
 use eframe::egui::{self, Color32, FontFamily};
 use std::path::Path;
 use tplay::app::{Pane, VizView};
+use tplay::audio;
 use tplay::audio::eq::EqShared;
-use tplay::audio::viz::{VizBuf, VIZ_BANDS};
+use tplay::audio::viz::{VizBuf, VIZ_BANDS, WAVE_BUCKETS};
 use tplay::gui::panes::visualizer::views::SHADER_VIEWS;
 use tplay::gui::theme::{rasterize_icon, Base, Icon, Layout, Themes, DEFAULT_THEME_ID};
 
@@ -838,153 +839,6 @@ mod breadcrumb {
 ///
 /// So this is the guard: what they hand the tessellator now is convex. Nothing
 /// else about a fill is observable without a window.
-mod view_fills {
-    use super::egui;
-    use tplay::gui::panes::visualizer::views::{flame, radial};
-
-    const BANDS: usize = 32;
-
-    fn pane() -> egui::Rect {
-        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0))
-    }
-
-    /// Weak convexity: every corner turns the same way. A zero-area piece (a
-    /// Flame step sitting on the floor) turns zero times and is still fine, so
-    /// the check is "no sign disagreement", not "strictly convex".
-    fn assert_convex(quad: &[egui::Pos2; 4], label: &str) {
-        let turns: Vec<f32> = (0..4)
-            .map(|i| {
-                let (a, b, c) = (quad[i], quad[(i + 1) % 4], quad[(i + 2) % 4]);
-                (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x)
-            })
-            .collect();
-        let left = turns.iter().filter(|&&t| t < 0.0).count();
-        let right = turns.iter().filter(|&&t| t > 0.0).count();
-        assert!(
-            left == 0 || right == 0,
-            "{label}: a reflex corner in {quad:?} — turns {turns:?}"
-        );
-    }
-
-    #[test]
-    fn every_filled_piece_is_convex() {
-        for &level in &[0.0, 0.15, 0.5, 0.85, 1.0] {
-            let levels = vec![level; BANDS];
-            for quad in radial::fill_quads(pane(), &levels) {
-                assert_convex(&quad, &format!("radial @ {level}"));
-            }
-            for quad in flame::fill_quads(pane(), &levels) {
-                assert_convex(&quad, &format!("flame @ {level}"));
-            }
-        }
-    }
-
-    /// A flat spectrum is the easy case — one trapezoid per view per level. This
-    /// is the one that broke: a contour that alternates full and empty, so
-    /// every step is a different height and the whole mass is a sawtooth.
-    #[test]
-    fn a_sawtooth_contour_fills_convex_pieces() {
-        let sawtooth: Vec<f32> = (0..BANDS)
-            .map(|i| if i % 2 == 0 { 0.95 } else { 0.05 })
-            .collect();
-        let quads = flame::fill_quads(pane(), &sawtooth);
-        assert_eq!(quads.len(), BANDS - 1);
-        for quad in &quads {
-            assert_convex(quad, "flame sawtooth");
-        }
-    }
-
-    /// The quad list is the drawing, so it has to have the right *count* too:
-    /// one piece per arc step per band, one per contour step.
-    #[test]
-    fn the_decomposition_has_one_piece_per_step() {
-        let levels = vec![0.5; BANDS];
-        assert_eq!(
-            radial::fill_quads(pane(), &levels).len(),
-            BANDS * radial::SEGMENTS,
-            "radial: one quad per arc step per band"
-        );
-        assert_eq!(
-            flame::fill_quads(pane(), &levels).len(),
-            BANDS - 1,
-            "flame: one trapezoid per contour step"
-        );
-        // A one-point contour cannot close, so it has no steps and no pieces —
-        // the guard against indexing it.
-        assert!(flame::fill_quads(pane(), &[0.5]).is_empty());
-        assert!(flame::fill_quads(pane(), &[]).is_empty());
-    }
-
-    /// Convex and the right count still leaves "the pieces are somewhere else"
-    /// open, which is a different wrong shape rather than a different wrong
-    /// tessellation. Both views paint `rect` and nothing else.
-    #[test]
-    fn the_pieces_stay_inside_the_pane() {
-        let rect = pane();
-        let levels = vec![1.0; BANDS];
-        for (label, quads) in [
-            ("radial", radial::fill_quads(rect, &levels)),
-            ("flame", flame::fill_quads(rect, &levels)),
-        ] {
-            for quad in &quads {
-                for p in quad {
-                    assert!(
-                        p.distance(rect.center()) <= rect.width().max(rect.height()),
-                        "{label}: {p:?} is outside the pane"
-                    );
-                }
-            }
-        }
-    }
-}
-
-/// The rule the two fill regressions both turned on, asserted at the level where
-/// it can be seen at all.
-///
-/// `fill_closed_path` is a triangle fan from the first point, and it insets the
-/// fill by half of its 1px feathering — so convexity *and* one `Shape::Path` per
-/// filled area are both preconditions, and a multi-shape tiling leaves a visible
-/// gap along every shared edge whether or not the pieces are convex. Neither
-/// property is measurable from a headless context, and the wrong version of the
-/// rule is what two views' comments asserted, so it is pinned in the source: no
-/// view may build a **filled closed path** at all. Filled areas go through
-/// `fill_quads` into one `epaint::Mesh`.
-///
-/// Per-*mark* primitives are deliberately not banned. `rect_filled` for a bar
-/// column or a spectrogram cell, and `line_segment` for a graticule, are each
-/// their own area with no shared edge to gap against; only tiling **one** area
-/// from several shapes is what feathering breaks.
-///
-/// Same shape as `no_inline_tests.rs` and `the_layout_reads_live_inside_the_menu_closure`:
-/// the defect is a placement, and only the call site can show it.
-#[test]
-fn no_view_fills_a_closed_path() {
-    let dir = std::path::Path::new("src/gui/panes/visualizer/views");
-    for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
-        let path = entry.unwrap().path();
-        if path.extension().is_none_or(|e| e != "rs") {
-            continue;
-        }
-        let src = std::fs::read_to_string(&path).unwrap();
-        // Strip comment lines, so a view may *explain* the rule it follows.
-        let code: String = src
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        for banned in ["convex_polygon", "Shape::Path", "PathShape"] {
-            assert!(
-                !code.contains(banned),
-                "{} builds a filled closed path (`{banned}`) — that fill is a triangle \
-                 fan from its first point, and it is inset by half its 1px feathering, so \
-                 a non-convex one spills and adjacent ones leave a gap. Use `fill_quads` \
-                 + one `epaint::Mesh`.",
-                path.display()
-            );
-        }
-    }
-}
-
 /// The shader-drawn views: the four properties that hold them together, and the
 /// three ways a new one could quietly break.
 ///
@@ -1191,6 +1045,470 @@ mod shader_views {
         }
     }
 
+    /// The waterfall's scroll shifts by **whole texels**, and samples accordingly.
+    ///
+    /// A scrolling history that resamples itself once a frame is a low-pass filter
+    /// applied once per column, so a 256-column history is filtered 256 times and
+    /// arrives uniformly smeared. The cause is invisible in every other way: the
+    /// shader compiles, the callback count and rect are right, the program links,
+    /// and the picture is *nearly* right — it is only soft, and only on the pane
+    /// widths where the shift does not divide the target's width exactly, which
+    /// reads as a property of the window rather than of the code.
+    ///
+    /// So the claim is about **which sampler the accumulate pass uses**: `texelFetch`
+    /// addresses whole texels and `texture()` interpolates between them, and for a
+    /// shift that is meant to be a copy of the neighbouring column only one of them
+    /// is a copy. Asserted over the accumulate pass alone, because the present pass
+    /// is required to interpolate — the quantised target is a little larger than
+    /// the pane — so the two passes genuinely need different sampling and the rule
+    /// is per-pass, not per-view.
+    #[test]
+    fn the_waterfall_scrolls_by_whole_texels() {
+        let view = SHADER_VIEWS
+            .iter()
+            .find(|v| v.file == "spectrogram")
+            .expect("the spectrogram is in the table");
+        let accumulate = view.frags[0];
+        assert!(
+            accumulate.contains("texelFetch(u_prev"),
+            "the spectrogram's accumulate pass must read its history with `texelFetch`, \
+             which addresses whole texels. A `texture()` read at a fractional texel \
+             offset interpolates between two neighbours, and doing that to the whole \
+             history once a frame is a low-pass filter applied once per column — the \
+             waterfall arrives blurred, and only on the pane widths whose target size \
+             does not divide by the column count, so it reads as the window's fault."
+        );
+        assert!(
+            !accumulate.contains("texture(u_prev"),
+            "the spectrogram's accumulate pass must not sample its history through \
+             `texture()` — see above. Every read of the feedback target there is a \
+             texel copy, not an interpolation."
+        );
+        // The column count is derived from the target's own width, so it needs the
+        // target's own size — which is neither the pane's nor `u_resolution`,
+        // because `target_size` quantises it to a 64px grid. Guessing it from a
+        // uniform is the mistake this replaced.
+        assert!(
+            accumulate.contains("textureSize(u_prev"),
+            "the spectrogram's column width must come from the feedback target's own \
+             size. `u_resolution` is the *pane* in physical pixels and the target is \
+             quantised to a 64px grid, so a shift computed from `u_resolution` is \
+             wrong by up to a grid cell and the column no longer lines up with the \
+             texel it is copying."
+        );
+    }
+
+    /// The waterfall's new column lands on the edge the scroll **vacates**.
+    ///
+    /// The two halves of a ring-buffer scroll have to agree: the shift consumes one
+    /// edge and the new data overwrites it. When they disagree, nothing errors and
+    /// nothing looks broken in the obvious sense — the new column is written on the
+    /// edge the shift is *feeding from*, so it is overwritten again on the very next
+    /// frame and never scrolls. What the user sees is a permanent bright stripe down
+    /// the wrong side of the pane, plus a second copy of the same column at the
+    /// opposite edge, and neither is a failure any existing check could name.
+    ///
+    /// **Checked against the shipped shader, not a copy of it.** An earlier version
+    /// of this test simulated the scroll in Rust, which is a second implementation
+    /// of the same two lines and would have passed with the shader reverted — the
+    /// mirror trap this repo has already been bitten by once, in the shuffle
+    /// picker. So both numbers are read out of the shader itself: the edge its
+    /// fresh-column test names, and the sign of its shift. A simulation still runs
+    /// below them, as the *premise* — it is what makes the pair a claim about a
+    /// ring buffer rather than a string match — but it is the shader's arithmetic
+    /// that is asserted.
+    #[test]
+    fn the_waterfalls_new_column_lands_where_the_scroll_vacated_it() {
+        let body = SHADER_VIEWS
+            .iter()
+            .find(|v| v.file == "spectrogram")
+            .and_then(|v| v.frags.first().copied())
+            .expect("the spectrogram's accumulate pass is in the table");
+
+        // The fresh column's guard, verbatim: `p.x >= sz.x - colw`. What matters
+        // is that it names the **high** end of `p.x` and the same `colw` the shift
+        // moves by — the two agreeing on one edge is the whole invariant.
+        let fresh = body
+            .lines()
+            .find(|l| l.contains("? fresh : old"))
+            .unwrap_or_else(|| panic!("the spectrogram no longer has a fresh/old choice:\n{body}"));
+        assert!(
+            fresh.contains("p.x >= sz.x - colw"),
+            "the spectrogram's new column must land on the rightmost columns — the ones \
+             its shift moves its neighbours out of. This guard is `{fresh}`. On any other \
+             edge the new column is overwritten on the next frame and never scrolls, \
+             which shows as a permanent bright bar down the wrong side of the pane."
+        );
+
+        // The shift reads its neighbour from the *low* side, which is the same
+        // statement: `p + colw` steps towards the edge the new column takes, so a
+        // column moves left and vacates the right. A `- colw` here with the guard
+        // above would be a scroll that feeds from the column it is writing.
+        let shift = body
+            .lines()
+            .find(|l| l.contains("texelFetch(u_prev"))
+            .unwrap_or_else(|| panic!("the spectrogram no longer reads its history:\n{body}"));
+        assert!(
+            shift.contains("(p.x + colw) % sz.x"),
+            "the spectrogram's scroll must read the column to the right — `p.x + colw` — so \
+             that the picture moves left and vacates the rightmost columns, which is where \
+             the new column goes. This line is `{shift}`."
+        );
+
+        // The premise: one period of the scroll, on the shader's own numbers, writes
+        // every column exactly once. Without it the pair above is two string
+        // patterns that happen to be spelled correctly; with it, it is a ring
+        // buffer. `colw` 1, 2 and 4 are the ones a 64px-grid target can produce at
+        // 256, 512 and 1024 columns, plus 3 for a target the size of a typical pane.
+        for colw in [1usize, 2, 3, 4] {
+            const COLUMNS: usize = 256;
+            let mut history = [0u8; COLUMNS];
+            for _ in 0..COLUMNS {
+                let mut next = [0u8; COLUMNS];
+                for (p, slot) in next.iter_mut().enumerate() {
+                    *slot = if p >= COLUMNS - colw {
+                        u8::MAX
+                    } else {
+                        history[(p + colw) % COLUMNS]
+                    };
+                }
+                history = next;
+            }
+            assert!(
+                history.iter().all(|v| *v == u8::MAX),
+                "colw = {colw}: a full period of this scroll must consume every column \
+                 exactly once, so no column is ever frozen and none is read twice. \
+                 {history:?}"
+            );
+        }
+    }
+
+    /// The dB floor is **one number** across the DSP and every shader.
+    ///
+    /// `compute_bands` clamps into `DB_FLOOR..=0.0` and every shader maps that
+    /// range up to `0..1` through the prelude's `level()`. The two ends are a
+    /// boundary between halves that cannot see each other, and the mapping was a
+    /// hand-written `float level(float d)` in **six** view bodies plus two inlined
+    /// copies — all correct, all separate. That is fine until the floor moves, and
+    /// then **nothing fails**: every shader still compiles, every value is still in
+    /// range, and the symptom is a view that quietly compresses or clips its quiet
+    /// end, differently in each one, on whichever side was not updated.
+    ///
+    /// So the number is interpolated into the prelude from [`DB_FLOOR`] and this
+    /// test reads the *assembled* source — the same string the driver gets — rather
+    /// than trusting that a view called the shared helper. Two directions, because
+    /// either one alone is satisfiable by luck:
+    ///
+    /// 1. the prelude's `DB_FLOOR` is the DSP's, to the bit; and
+    /// 2. no view defines a `level` of its own, and none writes the floor as a
+    ///    literal — so there is exactly one place the number can be.
+    #[test]
+    fn the_db_floor_is_one_number_across_the_dsp_and_every_shader() {
+        let assembled = gpu::fragment_source("float x = level(u_bands[0]);");
+        let floor = format!("const float DB_FLOOR = {};", audio::viz::DB_FLOOR);
+        assert!(
+            assembled.contains(&floor),
+            "the assembled prelude must carry the dB floor the DSP reports, spelled \
+             `{floor}`. The two ends of this range are a boundary the halves cannot \
+             see across: the DSP clamps into it and the shaders map out of it, so a \
+             mismatch fails silently as a view that quietly compresses its quiet end."
+        );
+        // The span has to be derived, not typed: `(d + 60.0) / 60.0` assumes a
+        // symmetric range, and a floor of -48 would silently be wrong.
+        assert!(
+            assembled.contains(&format!("const float DB_SPAN = {};", -audio::viz::DB_FLOOR)),
+            "the prelude's DB_SPAN must be the width of the DSP's range, derived from \
+             DB_FLOOR rather than typed — a literal assumes a symmetric range and is \
+             wrong the moment the floor is not half of the ceiling."
+        );
+
+        assert!(
+            !SHADER_VIEWS.is_empty(),
+            "the table is empty, so this sweep would pass vacuously"
+        );
+        for view in SHADER_VIEWS {
+            for body in view.frags {
+                // Comments are skipped: a view may *name* the constant it no longer
+                // writes down.
+                let code: String = body
+                    .lines()
+                    .filter(|l| !l.trim_start().starts_with("//"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(
+                    !code.contains("float level("),
+                    "{}: defines its own `level`, and the prelude owns that function. \
+                     A second copy is a second dB mapping, which is the thing this \
+                     exists to prevent — and the prelude's is the one built from the \
+                     DSP's floor.",
+                    view.name
+                );
+                for (n, line) in code.lines().enumerate() {
+                    assert!(
+                        !line.contains("60.0"),
+                        "{}:{} writes the dB floor as a literal — `{line}`. Use \
+                         `level(d)`, or `DB_FLOOR` where the raw range is wanted, so \
+                         the floor is written down once.",
+                        view.name,
+                        n + 1
+                    );
+                }
+            }
+        }
+
+        // The Rust half, which is where the *other* nine copies lived: a view seeds
+        // its smoothing buffer with `[DB_FLOOR; VIZ_BANDS]`, and a literal there is
+        // the same silent drift — the buffer starts at a level `compute_bands` can
+        // never produce, so the first frames of every view are wrong by an amount
+        // nobody can see. Reading the sources is what catches it; the first version
+        // of this test only read the GLSL and a retyped seed passed it.
+        for view in SHADER_VIEWS {
+            let code: String = view_source(view.file)
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                !code.contains("-60.0"),
+                "{}: seeds or bounds something with a dB literal. `DB_FLOOR` is the \
+                 one definition, and a view's first frame is exactly where a wrong \
+                 floor shows with nothing else to compare it against.",
+                view.name
+            );
+        }
+    }
+
+    /// The waterfall's two passes must flip the target's `y` **the same way**.
+    ///
+    /// A feedback round trip is two conversions of one coordinate, and they have to
+    /// cancel: the accumulate pass writes the target's rows and the present pass
+    /// reads them back. A framebuffer's rows run **bottom-up** (row 0 is at NDC
+    /// y = −1) while `v_uv.y` is 0 at the pane's **top**, so getting the pair
+    /// wrong does not merely turn the picture upside down — it mirrors the target
+    /// on the way in and reads it back the same way round, and since the present
+    /// pass *interpolates*, the low-pass of an image and its mirror **is**
+    /// mirror-symmetric. So the pane looks like it is reflecting itself about the
+    /// horizontal centre line, and the beat between consecutive mirrored frames is
+    /// a regular pattern of vertical bars. Both symptoms, one cause.
+    ///
+    /// Nothing else in the repo can see this. The shaders compile, the callback
+    /// count and rect are right, the program links, the column count is right, and
+    /// the scroll genuinely happens — it is a picture that is *nearly* right and
+    /// reflected, which is the worst shape of bug to diagnose from inside the code.
+    ///
+    /// `Trails` is immune, and the reason is worth having: its accumulate transform
+    /// is a spin and a zoom about the pane's centre, so a whole-image `y` flip is
+    /// one of that transform's own symmetries and cancels on its own. Only the
+    /// waterfall carries **per-column** data, where a flip is visible.
+    ///
+    /// Asserted by reading the flip out of **both shipped strings** and requiring
+    /// them to match. The simulation underneath is the premise that makes those two
+    /// string checks mean something — it is the round trip, over a small target —
+    /// and it is written so that flipping one pass alone breaks it, which is what
+    /// makes "they must agree" a fact rather than a coincidence of two greps.
+    #[test]
+    fn the_waterfalls_two_passes_flip_y_together() {
+        let view = SHADER_VIEWS
+            .iter()
+            .find(|v| v.file == "spectrogram")
+            .expect("the spectrogram is in the table");
+        assert_eq!(
+            view.frags.len(),
+            2,
+            "the waterfall runs two programs — the accumulate must address whole texels and \
+             the present must interpolate — so a single source cannot do both. Found {}.",
+            view.frags.len()
+        );
+        let (accumulate, present) = (view.frags[0], view.frags[1]);
+
+        // The accumulate's flip is a framebuffer-space row index; the present's is a
+        // flipped sample. Read as "is this row mirrored", not as a spelling, so that
+        // either form of the flip satisfies the rule and only a *missing* one — which
+        // is the bug — fails it.
+        let accumulate_flips = accumulate.contains("sz.y - 1 - int(");
+        let present_flips = present.contains("1.0 - v_uv.y");
+        assert!(
+            accumulate_flips,
+            "the waterfall's accumulate pass must address the target in *framebuffer* space: \
+             a framebuffer's rows run bottom-up and `v_uv.y` is 0 at the pane's top, so a \
+             read at `int(v_uv.y * sz.y)` and a write at the rasterised row land on \
+             different rows. That mirrors the whole history on every frame."
+        );
+        assert_eq!(
+            accumulate_flips, present_flips,
+            "the waterfall's accumulate pass flips y ({accumulate_flips}) and its present \
+             pass flips y ({present_flips}). They are two conversions of one coordinate and \
+             must cancel: a target mirrored on the way in and read back the same way is not \
+             upside down, it is *its own mirror image* softened by the present pass's \
+             interpolation, with a vertical beat from the frames alternating. `Trails` does \
+             not need the pair because its accumulate transform is symmetric under a \
+             whole-image y flip — only the waterfall carries per-column data, where a flip \
+             is visible."
+        );
+
+        // The premise: a `ROWS`-row target, each row holding its own index, through one
+        // accumulate write and one present read. The write lands on the rasterised row
+        // `w`; the read asks for row `w` back, unless the present's uv is top-down over
+        // a bottom-up texture, in which case it asks for `ROWS - 1 - w`. So the round
+        // trip is the identity exactly when the two flips agree — and this loop is
+        // what the two string assertions above are standing on.
+        const ROWS: usize = 9;
+        let target: Vec<u8> = (0..ROWS).map(|r| r as u8).collect();
+        for (label, p_flip) in [
+            ("the present samples top-down", false),
+            ("and the present samples bottom-up", true),
+        ] {
+            let shown: Vec<u8> = (0..ROWS)
+                .map(|w| {
+                    if p_flip {
+                        target[w]
+                    } else {
+                        target[ROWS - 1 - w]
+                    }
+                })
+                .collect();
+            let identity = shown.iter().enumerate().all(|(r, v)| *v == r as u8);
+            assert_eq!(
+                identity, p_flip,
+                "{label}: the row the accumulate wrote must come back as the row that was \
+                 written, and this case says otherwise (rows {shown:?} over a {ROWS}-row \
+                 target whose rows hold their own index). The accumulate pass always writes \
+                 bottom-up, so the present pass has to read bottom-up too."
+            );
+        }
+    }
+
+    /// No shader indexes a band through an **angle**.
+    ///
+    /// The obvious way to say "the band at the angle this fragment sits at" is
+    /// `atan(y, x)` scaled and floored into `u_bands`, and three views shipped
+    /// exactly that. **`atan` has a branch cut**: it jumps from `+pi` to `-pi` along
+    /// `x < 0` at `y == 0`, which is a fixed line up the middle of the pane's left
+    /// side. So the band index steps there, and with it whatever the index drives —
+    /// `Plasma`'s warp strength, `Trails`' ring brightness — steps with it.
+    ///
+    /// **No edge fade can hide this, and that is the reason it is a rule rather
+    /// than a style note.** A fade works by taking a value to zero at a
+    /// *boundary*; this is a break in the middle of the *function*, so the value
+    /// either side of the cut is two different colours and the best a fade can do
+    /// is smear between them. `Plasma` and `Trails` both showed it as a seam on the
+    /// left, and in `Trails` it was worse than a seam: `fresh` is **added** to the
+    /// buffer every frame, so the step was deposited as a permanent line.
+    ///
+    /// The replacement is the harness's `spectrum_at_bearing` — a projection onto
+    /// the bearing's first harmonics, which is the same shape of read and is
+    /// continuous and periodic by construction. Asserting the *forbidden* form is
+    /// what makes it a rule: a new view that wants a radial spectrum read has one
+    /// path to find, rather than one trap to rediscover. `Radial` is the case that
+    /// proves the rule needs its exception stated — it *does* index a band by
+    /// angle, because one band per angular sector is the whole picture, and its cut
+    /// lands exactly on a segment gap the view already draws.
+    #[test]
+    fn a_shader_never_indexes_a_band_through_an_angle() {
+        // Angular sectors are legitimate when the angle *is* the layout. `Radial`
+        // draws one band per sector and leaves a gap at `within < 0.05`, so the
+        // cut falls in a boundary it draws anyway — a break in the layout is not a
+        // break in the picture. Named rather than pattern-matched, because a
+        // pattern would have to guess at intent.
+        const SECTORED: [&str; 1] = ["Radial"];
+        for (name, body) in bodies() {
+            if SECTORED.contains(&name) {
+                continue;
+            }
+            // Comments are skipped, so a view may *name* the function it no longer
+            // calls — which is how both seams are written down next to the fix.
+            let code: String = body
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                !code.contains("atan("),
+                "{name}: reads the spectrum through `atan`, whose branch cut along \
+                 `x < 0` at `y == 0` steps the band index down the pane's left edge. \
+                 The value either side of a cut is two different colours, so this \
+                 cannot be faded out. Use `spectrum_at_bearing(p)` from the harness \
+                 prelude, which is continuous and periodic by construction. A view \
+                 whose *layout* is angular sectors may index a band directly — \
+                 {SECTORED:?} is the one that does, and only because it draws a gap \
+                 there anyway."
+            );
+        }
+        // The replacement has to exist and be reachable, or "use the helper" is an
+        // instruction to write a new one.
+        assert!(
+            gpu::fragment_source("float b = spectrum_at_bearing(p);")
+                .contains("float spectrum_at_bearing(vec2 p)"),
+            "a shader that asks for `spectrum_at_bearing` must get it, and get the \
+             `u_bands` and `VIZ_BANDS` declarations it needs with it."
+        );
+    }
+
+    /// The trail's edge fade is keyed on the fragment's **own** coordinate.
+    ///
+    /// `Trails` samples its previous frame through a shrink toward the centre, so
+    /// the sample coordinate and the screen coordinate are nowhere near each other
+    /// at the pane's edges: at `centred.x = -0.5` the sample lands at about `0.502`,
+    /// the middle of the pane. The fade was computed from the *sample*, so it put a
+    /// ramp in the middle of the picture and left the actual left edge at full
+    /// weight — and the `clamp` then held that edge texel at full strength for the
+    /// whole fade, which is a hard line and not a gradient.
+    ///
+    /// This is the same "which space is this coordinate in" trap as the waterfall's
+    /// `y` flip, and the two are the only views that reach for a coordinate other
+    /// than the fragment's own — which is why both are pinned.
+    #[test]
+    fn the_trails_fade_follows_the_fragment_not_the_sample() {
+        let body = SHADER_VIEWS
+            .iter()
+            .find(|v| v.file == "trails")
+            .and_then(|v| v.frags.first().copied())
+            .expect("trails' accumulate pass is in the table");
+        let fade = body
+            .lines()
+            .find(|l| l.contains("smoothstep"))
+            .unwrap_or_else(|| panic!("trails no longer has an edge fade:\n{body}"));
+        assert!(
+            fade.contains(", uv)"),
+            "the trail's edge fade must be keyed on `uv`, the fragment's own position: \
+             `{fade}`. The trail shrinks toward the centre, so the sample coordinate \
+             `prev` is near the middle of the pane at the pane's own edge — a fade on \
+             it ramps through the middle of the picture and leaves the real edge at \
+             full weight, which is a hard line and not the gradient it was meant to be."
+        );
+
+        // The premise: the sample coordinate at the pane's left edge is nowhere near
+        // 0, so no fade keyed on it can coincide with the pane's edge. This is the
+        // transform as the shader states it, at `centred.x = -0.5`.
+        const SPIN: f32 = 0.004;
+        const ZOOM: f32 = 0.0035;
+        let centred = (-0.5f32, 0.0f32);
+        let (s, c) = (SPIN.sin(), SPIN.cos());
+        let spun = (centred.0 * c - centred.1 * s, centred.0 * s + centred.1 * c);
+        let prev_x = (spun.0 * (1.0 - ZOOM) - centred.0) + 0.5;
+        assert!(
+            prev_x > 0.4,
+            "the premise: at the pane's left edge the trail's sample lands at {prev_x}, \
+             nowhere near 0. If this ever became ~0 the fade would coincide with the \
+             edge and the check above would be reading a coincidence."
+        );
+    }
+
+    /// One view's Rust source, by its `file` stem.
+    ///
+    /// A property about *where a name appears* is not measurable at runtime, so
+    /// the sweeps that have one read the source. Keyed on the table's `file` field
+    /// rather than guessing from the name — that guess is wrong the moment a UI
+    /// label stops being a filename, and a wrong guess is an IO error rather than
+    /// a wrong answer, which is the worst kind of failure for a test.
+    fn view_source(file: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/gui/panes/visualizer/views")
+            .join(format!("{file}.rs"));
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+    }
+
     /// Every GLSL body the app ships, as `(view name, source)`.
     ///
     /// Flattened from the table's `frags` rather than reading one `frag` per view:
@@ -1199,9 +1517,7 @@ mod shader_views {
     fn bodies() -> Vec<(&'static str, &'static str)> {
         let mut out = Vec::new();
         for view in SHADER_VIEWS {
-            for body in view.frags {
-                out.push((view.name, *body));
-            }
+            out.extend(view.frags.iter().map(|body| (view.name, *body)));
         }
         out
     }
@@ -1251,15 +1567,34 @@ mod shader_views {
         }
     }
 
-    /// Every shader view is reachable, and the table has nothing unreachable.
+    /// Every view has a shader, and the table is exactly the views.
     ///
-    /// Three ways to get this wrong, all silent: a table row whose `draw` is never
-    /// called (the view exists and is invisible), a `VizView` variant that draws
-    /// nothing, and a name in one list that is not in the other.
+    /// **Both directions, and the reverse one is the one that bites.** Before
+    /// every view was a shader, the compiler was what noticed a new `VizView`
+    /// variant with no arm in the pane's `match` — the match was exhaustive over
+    /// the enum, so a variant without an arm did not build. That safety went when
+    /// the dispatch became a table lookup, which is the only reason this test has
+    /// to check the *other* direction: a `VizView` the table does not name is a
+    /// view that appears in the dropdown, is written to `config.json`, restores
+    /// across sessions — and draws absolutely nothing. The old shape of this test
+    /// only checked that the table had no unreachable rows, which is the harmless
+    /// half.
+    ///
+    /// A row whose `draw` is never called is the mirror failure, and it is just
+    /// as invisible: the view exists and is blank.
     #[test]
-    fn the_shader_table_and_the_view_match_agree() {
+    fn every_view_has_a_shader_and_the_table_covers_them_all() {
         let names: Vec<&str> = VizView::ALL.iter().map(|v| v.name()).collect();
         let table: Vec<&str> = SHADER_VIEWS.iter().map(|v| v.name).collect();
+        for name in &names {
+            assert!(
+                table.contains(name),
+                "`{name}` is a selectable view and has no row in SHADER_VIEWS, so the \
+                 pane's table lookup finds nothing and it draws a bare background. The \
+                 dispatch is a lookup rather than an exhaustive match, so the compiler \
+                 no longer catches this."
+            );
+        }
         for name in &table {
             assert!(
                 names.contains(name),
@@ -1267,11 +1602,16 @@ mod shader_views {
                  looks the row up by `VizView::name()`, so this row is unreachable"
             );
         }
-        // The match arm that dispatches them. Not a name check: a shader view is
-        // reached through the table, so no view name appears in the pane at all.
-        // What has to be there is the fall-through arm, and it is the *only* thing
-        // that can route a table row — a match with seven direct calls and no
-        // fall-through compiles, and every shader view renders nothing.
+        assert_eq!(
+            table.len(),
+            names.len(),
+            "the table and VizView::ALL disagree on how many views there are"
+        );
+        // The arm that dispatches them. Not a name check: a view is reached
+        // through the table, so no view name appears in the pane at all. What has
+        // to be there is the table lookup itself — a pane that painted a
+        // background and returned would compile, and every view would render
+        // nothing.
         let pane = src("src/gui/panes/visualizer.rs");
         let code: String = pane
             .lines()
@@ -1280,9 +1620,77 @@ mod shader_views {
             .join("\n");
         assert!(
             code.contains("SHADER_VIEWS"),
-            "visualizer.rs has no arm dispatching through SHADER_VIEWS, so every shader \
-             view in the table is unreachable — the match is exhaustive over the seven \
-             CPU views and silently draws nothing for the rest"
+            "visualizer.rs has no arm dispatching through SHADER_VIEWS, so every view \
+             in the table is unreachable and the pane paints only its background"
+        );
+    }
+
+    /// A view draws its shader and nothing else.
+    ///
+    /// The two guards that used to sit here were about *how* a view filled a
+    /// shape: no closed paths, and every filled piece convex, because
+    /// `epaint`'s closed-path fill is a triangle fan from its first vertex and
+    /// insets the fill by half its feathering. Both were real defects — a ring
+    /// sector and a ridgeline both shipped broken that way — and both cost a
+    /// workaround: `fill_quads` decomposing into convex quads in two views, a
+    /// 1 200-segment hand-built mesh in a third, and about a hundred lines of
+    /// tests proving the workarounds correct.
+    ///
+    /// None of that can happen now, and this is the cheap guard that says so. A
+    /// fragment shader rasterises a shape by deciding what colour each fragment
+    /// is, so there is no fan, no inset, no shared edge between two adjacent
+    /// pieces and no tessellator to get wrong. The class of defect is designed out
+    /// rather than tested for, which is the better answer and the shorter one.
+    ///
+    /// **What is banned is drawing, not the painter.** Every view still takes a
+    /// `&egui::Painter`, because that is how it queues its callback — so the check
+    /// is on the primitive names, not on the receiver.
+    #[test]
+    fn no_view_paints_anything_with_egui() {
+        const DRAWING: [&str; 9] = [
+            "rect_filled",
+            "rect_stroke",
+            "line_segment",
+            "circle_",
+            "hline",
+            "vline",
+            "add_mesh",
+            "Shape::mesh",
+            "Shape::Path",
+        ];
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/gui/panes/visualizer/views");
+        let mut files = 0;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            files += 1;
+            let text = std::fs::read_to_string(&path).unwrap();
+            // Strip comment lines, so a view may *explain* a rule it follows.
+            let code: String = text
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            for banned in DRAWING {
+                assert!(
+                    !code.contains(banned),
+                    "{} draws with egui (`{banned}`). Every view is a fragment shader \
+                     now: the pane hands it a callback and a rect, and the shader \
+                     decides each fragment. Painting here would cover the shader, or \
+                     stand in for it, and the view would still look deliberate.",
+                    path.display()
+                );
+            }
+        }
+        assert_eq!(
+            files,
+            SHADER_VIEWS.len() + 1,
+            "the views directory holds {files} files for {} table rows plus mod.rs — a \
+             view file with no row, or a row with no file",
+            SHADER_VIEWS.len()
         );
     }
 
@@ -1344,23 +1752,30 @@ mod shader_views {
     /// own reference against the view's packing means the test is about the
     /// contract rather than about one view's current source.
     ///
+    /// `u_modes` is the one uniform a *view* writes directly rather than having
+    /// `pack` fill it, so it is the one a view can forget. Everything else is
+    /// measured by `pack`, which cannot be forgotten because it has no per-view
+    /// half — `u_hold` was the second, for a view that no longer exists.
+    ///
     /// `u_prev` is excluded on purpose: it is a sampler and the harness owns it,
-    /// and no shipped view declares one.
+    /// and a view never writes one.
     #[test]
     fn a_superset_uniform_reaches_a_view_that_uses_it() {
         for view in SHADER_VIEWS {
-            if !view.frags.iter().any(|f| f.contains("u_modes")) {
-                continue;
+            for uniform in ["u_modes"] {
+                if !view.frags.iter().any(|f| f.contains(uniform)) {
+                    continue;
+                }
+                let text = src(&format!("src/gui/panes/visualizer/views/{}.rs", view.file));
+                let field = uniform.trim_start_matches("u_");
+                assert!(
+                    text.contains(&format!("uniforms.{field}")),
+                    "{}: its shader reads `{uniform}`, so it must pack it into \
+                     `uniforms.{field}` — a view-written uniform the view forgets to \
+                     write reads as 0.0, which for this one is silence",
+                    view.name
+                );
             }
-            let text = src(&format!(
-                "src/gui/panes/visualizer/views/{}.rs",
-                view.name.to_lowercase().replace(' ', "")
-            ));
-            assert!(
-                text.contains("uniforms.modes"),
-                "{}: its shader reads `u_modes`, so it must pack the mode pair into them",
-                view.name
-            );
         }
     }
 
@@ -1498,6 +1913,103 @@ mod shader_views {
         }
         // A real dt never returns a full-strength frame either.
         assert!(gpu::feedback_for_a_dt(1e-9, HOLD) < 1.0);
+    }
+
+    /// No shader reads `gl_FragCoord`.
+    ///
+    /// **This is the guard for the worst bug the pane has had, and it is a
+    /// source-reading test because there is no other kind available.** Every one
+    /// of the ten views divided `gl_FragCoord.xy` by `u_resolution`, as though
+    /// `gl_FragCoord` were *pane*-relative with a top-left origin. It is neither:
+    /// it is window-relative and **bottom-left origin**. So a view in a dock tab
+    /// anywhere but the left edge of the window read part of its own pattern from
+    /// outside itself, and the slice where the quotient passed 1.0 saturated —
+    /// the bars and the wave froze on a vertical seam at a constant value, the
+    /// rings drew off-centre because `0.5` is `pane_w / 2` of *window* x, the
+    /// ridgeline was upside down, the nebula's raymarch camera started outside the
+    /// volume so every fragment hit the early-out, and the waterfall's new column
+    /// landed somewhere other than its edge.
+    ///
+    /// Nine of ten views, six distinct symptoms, and **every headless test passed
+    /// the whole time.** The shaders compile, the callback count and rect are
+    /// right, the program links, the driver reports no error — all of it correct,
+    /// none of it about coordinate spaces. It took a person looking at the window,
+    /// which is the instrument this project does not have.
+    ///
+    /// So the property is pinned in the source, the same shape as
+    /// `the_gl_harness_never_names_a_view`: the uv comes from the vertex shader's
+    /// `v_uv` varying, which the *viewport* maps onto the pane, so a view cannot
+    /// get this wrong by accident and never needs to know where the pane is.
+    #[test]
+    fn no_shader_reads_gl_fragcoord() {
+        // The vertex shader's half of the contract, read from the same string the
+        // driver compiles. A `const` would be nicer but `vertex_source` allocates.
+        let vert = gpu::vertex_source();
+        assert!(
+            vert.contains("out vec2 v_uv;")
+                && vert.contains("v_uv = vec2(corner.x, 1.0 - corner.y);"),
+            "the shared vertex shader stopped handing the fragment stage a \
+             pane-relative `v_uv` (top-down). Every view gets its uv from it, so \
+             this is the one thing that has to be true. Got: {vert}"
+        );
+        for (name, body) in bodies() {
+            for (n, line) in body.lines().enumerate() {
+                let code = line.trim_start().trim_start_matches("//");
+                assert!(
+                    !code.contains("gl_FragCoord"),
+                    "{}:{} reads `gl_FragCoord`\n  {line}\nIt is window-relative and \
+                     bottom-left origin; every view here is pane-relative and top-down. \
+                     Use the `v_uv` varying, which the viewport maps onto the pane.",
+                    name,
+                    n + 1
+                );
+            }
+        }
+    }
+
+    /// A density ramp's lower edge is below the field's mean.
+    ///
+    /// **Nebula rendered a bare background for its whole life because of this.**
+    /// Its `fbm` summed three octaves to 0..0.875 with a mean near 0.44, and the
+    /// march accumulated `smoothstep(0.62, 0.98, field)` — so a field averaging
+    /// 0.44 fed a ramp starting at 0.62, essentially every sample contributed
+    /// zero, `acc` stayed at zero, and the pane was the background colour. A
+    /// correct program, a linked program, a clean log, and a silent failure.
+    ///
+    /// The property is the one that makes a ramp show anything at all: **a ramp
+    /// whose lower edge is above the field's mean discards more than half of every
+    /// sample.** It is read out of the two literals rather than reasoned about,
+    /// because both are numbers a shader states and neither a compiler nor a
+    /// screenshot compares them. Crude, readable, and it fires.
+    #[test]
+    fn a_density_ramp_starts_below_the_field_it_reads() {
+        for (name, body) in bodies() {
+            // `acc += smoothstep(A, B, d) * ...` — the march's accumulation.
+            for (n, line) in body.lines().enumerate() {
+                let code = line.trim_start();
+                if !code.contains("acc +=") {
+                    continue;
+                }
+                let lo = code
+                    .split_once("smoothstep(")
+                    .and_then(|(_, rest)| rest.split_once(','))
+                    .and_then(|(a, _)| a.trim().parse::<f64>().ok());
+                let Some(lo) = lo else { continue };
+                // The normalised field this reads is 0..1 with a mean near 0.5 —
+                // a mean at or above the ramp's lower edge means most of every
+                // sample is thrown away before it is accumulated.
+                assert!(
+                    lo < 0.5,
+                    "{}:{} accumulates `smoothstep({lo}, ..)`, which starts above the \
+                     field's mean of ~0.5. A ramp that discards more than half of \
+                     every sample leaves the accumulated density at zero, and the \
+                     view renders the background colour — a working program and a \
+                     silent failure.\n  {line}",
+                    name,
+                    n + 1
+                );
+            }
+        }
     }
 
     /// Every GLSL function is declared before the first use of it.
@@ -1721,6 +2233,48 @@ mod shader_views {
             .max()
             .unwrap_or(1);
         (sites, steps)
+    }
+
+    /// The uniform block fits inside the fragment uniform limit GL 3.3 promises.
+    ///
+    /// A `float` array's elements may be given a whole `vec4` slot each rather
+    /// than packed four to one, so the block's cost is bounded by counting *one
+    /// vector per array element* — the pessimistic reading, and the one that
+    /// matters because which packing a driver picks is not observable before you
+    /// run on it. GL 3.3 core's guaranteed floor for
+    /// `MAX_FRAGMENT_UNIFORM_VECTORS` is 224.
+    ///
+    /// **This is not a compiler-checked property**, which is the whole reason it
+    /// needs a test. glslang links a 256-element float array without complaint —
+    /// the limit is a driver limit — and a driver that cannot place the block
+    /// fails at *its* link time, on one machine, as a blank pane with a log line.
+    /// The wave envelope was written at 256 buckets, which is 288 vectors with
+    /// the bands, comfortably over the floor and well under what every real GPU
+    /// since 2012 reports. That is exactly the reasoning that ships a shader that
+    /// renders on the developer's machine and nowhere else.
+    #[test]
+    fn the_uniform_block_fits_the_gl_33_floor() {
+        /// GL 3.3 core, table 2.11: the guaranteed minimum. A literal, because it
+        /// is a property of the spec and not of this code.
+        const FLOOR: u64 = 224;
+        // The block's arrays, worst case one vector per element. **Read from the
+        // crate, not written out here** — which is the opposite of the usual
+        // "a budget that reads the constants it guards cannot report that they
+        // moved" rule. That rule is about asserting a *value*; this asserts a
+        // *relationship*, and hardcoding the sizes made it unfailable: the sum
+        // was 160 whichever way the constants moved, so a 256-bucket wave envelope
+        // passed a test that exists to catch exactly that.
+        let arrays: [(&str, u64); 2] = [
+            ("u_bands", VIZ_BANDS as u64),
+            ("u_wave", WAVE_BUCKETS as u64),
+        ];
+        let total: u64 = arrays.iter().map(|(_, n)| n).sum();
+        assert!(
+            total <= FLOOR,
+            "the uniform block may need {total} fragment uniform vectors \
+             ({arrays:?}) and GL 3.3 only guarantees {FLOOR}. Shrink the array, or \
+             move it to a texture."
+        );
     }
 
     /// A theme switch reaches the uniforms.

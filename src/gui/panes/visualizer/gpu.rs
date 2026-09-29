@@ -33,7 +33,7 @@
 //! for hardware that does not ship. A driver that cannot compile a shader logs
 //! it once and the pane keeps its background — see [`resources`].
 
-use crate::audio::viz::{compute_level, VizBuf, VIZ_BANDS};
+use crate::audio::viz::{compute_wave, VizBuf, DB_FLOOR, VIZ_BANDS, WAVE_BUCKETS};
 use crate::gui::theme::Palette;
 use eframe::egui;
 use glow::HasContext;
@@ -69,12 +69,23 @@ pub enum Target {
 /// premultiplied vertex colours into a framebuffer it treats as linear storage —
 /// so a shader that consumed premultiplied components would darken every edge it
 /// drew next to an egui-drawn one.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+// `Default` is hand-written rather than derived: `Default` is not implemented for
+// arrays longer than 32, and the band and wave arrays are both longer than that.
+// A struct with a `wave` in it is never a sensible all-zero block, so this exists
+// only because `#[derive(Default)]` is the habit — `pack` is the constructor.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Uniforms {
     /// Smoothed band levels in dB, `-60..0`, as `compute_bands` leaves them.
     pub bands: [f32; VIZ_BANDS],
-    /// `(rms, peak)` in 0..1 — loudness, for a look that wants amount not shape.
-    pub level: (f32, f32),
+    /// `WAVE_BUCKETS` peak-envelope buckets over the ring buffer's tail, so a
+    /// time-domain look interpolates between them rather than asking for a
+    /// column count.
+    ///
+    /// **A fixed count, not a pane-derived one.** The CPU version sized this to
+    /// the pane's pixel width, which meant the array length moved with the
+    /// splitter; a uniform array's length is part of its declaration, so it has
+    /// to be a constant. See `WAVE_BUCKETS` for why it is 128 and not 256.
+    pub wave: [f32; WAVE_BUCKETS],
     pub accent: [f32; 4],
     pub bg: [f32; 4],
     /// The brighter token, for the body/edge split bars.rs makes.
@@ -98,11 +109,15 @@ impl Uniforms {
     /// Collect everything a shader view can read, in one place.
     ///
     /// The harness owns the block, so it also owns assembling it: a view never
-    /// names a uniform, which is what keeps the set closed. Level is measured
-    /// here rather than taken from the caller because it is two reads of a
-    /// buffer the tap already filled — a few microseconds against the ~17 µs
-    /// `compute_bands` already costs, and cheaper than the plumbing to let a
-    /// view decline it.
+    /// names a uniform, which is what keeps the set closed.
+    ///
+    /// **The block is expected to shrink, and it did.** It carried `u_hold`,
+    /// `u_slider_track` and `u_border` for the VU meter and then `u_level` with
+    /// it, because that view was the sole reader of all four. A field here is not
+    /// free even when no shader declares it: `u_level` was filled by a full pass
+    /// over 4 096 samples on **every frame of every view**, for a uniform nobody
+    /// uploaded. `compute_level` went with it — see the note where it used to
+    /// live in `audio::viz`.
     pub fn pack(
         viz: &VizBuf,
         bands: [f32; VIZ_BANDS],
@@ -112,10 +127,11 @@ impl Uniforms {
     ) -> Self {
         let ppp = ctx.pixels_per_point();
         let (time, dt) = ctx.input(|i| (i.time as f32, i.predicted_dt));
-        let (rms, peak) = compute_level(viz);
         Self {
             bands,
-            level: (rms, peak),
+            wave: compute_wave(viz, WAVE_BUCKETS)
+                .try_into()
+                .unwrap_or([0.0; WAVE_BUCKETS]),
             accent: srgb(palette.accent),
             bg: srgb(palette.bg),
             progress_fill: srgb(palette.progress_fill),
@@ -550,10 +566,29 @@ const VERSION: &str = "#version 330 core\n";
 /// The one vertex shader, shared by every look. A fullscreen triangle needs no
 /// attributes, so there is no vertex buffer anywhere in this module.
 const VERT: &str = r#"
+out vec2 v_uv;
+
 void main() {
     // (0,0) (2,0) (0,2) -> the oversized triangle that covers clip space.
     vec2 corner = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
     gl_Position = vec4(corner * 2.0 - 1.0, 0.0, 1.0);
+    // 0..1 across the callback's OWN rect. The viewport is set to the pane, so
+    // NDC -1..1 *is* the pane and `corner` is already that fraction — no uniform
+    // and no per-fragment divide.
+    //
+    // **This varying exists because `gl_FragCoord` is window-relative, and every
+    // view here is pane-relative.** Dividing `gl_FragCoord.xy` by the pane's size
+    // gives a uv that runs from `pane_left / pane_w` to that plus one, so a dock
+    // tab anywhere but the left edge of the window reads part of its pattern from
+    // outside itself and saturates on the rest: the bars and the wave froze on a
+    // vertical seam at a constant, and the rings drew off-centre because `0.5` is
+    // `pane_w / 2` of *window* x. `gl_FragCoord` is also **bottom-left origin**,
+    // which put the ridgeline upside down.
+    //
+    // y is flipped here, once, because that is the one place the difference can
+    // be stated once: every view reasons in the pane's top-down point space, and
+    // `uv.y == 0.0` has to mean the top of the pane for all of them.
+    v_uv = vec2(corner.x, 1.0 - corner.y);
 }
 "#;
 
@@ -577,7 +612,7 @@ pub fn vertex_source() -> String {
 struct Program {
     handle: glow::Program,
     bands: Option<glow::UniformLocation>,
-    level: Option<glow::UniformLocation>,
+    wave: Option<glow::UniformLocation>,
     accent: Option<glow::UniformLocation>,
     bg: Option<glow::UniformLocation>,
     progress_fill: Option<glow::UniformLocation>,
@@ -678,7 +713,7 @@ fn run_pass(
     // because correct-by-construction is not worth less than
     // correct-by-accident.
     unsafe {
-        match target {
+        match &target {
             // **Bind the default framebuffer, do not assume it.** For a single
             // pass egui has it bound already, but a feedback view's first pass
             // rebinds to its own target, and the second pass then draws the
@@ -693,18 +728,40 @@ fn run_pass(
         }
         gl.disable(glow::BLEND);
         gl.enable(glow::SCISSOR_TEST);
-        gl.scissor(
-            clip.left_px,
-            clip.from_bottom_px,
-            clip.width_px,
-            clip.height_px,
-        );
-        gl.viewport(
-            viewport.left_px,
-            viewport.from_bottom_px,
-            viewport.width_px,
-            viewport.height_px,
-        );
+        // **An offscreen pass fills the whole target.** The callback's viewport
+        // and clip are the *pane's* rectangle in window coordinates, which is the
+        // right frame for the default framebuffer and the wrong one for an owned
+        // target: a framebuffer's viewport is its own space, so using the pane's
+        // window position wrote the accumulation at a scroll offset inside the
+        // texture and dropped whatever fell outside it. The quantised target is
+        // then slightly larger than the pane, and `v_uv` spans all of it, so the
+        // present pass upscales by at most one grid cell.
+        let (sx, sy, sw, sh) = match &target {
+            Target::Screen => (
+                clip.left_px,
+                clip.from_bottom_px,
+                clip.width_px,
+                clip.height_px,
+            ),
+            Target::Offscreen(fbo) => {
+                let (w, h) = fbo.size();
+                (0, 0, w, h)
+            }
+        };
+        let (vx, vy, vw, vh) = match &target {
+            Target::Screen => (
+                viewport.left_px,
+                viewport.from_bottom_px,
+                viewport.width_px,
+                viewport.height_px,
+            ),
+            Target::Offscreen(fbo) => {
+                let (w, h) = fbo.size();
+                (0, 0, w, h)
+            }
+        };
+        gl.scissor(sx, sy, sw, sh);
+        gl.viewport(vx, vy, vw, vh);
         gl.use_program(Some(program.handle));
         gl.bind_vertex_array(Some(vao));
         program.upload(gl, uniforms);
@@ -733,7 +790,7 @@ impl Program {
     /// a uniform this shader stripped reports `None` and glow skips it.
     unsafe fn upload(&self, gl: &glow::Context, u: &Uniforms) {
         gl.uniform_1_f32_slice(self.bands.as_ref(), &u.bands);
-        gl.uniform_2_f32(self.level.as_ref(), u.level.0, u.level.1);
+        gl.uniform_1_f32_slice(self.wave.as_ref(), &u.wave);
         gl.uniform_4_f32_slice(self.accent.as_ref(), &u.accent);
         gl.uniform_4_f32_slice(self.bg.as_ref(), &u.bg);
         gl.uniform_4_f32_slice(self.progress_fill.as_ref(), &u.progress_fill);
@@ -843,7 +900,7 @@ fn build(gl: &glow::Context, frag: &'static str) -> Option<Program> {
         Some(Program {
             handle: program,
             bands: loc("u_bands[0]"),
-            level: loc("u_level"),
+            wave: loc("u_wave[0]"),
             accent: loc("u_accent"),
             bg: loc("u_bg"),
             progress_fill: loc("u_progress_fill"),
@@ -879,19 +936,99 @@ fn stage_name(stage: u32) -> &'static str {
 /// the driver gets, assembled by this same function, rather than a hand-copied
 /// approximation in a test that could drift from the real thing.
 pub fn fragment_source(frag: &str) -> String {
-    let mut out = String::with_capacity(frag.len() + 512);
+    let mut out = String::with_capacity(frag.len() + 1024);
     out.push_str(VERSION);
+    out.push_str("in vec2 v_uv;\n");
     out.push_str("out vec4 frag_color;\n");
+    // A shared helper brings its own inputs with it, so the declarations it needs
+    // are pulled in by *its* presence and not only by the body mentioning them.
+    let bearing = mentions(frag, "spectrum_at_bearing");
+    // `spectrum_at_bearing` reads the bands, so it needs the same two
+    // declarations the body would have needed for itself.
+    let needed: &[&str] = if bearing {
+        &["VIZ_BANDS", "u_bands", "level"]
+    } else {
+        &[]
+    };
     for (name, decl) in declarations() {
-        if mentions(frag, name) {
+        if mentions(frag, name) || needed.contains(&name) {
             out.push_str(&decl);
             out.push('\n');
         }
     }
     out.push('\n');
+    if bearing {
+        out.push_str(BEARING);
+        out.push('\n');
+    }
     out.push_str(frag);
     out
 }
+
+/// The dB → 0..1 mapping every view draws with, built from the DSP's own constant.
+///
+/// It was a hand-written `float level(float d)` in six view bodies plus two inlined
+/// copies, and the number in it is a **boundary between two halves that cannot see
+/// each other** — see [`DB_FLOOR`]. Interpolating it here means the floor is
+/// written down once, and `the_db_floor_is_one_number_across_the_dsp_and_every_shader`
+/// is what proves the two ends still agree.
+///
+/// Emitted on a mention of `level`, `DB_FLOOR` or `DB_SPAN`, so a view gets it by
+/// calling `level(u_bands[i])` and a view that wants the raw range for its own
+/// arithmetic can name the constants instead.
+fn level_source() -> String {
+    format!(
+        "const float DB_FLOOR = {DB_FLOOR};\n\
+         const float DB_SPAN = {};\n\
+         float level(float d) {{\n    return clamp((d - DB_FLOOR) / DB_SPAN, 0.0, 1.0);\n}}",
+        -DB_FLOOR
+    )
+}
+
+/// The one safe way to read the spectrum **as a function of a direction**, and the
+/// only reason this string exists.
+///
+/// Three of the views want "the band at the angle this fragment sits at", and the
+/// obvious spelling of that is `atan(y, x)` indexed into `u_bands`. **`atan` has a
+/// branch cut**: it jumps from `+pi` to `-pi` along `x < 0` at `y == 0`, which is
+/// a fixed line up the middle of the pane's left side. So the band index — and
+/// with it whatever the index drives — steps discontinuously there, and **no edge
+/// fade can hide it, because the break is in the *function* and not at a boundary
+/// of it.** That is what the two seams reported from `Plasma` and `Trails` were.
+///
+/// A projection onto the first two harmonics of the bearing is the same shape — a
+/// band lookup smeared around the circle, `R * cos(a - phi)` for the two
+/// coefficients — and it is continuous and periodic by construction, so there is
+/// no cut left to find. The third harmonic is what stops the result being
+/// symmetric under a half turn, which one harmonic alone would be.
+///
+/// It is in the harness rather than copied into three view bodies because the
+/// alternative is three copies of a hazard, and a copy can be got wrong in a way
+/// the original cannot. `a_shader_never_indexes_a_band_through_an_angle` is what
+/// makes that a rule rather than a preference: the broken form is forbidden and
+/// this is the replacement, so a new view that wants a radial spectrum read has one
+/// path to find rather than one trap to rediscover.
+const BEARING: &str = r#"
+// A continuous, periodic read of the spectrum around the circle.
+//
+// `p` is the fragment's position relative to the pane's centre. The `max` guards
+// that centre, where the length is zero and the division is undefined — and it is
+// a `max` rather than an `if` because a guard has to be as continuous as the thing
+// it guards: a branch here would put the discontinuity somewhere new.
+float spectrum_at_bearing(vec2 p) {
+    vec2 dir = p / max(length(p), 0.12);
+    float b0 = 0.0, b1 = 0.0, b2 = 0.0;
+    for (int i = 0; i < VIZ_BANDS; i++) {
+        float a = 6.2831853 * float(i) / float(VIZ_BANDS);
+        float l = level(u_bands[i]);
+        b0 += l * cos(a);
+        b1 += l * sin(a);
+        b2 += l * cos(2.0 * a);
+    }
+    float n = float(VIZ_BANDS);
+    return clamp(0.5 + (0.6 * (b0 * dir.x + b1 * dir.y) + 0.3 * b2) / n, 0.0, 1.0);
+}
+"#;
 
 /// The superset as `(identifier, declaration)` pairs, filtered by what a shader
 /// references. Order is the field order of [`Uniforms`].
@@ -902,8 +1039,13 @@ pub fn fragment_source(frag: &str) -> String {
 fn declarations() -> Vec<(&'static str, String)> {
     vec![
         ("VIZ_BANDS", format!("const int VIZ_BANDS = {VIZ_BANDS};")),
+        ("level", level_source()),
         ("u_bands", format!("uniform float u_bands[{VIZ_BANDS}];")),
-        ("u_level", "uniform vec2 u_level;".into()),
+        (
+            "WAVE_BUCKETS",
+            format!("const int WAVE_BUCKETS = {WAVE_BUCKETS};"),
+        ),
+        ("u_wave", format!("uniform float u_wave[{WAVE_BUCKETS}];")),
         ("u_accent", "uniform vec4 u_accent;".into()),
         ("u_bg", "uniform vec4 u_bg;".into()),
         ("u_progress_fill", "uniform vec4 u_progress_fill;".into()),

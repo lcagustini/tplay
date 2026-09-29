@@ -3,12 +3,42 @@
 //!
 //! The two loudest bands become the mode numbers `(n, m)` of the plate, and the
 //! figure is the *nodal set*: sand collects where the field is at rest, so what
-//! gets drawn is the `chladni_field` zero set. It is rendered as a contour —
-//! marching squares over the field, one segment per pair of interpolated edge
-//! crossings — rather than one filled dot per cell. A cell that straddles a
-//! nodal line would spend all its quads painting background.
+//! gets drawn is the zero set of
+//!
+//! ```text
+//! |sin(pi n x) sin(pi m y) - sin(pi m x) sin(pi n y)|
+//! ```
+//!
+//! **This view is what the whole conversion was for.** The CPU version did not
+//! draw the field; it *searched* it. A 48×48 lattice of 2 401 field samples, a
+//! marching-squares pass over 2 304 cells emitting a segment per pair of
+//! interpolated edge crossings, then ~1 200 segments each expanded to a quad and
+//! a triangle fan inside a hand-built `Mesh` — about 71 µs a frame, the most
+//! expensive view in the set by an order of magnitude, all of it to decide which
+//! fragments to paint. A fragment shader does the same work in four sines and no
+//! search at all, which is the shape of problem the harness exists for.
+//!
+//! **`Chladni3D` used to be a second view here and was deleted**, and the reason
+//! is worth keeping: it claimed to march the field through a volume, but the field
+//! is a function of `(x, y)` alone, so all six of its z-slices returned the
+//! identical value and its "slab" was the arithmetic mean of six copies of one
+//! number. Six times the work for a bit-identical picture. Once both views were
+//! per-fragment they were the same drawing with a glow on it, and a duplicate is
+//! a maintenance cost rather than a feature. What survived is the good half of
+//! each: `fwidth` for the line's width, and the glow and edge fade from the
+//! volumetric one.
+//!
+//! The four tests that pinned the old Rust `chladni_field` went with the field's
+//! deletion. They were real properties — zero on the diagonal, `n == m`
+// degenerate — but they described a *search* whose failure modes (a cell
+//! straddling a nodal line, a dangling segment end) a per-fragment evaluation
+//! cannot have. `pick_mode` stays tested, because the hysteresis is a different
+//! problem from evaluating a formula.
 
-use crate::audio::viz::{chladni_field, compute_bands, pick_mode, VizBuf, HOLD_FRAMES, VIZ_BANDS};
+use crate::audio::viz::{
+    compute_bands, hold_tick, pick_mode, VizBuf, DB_FLOOR, HOLD_SECS, VIZ_BANDS,
+};
+use crate::gui::panes::visualizer::gpu::{self, Target};
 use crate::gui::theme::Palette;
 use eframe::egui;
 
@@ -20,112 +50,66 @@ fn mode_id() -> egui::Id {
     egui::Id::new("tplay.viz.chladni.mode")
 }
 
-/// Cells per axis for the contour search. 48 is what bounds the work, and it is
-/// also what makes the interpolation trustworthy: at the highest mode this ships
-/// there are ~10 cells per oscillation, so a crossing placed between two
-/// samples is within a fraction of a cell of the truth.
-pub const GRID: usize = 48;
-/// A cell edge counts as a crossing where the field drops below this.
-const NODAL_CUTOFF: f32 = 0.10;
-/// Stroke width of the nodal line. Fixed rather than tied to the cell size, so
-/// the grid decides where the line goes and not how fat it draws.
-const STROKE_W: f32 = 1.5;
-/// The plate as a fraction of the pane's short side: a square one, because
-/// stretching it distorts the figure's symmetry, which is most of the content.
-const PLATE_FRAC: f32 = 0.94;
+pub const FRAG: &str = r#"
+// The plate as a fraction of the pane's short side. A square, because stretching
+// it distorts the figure's symmetry, which is most of the content.
+const float PLATE_FRAC = 0.94;
 
-/// The nodal set at mode `(n, m)` over the plate, as marching-squares segments.
-///
-/// The field is sampled once across the whole `GRID + 1` lattice rather than
-/// four times per cell: 2 401 evaluations instead of 9 216, and — the reason it
-/// matters — two cells sharing an edge then read the *same* stored f32, so their
-/// interpolated join points are bit-identical and the contour is continuous
-/// rather than a field of dots that only looks joined.
-///
-/// A 4-crossing cell is genuinely ambiguous: the field can pass through it as
-/// two separate arcs or as both diagonals crossing, and a 2×2 sample cannot
-/// tell them apart. Pairing the crossings in boundary order is the honest
-/// answer, and it is only wrong in the cells where the question is undecidable
-/// from the samples taken (36–104 of ~1 000 at the modes this ships).
-///
-/// Pure and `Ui`-free, so continuity and the work bound are testable without a
-/// window; `draw` is the only caller.
-pub fn segments(n: usize, m: usize, rect: egui::Rect) -> Vec<[egui::Pos2; 2]> {
-    let size = rect.width().min(rect.height()) * PLATE_FRAC;
-    let plate = egui::Rect::from_center_size(rect.center(), egui::vec2(size, size));
-
-    let mut field = [[0.0f32; GRID + 1]; GRID + 1];
-    for (gx, column) in field.iter_mut().enumerate() {
-        let fx = gx as f32 / GRID as f32;
-        for (gy, value) in column.iter_mut().enumerate() {
-            *value = chladni_field(n, m, fx, gy as f32 / GRID as f32);
-        }
-    }
-    let at = |gx: usize, gy: usize| {
-        egui::pos2(
-            plate.left() + gx as f32 * plate.width() / GRID as f32,
-            plate.top() + gy as f32 * plate.height() / GRID as f32,
-        )
-    };
-
-    // Reserved up front: the count is ~GRID²/2, so growing into it costs ten
-    // reallocations and a copy of 32 KB, on a per-frame path.
-    let mut segs = Vec::with_capacity(2 * GRID * GRID);
-    for gy in 0..GRID {
-        for gx in 0..GRID {
-            // Boundary order — top, right, bottom, left — is what makes an
-            // ambiguous cell pair its crossings the same way from every side.
-            let corner = [
-                field[gx][gy],
-                field[gx + 1][gy],
-                field[gx + 1][gy + 1],
-                field[gx][gy + 1],
-            ];
-            let node = [
-                at(gx, gy),
-                at(gx + 1, gy),
-                at(gx + 1, gy + 1),
-                at(gx, gy + 1),
-            ];
-
-            // The crossings of the nodal threshold on the four edges, linearly
-            // interpolated — the field is smooth, so this puts the line between
-            // samples instead of snapping it to the grid.
-            let mut cuts = [None; 4];
-            let mut count = 0;
-            for e in 0..4 {
-                let next = (e + 1) % 4;
-                let (da, db) = (corner[e] - NODAL_CUTOFF, corner[next] - NODAL_CUTOFF);
-                if (da < 0.0) == (db < 0.0) {
-                    continue;
-                }
-                let t = da / (da - db);
-                cuts[count] = Some(egui::pos2(
-                    node[e].x + (node[next].x - node[e].x) * t,
-                    node[e].y + (node[next].y - node[e].y) * t,
-                ));
-                count += 1;
-            }
-
-            // A closed walk crosses a threshold an even number of times, so
-            // `count` is 0, 2 or 4 and every crossing is paired.
-            let mut i = 0;
-            while i + 1 < count {
-                if let (Some(a), Some(b)) = (cuts[i], cuts[i + 1]) {
-                    segs.push([a, b]);
-                }
-                i += 2;
-            }
-        }
-    }
-    segs
+// The nodal set: |sin(pi n x) sin(pi m y) - sin(pi m x) sin(pi n y)|. `u_modes`
+// is the (n, m) pair `pick_mode` chose on the CPU, which is where the hysteresis
+// lives; the GPU is only asked to draw the figure that pick names.
+float field(vec2 p) {
+    float n = u_modes.x;
+    float m = u_modes.y;
+    float px = 3.14159265 * n * p.x;
+    float py = 3.14159265 * n * p.y;
+    float qx = 3.14159265 * m * p.x;
+    float qy = 3.14159265 * m * p.y;
+    return abs(sin(px) * sin(qy) - sin(qx) * sin(py));
 }
+
+void main() {
+    vec2 uv = v_uv;
+    vec2 centred = (uv - 0.5) * vec2(u_resolution.x / max(u_resolution.y, 1.0), 1.0);
+    // The plate, square and centred, in 0..1 over the pane's short side.
+    vec2 p = centred / PLATE_FRAC * 0.5;
+
+    float d = field(p);
+
+    // The nodal line's half-width, from the field's own screen-space gradient.
+    // This is what a fixed field-space cutoff cannot do: it makes the stroke fat
+    // where the field is flat and hairline where it is steep, so the same figure
+    // would be drawn at two different weights.
+    float w = max(fwidth(d) * 0.75, 1e-5);
+    float line = 1.0 - smoothstep(0.0, w, d);
+
+    // A second, wider band around the same line. One threshold alone reads as a
+    // wireframe; the falloff is what reads as sand settled into a plate, and it
+    // is free here because the field is already evaluated.
+    float glow = 1.0 - smoothstep(0.0, 0.42, d);
+
+    // Off the plate, and a fade at its edge so the figure does not end on a hard
+    // rectangle. Both multiply out rather than branch, because `fwidth` above has
+    // to be reached by *every* fragment — a derivative taken in non-uniform
+    // control flow is undefined, and a shader that returned early for the
+    // off-plate fragments would never reach it at all.
+    float extent = max(abs(p.x), abs(p.y));
+    float on_plate = step(extent, 1.0);
+    float edge = 1.0 - smoothstep(0.92, 1.0, extent);
+
+    // The same body/edge split bars.rs and the flame view make: a dim mass in the
+    // accent, the sharp nodal set in the brighter token.
+    vec3 col = mix(u_bg.rgb, u_accent.rgb, glow * 0.30);
+    col = mix(col, u_progress_fill.rgb, line);
+    frag_color = vec4(mix(u_bg.rgb, col, edge * on_plate), 1.0);
+}
+"#;
 
 pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &Palette) {
     let mut prev: [f32; VIZ_BANDS] = painter.ctx().memory_mut(|m| {
         m.data
             .get_temp::<[f32; VIZ_BANDS]>(prev_id())
-            .unwrap_or([-60.0; VIZ_BANDS])
+            .unwrap_or([DB_FLOOR; VIZ_BANDS])
     });
 
     // Aimed at the *spectrum*, not at the figure. The stickiness lives in
@@ -146,48 +130,25 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &P
     // Which figure is showing, and how many frames it is still pinned for, is
     // one piece of state: two keys could disagree and there would be no way to
     // tell which of them won.
-    let held: Option<(usize, usize, u32)> =
+    // The countdown is **seconds**, spent through `hold_tick` on egui's frame
+    // time. It was a frame count, which is a duration only at 60 Hz — see
+    // `HOLD_SECS`.
+    let dt = painter.ctx().input(|i| i.predicted_dt);
+    let held: Option<(usize, usize, f32)> =
         painter.ctx().memory_mut(|m| m.data.get_temp(mode_id()));
     let (current, hold) = match held {
-        Some((n, m, hold)) => (Some((n, m)), hold.saturating_sub(1)),
-        None => (None, 0),
+        Some((n, m, hold)) => (Some((n, m)), hold_tick(hold, dt)),
+        None => (None, 0.0),
     };
     let (n, m) = pick_mode(&prev, current, hold);
     let switched = Some((n, m)) != current;
     painter.ctx().memory_mut(|mem| {
         mem.data.insert_temp(prev_id(), prev);
         mem.data
-            .insert_temp(mode_id(), (n, m, if switched { HOLD_FRAMES } else { hold }));
+            .insert_temp(mode_id(), (n, m, if switched { HOLD_SECS } else { hold }));
     });
 
-    let segs = segments(n, m, rect);
-    if segs.is_empty() {
-        return;
-    }
-
-    // One mesh for the whole figure. A `line_segment` per segment is ~1 200
-    // separately tessellated `Shape`s a frame, which is what made this view drop
-    // frames; a mesh is one shape and one tessellation. epaint 0.30's `Mesh` has
-    // no line primitive, so each segment is expanded to a quad here. Winding is
-    // free — egui_glow disables CULL_FACE and wgpu is handed `cull_mode: None`.
-    let mut mesh = egui::epaint::Mesh::default();
-    mesh.reserve_vertices(4 * segs.len());
-    mesh.reserve_triangles(2 * segs.len());
-    for [a, b] in segs.iter().copied() {
-        let d = b - a;
-        // Two crossings can land on the same lattice node, and `normalized()` on
-        // a zero vector is NaN — a NaN vertex in the mesh, not a skipped dot.
-        if d.length() < 0.01 {
-            continue;
-        }
-        let perp = egui::vec2(-d.y, d.x).normalized() * (STROKE_W * 0.5);
-        let base = mesh.vertices.len() as u32;
-        mesh.colored_vertex(a + perp, palette.accent);
-        mesh.colored_vertex(b + perp, palette.accent);
-        mesh.colored_vertex(b - perp, palette.accent);
-        mesh.colored_vertex(a - perp, palette.accent);
-        mesh.add_triangle(base, base + 1, base + 2);
-        mesh.add_triangle(base, base + 2, base + 3);
-    }
-    painter.add(egui::Shape::mesh(mesh));
+    let mut uniforms = gpu::Uniforms::pack(viz, prev, palette, rect, painter.ctx());
+    uniforms.modes = [n as f32, m as f32];
+    gpu::add_fullscreen(painter, rect, FRAG, uniforms, Target::Screen);
 }

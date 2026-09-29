@@ -1,5 +1,6 @@
 use crate::app::TPlayApp;
 use crate::gui::dialogs;
+use crate::gui::panes::row_visible;
 use crate::gui::theme::{self, Icon, ThemeState};
 use crate::library;
 use crate::network;
@@ -191,6 +192,19 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
             let row_h = 24.0;
 
             for i in 0..app.playlist().len() {
+                // **Rows outside the clip are not drawn.** A `ScrollArea` lays out
+                // and paints every row it is given, scrolled out of sight or not,
+                // and a playlist row is a dozen widgets and several text layouts —
+                // so a 2 000-track playlist was building all of them on every frame
+                // to show the ~30 that fit. The height is still reserved, because
+                // reserve nothing and the scrollbar collapses to the visible slice.
+                //
+                // Checked before the cache lookup, the filter and the title, since
+                // all three cost more than the comparison.
+                if !row_visible(ui, row_h) {
+                    ui.allocate_space(egui::vec2(0.0, row_h));
+                    continue;
+                }
                 let path = &app.playlist()[i];
                 // Tagged title (filename stands in until the scan lands; the
                 // cache is shared with the Library, so visited folders show tags

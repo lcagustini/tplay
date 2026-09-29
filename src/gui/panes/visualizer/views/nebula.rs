@@ -11,7 +11,7 @@
 //! The two-tier rule, in force here as everywhere: `compute_bands` runs on the
 //! CPU exactly as `bars.rs` runs it, and only the drawing moved.
 
-use crate::audio::viz::{compute_bands, VizBuf, VIZ_BANDS};
+use crate::audio::viz::{compute_bands, VizBuf, DB_FLOOR, VIZ_BANDS};
 use crate::gui::panes::visualizer::gpu::{self, Target};
 use crate::gui::theme::Palette;
 use eframe::egui;
@@ -24,10 +24,6 @@ pub const FRAG: &str = r#"
 // `u_bands` is in dB over -60..0, and this view draws loudness, so it maps that
 // onto 0..1 the same way bars.rs does — the same numbers, read the same way, so
 // the two views agree about what "loud" is.
-float level(float d) {
-    return clamp((d + 60.0) / 60.0, 0.0, 1.0);
-}
-
 // The spectrum read as a continuous function of position, so a value that varies
 // across the volume does not step between the 32 discrete bands. `VIZ_BANDS` is
 // interpolated by the harness rather than written here, so the two cannot drift.
@@ -72,6 +68,15 @@ float vnoise3(vec3 p) {
 
 // Three octaves. See the budget in `main` — this is the multiplier, and it is
 // the cheapest thing to give up when the picture is too expensive.
+//
+// **The division is load-bearing, and it is why this view rendered nothing at
+// all.** The amplitudes sum to 0.875 at three octaves, so the raw sum is 0..0.875
+// with a mean near 0.44 — while the density ramp below was `smoothstep(0.62,
+// 0.98, …)`. A field whose mean is 0.44 contributes nothing to a ramp that starts
+// above 0.62, so `acc` stayed at zero and the pane was the background colour: a
+// working program, a correct picture, and a silent failure. Normalising puts the
+// field in 0..1 around a mean of 0.5, so the ramp can be written against a number
+// that means something.
 float fbm(vec3 p) {
     float sum = 0.0;
     float amp = 0.5;
@@ -80,7 +85,7 @@ float fbm(vec3 p) {
         p *= 2.02;
         amp *= 0.5;
     }
-    return sum;
+    return sum / 0.875;   // 0.5 + 0.25 + 0.125, the amplitudes above
 }
 
 // The field itself: one fbm, at a frequency the spectrum sets.
@@ -92,18 +97,22 @@ float fbm(vec3 p) {
 // symptom was not a slow view: it was the whole window flashing, because frames
 // took longer than a compositor swap. The budget is written out in `main` where
 // the step count lives; this is the number that has to respect it.
-float field(vec3 p, float energy) {
+// The field, in 0..1 with a mean near 0.5. `energy` is deliberately **not** a
+// bias on the field: subtracting a constant to "dim" it pushes the whole volume
+// down the density ramp, so silence lands *below the ramp entirely* and the view
+// goes black. Loudness belongs on the contribution, not on the field.
+float field(vec3 p) {
     // The volume's scale follows the band at this sample's height, so it is
     // fine-grained where the top end is loud and coarse at the bass. Two array
     // reads — a warp would have cost seven fbm evaluations to do the same job.
     float w = 2.4 + 2.6 * band_at(p.y * 0.5 + 0.5);
-    return fbm(p * w) - (1.0 - energy) * 0.25;
+    return fbm(p * w);
 }
 
 void main() {
-    // `gl_FragCoord` is physical pixels, so the aspect has to come from the
-    // resolution rather than from anything in point-space.
-    vec2 uv = gl_FragCoord.xy / u_resolution;
+    // `v_uv` is 0..1 over the pane regardless of its size, so the aspect ratio
+    // has to come from the resolution rather than from anything in point-space.
+    vec2 uv = v_uv;
     vec2 centred = (uv - 0.5) * vec2(u_resolution.x / max(u_resolution.y, 1.0), 1.0);
 
     // The spectrum's mean, **once per fragment**. It is the same number at
@@ -126,13 +135,20 @@ void main() {
     vec3 ro = vec3(0.0, 0.0, -3.2);
     vec3 rd = normalize(vec3(centred, 1.6));
 
+    // Loudness scales the contribution, not the field — see `field`. The floor
+    // is what makes silence a dim cloud rather than the background colour.
+    float gain = 0.35 + 0.9 * energy;
+
     float acc = 0.0;
     float depth = 0.0;
     for (int i = 0; i < STEPS; i++) {
-        float d = field(ro + rd * depth, energy);
+        float d = field(ro + rd * depth);
         // A soft density ramp rather than a threshold: a hard one aliases badly
         // because the field is sampled at a fixed step, not at its own scale.
-        acc += smoothstep(0.62, 0.98, d) * STEP;
+        // **The lower edge is below the field's mean**, which is the property
+        // that makes the volume visible at all: a ramp starting above 0.5
+        // discards more than half of every sample and the picture goes flat.
+        acc += smoothstep(0.40, 0.72, d) * STEP * gain;
         depth += STEP;
         // Two exits, and the second is the expensive one: a ray that has left
         // the volume, or that has already accumulated more density than the
@@ -158,7 +174,7 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &P
     let mut prev: [f32; VIZ_BANDS] = painter.ctx().memory_mut(|m| {
         m.data
             .get_temp::<[f32; VIZ_BANDS]>(prev_id())
-            .unwrap_or([-60.0; VIZ_BANDS])
+            .unwrap_or([DB_FLOOR; VIZ_BANDS])
     });
 
     // Brisker than bars.rs: a volume has no hard edge to smear, and the motion
