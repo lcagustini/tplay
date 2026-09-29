@@ -691,6 +691,152 @@ fn the_playlist_pane_leaves_its_list_the_height_it_was_given() {
     }
 }
 
+/// Both lists emit their rows, and the culling still drops what is off-screen.
+///
+/// **This is the guard for the bug that emptied the Library and the Playlist at
+/// once**, and it exists because nothing else could see it.
+///
+/// The row-culling gate compares the row's position against the scroll area's
+/// clip, and it read that position from `ui.cursor().max.y`. Inside a
+/// `ScrollArea::show` the content `Ui`'s cursor has **`Pos2::INF` as its min
+/// corner** — that is what "no cursor position yet" looks like — so `.max.y` was
+/// `inf` too, `top <= clip.max.y + row_h` was false for every row, and both panes
+/// drew their chrome, counted their rows correctly, and painted **nothing**.
+/// Silent, total, and on the first frame.
+///
+/// Three things had to be true for it to ship:
+///
+/// - **The data was fine.** The counts line read non-zero, so the folder really
+///   was listed; the failure was purely downstream of a correct listing.
+/// - **The existing pane test was blind to it *by construction*.**
+///   `the_playlist_pane_leaves_its_list_the_height_it_was_given` asserts
+///   `ui.min_rect()`, and the culled path still reserves each row's height with
+///   `allocate_space` — reserving nothing is what would collapse the scrollbar.
+///   So the one test covering this code asserted the exact property the bug
+///   preserved. A `min_rect` assertion cannot catch a missing row, ever.
+/// - **The gate was only reachable in a real `ScrollArea`.** A harness using
+///   `allocate_new_ui` gives a finite cursor, so a test written that way passes
+///   with the bug present. Hence the `DockArea` below: the panes are driven
+///   through the same nesting the app uses, tab bodies and all.
+///
+/// The `Draw` count is checked against the rows that physically fit rather than
+/// against the total, so this also pins the other half of the contract: the
+/// culling is supposed to *skip* the 40 rows that are off-screen, and a "fix"
+/// that simply deleted the gate would be caught by the upper bound here.
+#[test]
+fn both_lists_emit_the_rows_that_fit() {
+    use common::{test_dir, write_wav, TestApp};
+    use eframe::egui;
+    use egui_dock::{DockState, NodeIndex};
+    use tplay::app::Pane;
+    use tplay::gui::theme::ThemeState;
+
+    /// The row background `theme::row` fills, one per emitted row.
+    fn drawn_rows(out: &egui::FullOutput, palette: &tplay::gui::theme::Palette) -> usize {
+        out.shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Rect(r) => Some(r),
+                _ => None,
+            })
+            .filter(|r| {
+                (r.fill == palette.row_even || r.fill == palette.row_odd)
+                    // The banded background spans the row; the row's own controls
+                    // are narrow, and the search box and header reuse these tokens.
+                    && r.rect.width() > 50.0
+                    && r.rect.height() >= 20.0
+            })
+            .count()
+    }
+
+    struct Viewer<'a> {
+        app: &'a mut tplay::app::TPlayApp,
+        themes: &'a ThemeState,
+    }
+    impl egui_dock::TabViewer for Viewer<'_> {
+        type Tab = Pane;
+        fn title(&mut self, tab: &mut Pane) -> egui::WidgetText {
+            format!("{tab:?}").into()
+        }
+        fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Pane) {
+            use tplay::gui::panes::{library, playlist};
+            match tab {
+                Pane::Library => library::library_pane(self.app, self.themes, ui),
+                Pane::Playlist => playlist::playlist_pane(self.app, self.themes, ui),
+                _ => {}
+            }
+        }
+    }
+
+    // Two panes stacked, so both get a real tab body: a 680x460 window is the
+    // default, and 40 rows cannot fit in either half.
+    let mut t = TestApp::new("lists-emit-rows");
+    let dir = test_dir("lists-emit-rows");
+    let mut tracks = Vec::new();
+    for n in 0..40 {
+        let p = dir.join(format!("{n}.wav"));
+        write_wav(&p);
+        tracks.push(p);
+    }
+    t.app.add_files(tracks);
+    t.app.navigate_to(dir.clone());
+    let rows_total = t.app.playlist().len();
+    assert_eq!(rows_total, 40, "premise: 40 rows, more than fit");
+
+    let ctx = egui::Context::default();
+    let raw = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(680.0, 460.0),
+        )),
+        ..Default::default()
+    };
+    let mut tree = DockState::new(vec![Pane::Library]);
+    tree.main_surface_mut()
+        .split_below(NodeIndex::root(), 0.5, vec![Pane::Playlist]);
+
+    // Two frames: the first draws, the second proves it is not a one-frame state
+    // that the next repaint silently undoes.
+    let mut drawn = 0;
+    for _ in 0..2 {
+        let out = ctx.run(raw.clone(), |ctx| {
+            let themes = ThemeState::load(ctx, tplay::gui::theme::Themes::load(), "dark");
+            let mut viewer = Viewer {
+                app: &mut t.app,
+                themes: &themes,
+            };
+            egui::CentralPanel::default().show(ctx, |ui| {
+                egui_dock::DockArea::new(&mut tree).show_inside(ui, &mut viewer);
+            });
+        });
+        let themes = ThemeState::load(&ctx, tplay::gui::theme::Themes::load(), "dark");
+        drawn = drawn_rows(&out, &themes.current().palette);
+    }
+
+    // The Library's 40 rows and the Playlist's 40 rows, in two half-height panes:
+    // a dozen or so fit per pane, so the emitted count must be well clear of the
+    // one non-row match. `> 1` rather than `> 0` because the Library's column
+    // header reuses `row_odd` for its background — exactly one such rect, and it
+    // is drawn whether or not the list works, so a `> 0` bound would pass with the
+    // bug present. That is the whole reason this assertion is shaped the way it
+    // is: measured, with the offender named.
+    assert!(
+        drawn > 1,
+        "the panes listed {} library entries and {} playlist rows but emitted {drawn} \
+         banded rects — only the Library's column header, so the culling gate \
+         rejected every row. Counts and chrome still render, so this is invisible \
+         except as an empty list.",
+        t.app.library().entries().len(),
+        rows_total
+    );
+    // ...and the upper bound, so deleting the gate to "fix" it is not a pass.
+    assert!(
+        drawn < rows_total,
+        "all {rows_total} rows were emitted into two half-height panes, so the \
+         off-screen culling is not happening (drawn {drawn})"
+    );
+}
+
 /// The Library pane draws one breadcrumb for both sources, so the two segment
 /// builders plus `plan` (the `…` rule) are the only source-specific logic in
 /// it. Both are pure, so none of this needs an `egui::Ui`.

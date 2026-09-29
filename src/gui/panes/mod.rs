@@ -26,8 +26,29 @@ pub mod visualizer;
 /// too many costs nothing next to a row that should be there and is not. The
 /// caller still has to reserve the row's height with `ui.allocate_space`, because
 /// reserve nothing and the scrollbar collapses to the visible slice.
+///
+/// **The row's position is `available_rect_before_wrap().min.y`, and it must not
+/// be `cursor().max.y`.** That was the bug that emptied the Library and the
+/// Playlist at once: inside a `ScrollArea::show` the content `Ui`'s cursor is
+/// `Pos2::INF` in its *min* corner — that is what "nothing placed yet" looks like
+/// — so `cursor().max.y` is `inf` too, the second comparison is false for every
+/// row, and both panes drew their chrome, counted their rows correctly, and
+/// painted nothing. `available_rect_before_wrap()` reports the same position
+/// finitely, because egui computes it from the placer's own rect rather than
+/// from a cursor that has not been set yet.
+///
+/// Two things made it invisible, and both are worth remembering: the counts line
+/// read non-zero, so the *listing* was provably fine and the eye went looking
+/// for a data bug; and the culled path still reserves each row's height, so
+/// `min_rect()` stayed full and the existing pane test — which asserts
+/// `min_rect()` — passed with the bug present. A harness built on
+/// `allocate_new_ui` also passes, because that gives a finite cursor; only
+/// driving the real pane through a real `ScrollArea` reaches it. Guarded by
+/// `both_lists_emit_the_rows_that_fit` in `tests/gui_tests.rs`, which is
+/// mutation-checked on both halves: break the gate and it fails, delete the gate
+/// and it fails.
 pub(crate) fn row_visible(ui: &egui::Ui, row_h: f32) -> bool {
     let clip = ui.clip_rect();
-    let top = ui.cursor().max.y;
+    let top = ui.available_rect_before_wrap().min.y;
     top + row_h >= clip.min.y - row_h && top <= clip.max.y + row_h
 }
