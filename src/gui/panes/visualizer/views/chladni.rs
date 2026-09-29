@@ -1,9 +1,9 @@
 //! Chladni view — a cymatic standing-wave figure, the one view here that is not
 //! a re-projection of the spectrum.
 //!
-//! The two loudest bands become the mode numbers `(n, m)` of the plate, and the
-//! figure is the *nodal set*: sand collects where the field is at rest, so what
-//! gets drawn is the zero set of
+//! The plate's mode numbers `(n, m)` are read straight off the band levels every
+//! frame, and the figure is the *nodal set*: sand collects where the field is at
+//! rest, so what gets drawn is the zero set of
 //!
 //! ```text
 //! |sin(pi n x) sin(pi m y) - sin(pi m x) sin(pi n y)|
@@ -28,16 +28,31 @@
 //! each: `fwidth` for the line's width, and the glow and edge fade from the
 //! volumetric one.
 //!
+//! **The mode read is continuous, and that is the whole design.** It was a
+//! hysteretic argmax over the two loudest band indices, which made the pair the
+//! *only* channel the music had into the picture — and a discrete pick has
+//! discrete failure modes: two near-equal bands repainted the whole plate, so it
+//! needed a `MARGIN_DB` and a 1.5 s hold, and the hold capped the figure at one
+//! change per 1.5 s by construction. The image was bit-identical between
+//! switches. Reported as "the chladni viz is rendering at 5fps" and then, once
+//! that turned out to be a still image rather than a slow one, as "kinda still
+//! and unrelated to the music". Neither was a drawing problem: the field is
+//! continuous in both mode numbers, so any real `(n, m)` is a valid cymatic
+//! figure and a continuous read of the spectrum needs no margin, no hold and no
+//! stored slide state at all. All of that machinery is deleted, along with the
+//! `Slide` struct that existed only to animate between two committed pairs.
+//! The one state left is the previous pair, and it is read on silence and for
+//! nothing else — `audio::viz::mode_now` is where the reasoning lives.
+//!
 //! The four tests that pinned the old Rust `chladni_field` went with the field's
 //! deletion. They were real properties — zero on the diagonal, `n == m`
-// degenerate — but they described a *search* whose failure modes (a cell
+//! degenerate — but they described a *search* whose failure modes (a cell
 //! straddling a nodal line, a dangling segment end) a per-fragment evaluation
-//! cannot have. `pick_mode` stays tested, because the hysteresis is a different
-//! problem from evaluating a formula.
+//! cannot have. The degenerate pair is now *unreachable* rather than untested:
+//! `mode_now` reads two disjoint halves of the band range, so `n < m` holds by
+//! construction.
 
-use crate::audio::viz::{
-    compute_bands, hold_tick, pick_mode, VizBuf, DB_FLOOR, HOLD_SECS, VIZ_BANDS,
-};
+use crate::audio::viz::{compute_bands, mode_now, VizBuf, DB_FLOOR, VIZ_BANDS};
 use crate::gui::panes::visualizer::gpu::{self, Target};
 use crate::gui::theme::Palette;
 use eframe::egui;
@@ -56,8 +71,13 @@ pub const FRAG: &str = r#"
 const float PLATE_FRAC = 0.94;
 
 // The nodal set: |sin(pi n x) sin(pi m y) - sin(pi m x) sin(pi n y)|. `u_modes`
-// is the (n, m) pair `pick_mode` chose on the CPU, which is where the hysteresis
-// lives; the GPU is only asked to draw the figure that pick names.
+// is the (n, m) pair `mode_now` read off the spectrum, which is where this view's
+// relationship to the music lives; the GPU is only asked to draw it.
+//
+// **The pair is fractional, and that is the point.** The sines are continuous in
+// both numbers, so any real `n, m` is a valid cymatic figure rather than an
+// error — which is what lets the plate follow the music between one integer pair
+// and the next instead of waiting to be handed one.
 float field(vec2 p) {
     float n = u_modes.x;
     float m = u_modes.y;
@@ -112,43 +132,34 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &P
             .unwrap_or([DB_FLOOR; VIZ_BANDS])
     });
 
-    // Aimed at the *spectrum*, not at the figure. The stickiness lives in
-    // `pick_mode`, and the 0.08 that used to be here was a leftover from when the
-    // bare top-two needed the levels blurred to survive — but a 0.08 coefficient
-    // is a 12.5-frame time constant (~208 ms per band), and it cannot average a
-    // *discrete* pick, so it bought no stability at all. It only blurred the input
-    // to the decision, which is where a real change of the music then had to wait
-    // to show up. At 0.3 that wait is ~4 frames instead of ~12.
+    // Aimed at the *spectrum*, not at the figure — and now that the figure *is* a
+    // continuous read of the spectrum, this is the only thing standing between a
+    // plate and the raw bin-to-bin jitter of the FFT. It was 0.08 back when the
+    // justification was "blur the levels so the top-two pick survives", which
+    // could not work: a **discrete** pick has nothing for a smoother to average,
+    // so 0.08 only delayed the input to the decision and a real change of music
+    // waited ~208 ms to be seen. It has a real job now.
     //
-    // Release is faster than attack so a band that stops being loud stops
-    // holding the figure hostage. The other direction is a transient, and a
-    // transient should not win a plate.
+    // Release is faster than attack, so a band that stops being loud stops holding
+    // the figure. The other direction is a transient, and a transient should not
+    // win a plate.
     const ATTACK: f32 = 0.3;
     const RELEASE: f32 = 0.6;
     compute_bands(viz, &mut prev, ATTACK, RELEASE);
 
-    // Which figure is showing, and how many frames it is still pinned for, is
-    // one piece of state: two keys could disagree and there would be no way to
-    // tell which of them won.
-    // The countdown is **seconds**, spent through `hold_tick` on egui's frame
-    // time. It was a frame count, which is a duration only at 60 Hz — see
-    // `HOLD_SECS`.
+    // Read the plate off the smoothed levels, every frame. `prev` is here only to
+    // be held on silence, where there is no energy to have an opinion — there is
+    // no countdown, no committed target and no anti-strobe state, because a
+    // continuous read cannot strobe.
     let dt = painter.ctx().input(|i| i.predicted_dt);
-    let held: Option<(usize, usize, f32)> =
-        painter.ctx().memory_mut(|m| m.data.get_temp(mode_id()));
-    let (current, hold) = match held {
-        Some((n, m, hold)) => (Some((n, m)), hold_tick(hold, dt)),
-        None => (None, 0.0),
-    };
-    let (n, m) = pick_mode(&prev, current, hold);
-    let switched = Some((n, m)) != current;
+    let held: Option<(f32, f32)> = painter.ctx().memory_mut(|m| m.data.get_temp(mode_id()));
+    let modes = mode_now(&prev, held.unwrap_or((1.0, 6.0)), dt);
     painter.ctx().memory_mut(|mem| {
         mem.data.insert_temp(prev_id(), prev);
-        mem.data
-            .insert_temp(mode_id(), (n, m, if switched { HOLD_SECS } else { hold }));
+        mem.data.insert_temp(mode_id(), modes);
     });
 
     let mut uniforms = gpu::Uniforms::pack(viz, prev, palette, rect, painter.ctx());
-    uniforms.modes = [n as f32, m as f32];
+    uniforms.modes = modes.into();
     gpu::add_fullscreen(painter, rect, FRAG, uniforms, Target::Screen);
 }

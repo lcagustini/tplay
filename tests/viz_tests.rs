@@ -8,8 +8,8 @@
 
 use std::f32::consts::PI;
 use tplay::audio::viz::{
-    compute_bands, compute_wave, fft_magnitude, hold_tick, pick_mode, VizBuf, FFT_SIZE, HOLD_SECS,
-    MARGIN_DB, MAX_MODE, VIZ_BANDS,
+    compute_bands, compute_wave, fft_magnitude, mode_now, VizBuf, DB_FLOOR, FFT_SIZE, MAX_MODE,
+    VIZ_BANDS,
 };
 
 /// A band array with the given `(index, dB)` entries and silence everywhere
@@ -195,219 +195,295 @@ fn compute_wave_reaches_last_bucket() {
     assert!(wave.iter().all(|&v| v == 1.0));
 }
 
-// --- the hold --------------------------------------------------------------
+// --- the Chladni mode read -------------------------------------------------
 //
-// The Chladni figure's anti-strobe mechanism has two parts: a margin on how much
-// louder a challenger has to be, and a *duration* for which the incumbent is
-// pinned. The duration was a frame count, which is a duration only at one frame
-// rate, and on the 120 Hz display this was reported on it came out at half its
-// intended length — so the figure changed at 1.3 Hz against a hold written to
-// mean 0.67 Hz, and the symptom was "the visualizer is running at 2 fps" when the
-// app was in fact at 120.
+// `mode_now` replaced a hysteretic argmax over the two loudest band indices,
+// with a 3 dB margin and a 1.5 s hold. That pick was the *only* channel the
+// music had into the figure, and a **discrete** pick has discrete failure
+// modes: two near-equal bands repaint the whole plate, so it needed the margin,
+// and the hold then capped the figure at one change per 1.5 s by construction.
+// The image was bit-identical between switches — reported as "the chladni viz is
+// rendering at 5fps" and then, once that turned out to be a still image rather
+// than a slow one, as "kinda still and unrelated to the music".
+//
+// None of that was a drawing problem. The field is continuous in both mode
+// numbers, so any real `(n, m)` is a valid cymatic figure, and a *continuous*
+// read of the spectrum needs no margin, no hold and no anti-strobe machinery at
+// all. These are the properties that make it safe to have deleted them.
 
-/// The same wall-clock time is the same hold, at any frame rate.
+// --- the Chladni mode read -------------------------------------------------
+//
+// `mode_now` replaced a hysteretic argmax over the two loudest band indices,
+// with a 3 dB margin and a 1.5 s hold. That pick was the *only* channel the
+// music had into the figure, and a **discrete** pick has discrete failure
+// modes: two near-equal bands repaint the whole plate, so it needed the margin,
+// and the hold then capped the figure at one change per 1.5 s by construction.
+// The image was bit-identical between switches — reported as "the chladni viz is
+// rendering at 5fps" and then, once that turned out to be a still image rather
+// than a slow one, as "kinda still and unrelated to the music".
+//
+// None of that was a drawing problem. The field is continuous in both mode
+// numbers, so any real `(n, m)` is a valid cymatic figure, and a *continuous*
+// read of the spectrum needs no margin, no hold and no anti-strobe machinery at
+// all. These are the properties that make it safe to have deleted them.
+//
+// Which left a third defect, found by the same report: the read was capped at
+// `MAX_MODE` **bands**, and the bands are log-spaced over 20 Hz .. 22 kHz, so
+// band 10 is 222 Hz. The figure could see **25 Hz .. 222 Hz — 1% of the
+// spectrum** — and every vocal, melody, snare and cymbal did nothing to it. One
+// band of bass and one band of vocal produced *identical* mode pairs, which is
+// what "unrelated to the song" turned out to mean.
+
+/// The frame the pane runs at, for driving the read in these tests. Spelled out
+/// rather than taken from egui so the numbers below mean something on their own.
+const FPS: f32 = 60.0;
+
+/// The band that divides the two groups, low from high.
+const SPLIT: usize = 16;
+/// A band well above it, in the group that drives the high mode number.
+const HIGH: usize = 28;
+
+/// Run the read at [`FPS`] until it has settled, and report where it landed.
 ///
-/// The property, stated as a simulation rather than a comparison, because a
-/// comparison can only say "these two numbers match" — the thing that has to be
-/// true is that ninety frames at 60 Hz and at 120 Hz spend the same *seconds*.
-#[test]
-fn the_hold_is_a_duration_not_a_frame_count() {
-    /// Seconds a full hold lasts, spent one frame at a time.
-    fn seconds_to_spend(rate: f32) -> f32 {
-        let mut hold = HOLD_SECS;
-        let mut elapsed = 0.0f32;
-        // A minute is far longer than any hold, and a frame count at any rate
-        // the pane has ever run at empties well inside it.
-        while hold > 0.0 && elapsed < 60.0 {
-            hold = hold_tick(hold, 1.0 / rate);
-            elapsed += 1.0 / rate;
-        }
-        elapsed
+/// The read follows its target over a time constant, so a single frame's value is
+/// a few percent of the way there — which is correct and is what keeps the plate
+/// calm, but it means "where does this spectrum put the figure" is a question
+/// about the settled value. Two seconds is 8 time constants.
+fn settled(bands: &[f32; VIZ_BANDS], from: (f32, f32)) -> (f32, f32) {
+    let mut now = from;
+    for _ in 0..(2.0 * FPS) as usize {
+        now = mode_now(bands, now, 1.0 / FPS);
     }
-    let at_30 = seconds_to_spend(30.0);
-    let at_60 = seconds_to_spend(60.0);
-    let at_120 = seconds_to_spend(120.0);
-    let at_144 = seconds_to_spend(144.0);
-    // One frame of slack, so this is about the shape and not about rounding.
-    let slack = 1.0 / 20.0;
-    for (rate, spent) in [
-        (30.0, at_30),
-        (60.0, at_60),
-        (120.0, at_120),
-        (144.0, at_144),
-    ] {
-        assert!(
-            (spent - HOLD_SECS).abs() < slack,
-            "a {HOLD_SECS}s hold spent at {rate} fps took {spent:.3}s — the hold is \
-             being counted in frames, so it is twice as short on a 120 Hz display as \
-             it is on a 60 Hz one"
-        );
-    }
+    now
 }
 
-/// A degenerate frame time cannot release a hold early.
+/// The whole spectrum reaches the plate, and this is the regression test for the
+/// bug that made the view bass-only.
+///
+/// `MAX_MODE` bounds the **mode** number — how many nodal lines fit on the plate
+/// — and it was also being used as the highest readable **band**. The bands are
+/// log-spaced over 20 Hz .. 22 kHz, so band 10 is 222 Hz: capping the band index
+/// at 10 left the figure seeing 25 Hz .. 222 Hz and nothing else. Every vocal,
+/// melody, snare and cymbal in the music did literally nothing to it.
+///
+/// The assertion is the strongest form of this that exists, because a bug of this
+/// shape cannot be caught by "the read is continuous" or "the pair is in range" —
+/// both were true while the top two thirds of the spectrum was being thrown away.
+/// It has to be a tone *up there* moving the figure.
 #[test]
-fn a_degenerate_frame_time_does_not_release_the_hold() {
-    for dt in [0.0, -1.0, f32::NAN, f32::INFINITY] {
-        let held = hold_tick(1.0, dt);
-        // `INFINITY` is the sharp end, and the reason this is not a one-liner:
-        // `dt.max(0.0)` passes it through, and `1.0 - inf` clamps to zero — so
-        // the guard itself is what released the figure, rather than what stopped
-        // it.
-        assert!(
-            held >= 1.0,
-            "dt {dt} must not shorten a hold, got {held} — releasing the figure early \
-             is the strobe this exists to prevent, and egui's predicted frame time is \
-             legitimately zero on a session's first frame"
-        );
-    }
-    // And it does run out, which is the other half: a hold that never expires is
-    // a figure that never changes again.
-    assert_eq!(hold_tick(0.01, 0.5), 0.0);
-}
-
-// --- the mode pick ---------------------------------------------------------
-//
-// The view's figure is a *discrete* function of the two loudest bands, so every
-// change of that pair is a redraw of the whole plate. A bare top-two picked a
-// new pair 60 times in 15 s over a drifting bass line. These are the guard
-// against that coming back.
-//
-// The *field* these mode numbers are drawn with is no longer here. It was
-// `chladni_field`, and the four tests that pinned it went with the function when
-// the view became a fragment shader: the nodal set is now read per fragment
-// rather than searched across a lattice, so a cell cannot straddle a nodal line
-// and the properties those tests were defending cannot be violated by the
-// drawing. `pick_mode` stayed, because a *discrete pick* is a different problem
-// from a field evaluation and the hysteresis is all that is between a figure
-// that tracks the music and one that strobes.
-
-/// The regression itself: two pairs within a hair of each other, and the figure
-/// must not move. A challenger has to be `MARGIN_DB` louder on its *weaker*
-/// band, not on its louder one — a pair is only as loud as its quieter member.
-#[test]
-fn a_near_tie_keeps_the_current_figure() {
-    // The incumbent (1, 2) is weaker at -20; the challenger is (1, 3) at -19.
-    // 1 dB is well inside the margin.
-    let bands = bands_with(&[(1, -18.0), (2, -20.0), (3, -19.0)]);
-    assert_eq!(
-        pick_mode(&bands, Some((1, 2)), 0.0),
-        (1, 2),
-        "a 1 dB lead must not repaint the plate"
-    );
-}
-
-/// The other half: a real change of the music's character still moves the
-/// figure, or the fix would just be a figure that never changes.
-#[test]
-fn a_clear_winner_does_move_the_figure() {
-    let bands = bands_with(&[(1, -50.0), (2, -50.0), (3, -10.0), (4, -12.0)]);
-    assert_eq!(pick_mode(&bands, Some((1, 2)), 0.0), (3, 4));
-}
-
-/// The margin is measured against the weaker band, which is the half that
-/// catches a failure a louder-band comparison would miss. Both halves, because
-/// the assertion is only about the band the comparison reads, and both built
-/// from `MARGIN_DB` so the test tracks the constant.
-#[test]
-fn the_margin_is_measured_on_the_weaker_band() {
-    let incumbent = -25.0;
-    // (1, 2) beats the incumbent (2, 3) by 25 dB on its *loudest* band and not
-    // at all on its weakest, which is the band the margin is measured on.
-    let tie = bands_with(&[(1, 0.0), (2, incumbent), (3, incumbent)]);
-    assert_eq!(pick_mode(&tie, Some((2, 3)), 0.0), (2, 3));
-
-    // The same challenger with its weak band past the margin.
-    let clear = bands_with(&[(1, 0.0), (2, incumbent + MARGIN_DB + 0.1), (3, incumbent)]);
-    assert_eq!(pick_mode(&clear, Some((2, 3)), 0.0), (1, 2));
-}
-
-/// The hold is the insurance against a genuine two-cycle: hysteresis always
-/// permits one, and it was reported as a strobe.
-#[test]
-fn a_held_figure_cannot_be_moved() {
-    let bands = bands_with(&[(3, -10.0), (4, -12.0)]);
-    assert_eq!(pick_mode(&bands, Some((1, 2)), 1.0), (1, 2));
-    // The same bands, one frame after the hold expires.
-    assert_eq!(pick_mode(&bands, Some((1, 2)), 0.0), (3, 4));
-}
-
-/// Silence is where the strobe was worst: every band sits on the `-60` floor
-/// and the top-two is decided by hundredths of a dB of FFT noise. The premise
-/// guard is the point — it proves the input really is unordered noise, so a
-/// green `switches == 0` is the fix and not a static input that never varied.
-#[test]
-fn the_quiet_floor_keeps_the_figure_rather_than_tracking_noise() {
-    const FRAMES: usize = 600;
-    let frame_bands = |frame: usize| -> [f32; VIZ_BANDS] {
-        std::array::from_fn(|i| -60.0 + ((i * 7 + frame * 13) % 11) as f32 * 1e-3)
+fn the_whole_spectrum_reaches_the_plate() {
+    let from = (1.0, 6.0);
+    let peak_at = |band: usize| {
+        let mut bands = [DB_FLOOR; VIZ_BANDS];
+        bands[band] = 0.0;
+        settled(&bands, from)
     };
+    // A tone in each quarter of the spectrum, so nothing is inferred from one end.
+    let bass = peak_at(2);
+    let low_mid = peak_at(12);
+    let mid = peak_at(20);
+    let air = peak_at(30);
 
-    let winners: std::collections::HashSet<usize> = (0..FRAMES)
-        .map(|frame| {
-            frame_bands(frame)
-                .iter()
-                .enumerate()
-                .max_by(|a, b| a.1.total_cmp(b.1))
-                .unwrap()
-                .0
-        })
-        .collect();
     assert!(
-        winners.len() > 1,
-        "premise: the noise floor must not have a stable loudest band, or this \
-         case proves nothing"
+        low_mid.0 > bass.0 + 1.0,
+        "moving a tone from band 2 to band 12 must move the low mode: \
+         {bass:?} -> {low_mid:?}"
     );
-
-    let mut switches = 0;
-    let mut held = None;
-    for frame in 0..FRAMES {
-        let (n, m) = pick_mode(&frame_bands(frame), held, 0.0);
-        if held.is_some_and(|p| p != (n, m)) {
-            switches += 1;
-        }
-        held = Some((n, m));
-    }
-    assert_eq!(
-        switches, 0,
-        "the figure must not change on the noise floor ({switches} changes over \
-         {FRAMES} frames, {winners:?} took the lead)"
+    assert!(
+        mid.1 > bass.1 + 0.5,
+        "a tone at band 20 (1.6-2 kHz) must move the high mode — it did nothing \
+         at all while the read stopped at band 10: {bass:?} -> {mid:?}"
+    );
+    assert!(
+        air.1 > mid.1 + 1.0,
+        "and a tone at band 30 (14-17 kHz) further still: {mid:?} -> {air:?}"
     );
 }
 
-/// egui memory outlives a `MAX_MODE` edit and a rebuild, so a stored pair can be
-/// out of the range the view can draw — or degenerate, which is a blank plate.
-/// Re-picking is better than drawing either.
-#[test]
-fn a_stale_stored_pair_is_re_picked() {
-    let bands = bands_with(&[(3, -10.0), (4, -12.0)]);
-    let fresh = (3, 4);
-    assert_eq!(
-        pick_mode(&bands, Some((VIZ_BANDS - 1, VIZ_BANDS - 2)), 0.0),
-        fresh
-    );
-    assert_eq!(pick_mode(&bands, Some((0, 4)), 0.0), fresh);
-    assert_eq!(pick_mode(&bands, Some((2, 2)), 0.0), fresh);
-    assert_eq!(
-        pick_mode(&bands, Some((VIZ_BANDS - 1, VIZ_BANDS - 2)), 5.0),
-        fresh,
-        "a hold must not pin a pair the view cannot draw"
-    );
-}
-
-/// `n == m` is a blank figure, and the old guard against it in the view could
-/// never fire: it compared two *band indices* from `enumerate`, which are
-/// distinct by construction. This is where the invariant is observable — a pair
-/// that ties or reverses in level, and a range it has to stay inside.
+/// A small change in the spectrum moves the figure a lot, and that is the whole
+/// claim.
 ///
-/// The upper bound is written out rather than read from `MAX_MODE`, so that
-/// raising the cap is a *visible* change here. The reason the cap exists moved
-/// with the view: it used to be that a 48-cell grid cannot resolve a mode much
-/// above 10, and the grid is gone. It is now that a nodal figure at mode 30
-/// packs ~3 cells per oscillation on a 48-cell plate — the same arithmetic, the
-/// same answer, and a different sentence because the drawing is a different one.
+/// Not "moves" — moves *visibly*, because a read can be continuous in form and
+/// still visually frozen: a linear barycentre sat near the middle of its range
+/// and wandered a third of a mode over 15 s, which is the same complaint in a
+/// different form. A mode number moves the nodal lines, so a shift of 0.01 is
+/// continuous and useless.
 #[test]
-fn the_picked_pair_is_distinct_and_inside_the_drawn_range() {
+fn the_plate_moves_with_the_music() {
+    let from = (1.0, 6.0);
+    // Two bands *within* each half, with the energy traded from the low one to
+    // the high one. Within a half is the whole point: `n` reads the low half and
+    // `m` the high one, so moving energy across the split would leave each
+    // reading untouched and prove nothing about either.
+    let low = bands_with(&[(2, -6.0), (14, -20.0), (SPLIT + 4, -6.0), (HIGH, -20.0)]);
+    let high = bands_with(&[(2, -20.0), (14, -6.0), (SPLIT + 4, -20.0), (HIGH, -6.0)]);
+    let (low_n, low_m) = settled(&low, from);
+    let (high_n, high_m) = settled(&high, from);
+
+    assert!(
+        high_n > low_n && high_m > low_m,
+        "trading energy up each group must push both modes up — low \
+         ({low_n:.2}, {low_m:.2}), high ({high_n:.2}, {high_m:.2})"
+    );
+    // And by a visible amount, because a mode number moves the nodal lines: a
+    // read that shifted by 0.01 would be continuous and useless, and a centroid
+    // of a bass-heavy spectrum did exactly that.
+    assert!(
+        high_n - low_n > 0.5 && high_m - low_m > 0.5,
+        "the plate must move by a visible amount — low ({low_n:.2}, {low_m:.2}), \
+         high ({high_n:.2}, {high_m:.2})"
+    );
+}
+
+/// One half of the spectrum can be silent while the other is not.
+///
+/// A bass note with nothing above it is ordinary music, and a read that insists
+/// on both halves having energy holds the whole figure still for it — which is
+/// the same stillness the pick had, arrived at by a different route.
+#[test]
+fn one_silent_half_still_moves_the_other() {
+    let from = (3.0, 7.0);
+    let (n, m) = settled(&bands_with(&[(2, -6.0)]), from);
+    assert!(
+        (n - from.0).abs() > 0.5,
+        "a loud low band with a silent high group must still move n: \
+         {from:?} -> ({n:.2}, {m:.2})"
+    );
+    assert_eq!(
+        m, from.1,
+        "the silent group has no opinion, so it keeps its figure"
+    );
+
+    let (n, m) = settled(&bands_with(&[(HIGH, -6.0)]), from);
+    assert_eq!(n, from.0);
+    assert!(
+        (m - from.1).abs() > 0.5,
+        "and symmetrically for the high group: {from:?} -> ({n:.2}, {m:.2})"
+    );
+}
+
+/// The read is continuous in the *levels*, including where the dominant band
+/// changes hands.
+///
+/// This is the property the pick could not have had and no test could have
+/// checked: a discrete argmax is discontinuous *by construction* at exactly this
+/// crossover, and the pick's own tests could only count switches after the fact.
+/// A barycentre has no such point — the two bands trade and the read slides
+/// between them.
+///
+/// The ramp is one band's *level* rising past a fixed one rather than a band
+/// index stepping, because a spectrum is continuous in level and not in index:
+/// an input that moved a whole band at a time is a step function, and a
+/// continuous function of a step function is allowed to step.
+#[test]
+fn the_read_is_continuous_through_a_handover() {
+    let steps = 200;
+    // Settle on the *start* of the ramp first. The read is followed, not jumped
+    // to, so a first frame launched from an arbitrary seed would report the
+    // settling transient rather than the handover this is about.
+    let start = bands_with(&[(14, -6.0), (2, DB_FLOOR)]);
+    let mut now = settled(&start, (1.0, 6.0));
+    let mut last = f32::NEG_INFINITY;
+    let mut biggest_step = 0.0f32;
+    for step in 0..=steps {
+        // Band 2 rises from the floor past a fixed band 14, so the loudest band
+        // in the low group hands over partway up the sweep.
+        let rising = DB_FLOOR + (step as f32 / steps as f32) * 60.0;
+        let mut bands = bands_with(&[(14, -6.0), (2, rising)]);
+        bands[SPLIT + 4] = -6.0;
+        let (n, _) = mode_now(&bands, now, 1.0 / FPS);
+        now = (n, now.1);
+        if last.is_finite() {
+            biggest_step = biggest_step.max((n - last).abs());
+        }
+        last = n;
+    }
+    // The whole sweep travels about four modes in 200 steps, so a followed read
+    // moves ~0.02 per step. A handover that jumped would be a whole band at once.
+    assert!(
+        biggest_step < 0.1,
+        "the read stepped by {biggest_step:.3} of a mode in one frame of a 200-step \
+         level ramp — a handover is exactly where a discrete pick would jump"
+    );
+}
+
+/// The read is calmer than the noise it is fed.
+///
+/// A barycentre is a *ratio*, so a hundredth of a dB of FFT noise in one bin
+/// moves it several times more than it moves that bin, and the squared weights
+/// that make it track peaks widen that further. Unsmoothed it moved the plate
+/// about as much on a held sample as on real music, which reads as a broken
+/// plate rather than a calm one — and it is why there is a time constant here at
+/// all, in a view that deliberately has no hold.
+///
+/// The premise is the point: a *constant* input cannot legitimately move the
+/// figure far, so what is measured below is the floor that real music has to beat.
+#[test]
+fn the_read_is_calmer_than_the_noise_it_is_fed() {
+    /// Largest single-frame movement over a second of the same input repeated.
+    fn worst_step(bands: &[f32; VIZ_BANDS]) -> f32 {
+        let mut now = settled(bands, (1.0, 6.0));
+        let mut last = (f32::NAN, f32::NAN);
+        let mut worst = 0.0f32;
+        for _ in 0..FPS as usize {
+            let (n, m) = mode_now(bands, now, 1.0 / FPS);
+            now = (n, m);
+            if last.0.is_finite() {
+                worst = worst.max((n - last.0).abs() + (m - last.1).abs());
+            }
+            last = (n, m);
+        }
+        worst
+    }
+    // The same level on every band, so the *barycentre* is fixed and nothing
+    // about the music changes from frame to frame.
+    let flat: Vec<(usize, f32)> = (0..VIZ_BANDS).map(|i| (i, -18.0)).collect();
+    let flat = bands_with(&flat);
+    let jitter = worst_step(&flat);
+    // A tenth of a mode per frame: still, or drifting once per second at most.
+    assert!(
+        jitter < 0.1,
+        "a completely unchanging spectrum moved the plate by {jitter:.3} of a mode in \
+         one frame — the read is following FFT noise rather than the music"
+    );
+}
+
+/// Silence holds the figure instead of snapping it to a range edge.
+///
+/// The read has no opinion when there is no energy anywhere, and a read that
+/// guesses one parks the plate against a clamp for as long as the music is quiet
+/// — which is most of the time between tracks.
+#[test]
+fn silence_holds_the_figure() {
+    let held = (3.5, 7.25);
+    assert_eq!(mode_now(&bands_with(&[]), held, 1.0 / FPS), held);
+    // And a degenerate frame time cannot unfreeze it either, which is the one
+    // direction a clock must not fail in: egui's predicted frame time is
+    // legitimately zero on a session's first frame.
+    let loud = bands_with(&[(2, -6.0)]);
+    assert_eq!(mode_now(&loud, held, 0.0), held);
+    assert_eq!(mode_now(&loud, held, f32::NAN), held);
+    assert_eq!(mode_now(&loud, held, -1.0), held);
+}
+
+/// The degenerate `n == m` figure is unreachable, not merely unlikely.
+///
+/// `n == m` cancels the field to nothing, so the plate goes blank. The old guard
+/// against it was a comparison in the view, which could not fire (it compared
+/// two band *indices* from `enumerate`, distinct by construction); the pick's
+/// own test is where the invariant became observable. Now it is structural —
+/// two disjoint halves of the eligible range — so there is no check left to get
+/// wrong, and the sweep is over every reachable pair of peaks and level spread,
+/// because the property is about the ranges and not about any one input.
+///
+/// The upper bound is written out rather than read from `MAX_MODE`, so raising
+/// the cap is a *visible* change here. The reason the cap exists moved with the
+/// view: it used to be that a 48-cell grid cannot resolve a mode much above 10,
+/// and the grid is gone. It is now that a nodal figure at mode 30 packs ~3 cells
+/// per oscillation on a plate's half-width — the same arithmetic, the same
+/// answer, and a different sentence because the drawing is a different one.
+#[test]
+fn the_pair_is_never_degenerate_and_stays_in_the_drawn_range() {
     const DRAWN_MAX: usize = 10;
     assert_eq!(
         DRAWN_MAX,
@@ -416,29 +492,38 @@ fn the_picked_pair_is_distinct_and_inside_the_drawn_range() {
          {} oscillations per half-plate, so the lines land in the wrong place.",
         DRAWN_MAX as f32 / 3.0
     );
-    for spread in [0.0, 0.5, 3.0, 12.0, 40.0, 59.9] {
-        let bands = bands_with(&[(1, -20.0), (2, -20.0 - spread)]);
-        for current in [None, Some((1, 2)), Some((9, 10))] {
-            let (n, m) = pick_mode(&bands, current, 0.0);
-            assert_ne!(n, m, "spread {spread}: a degenerate pair is a blank figure");
-            let in_range = |i: usize| (1..=DRAWN_MAX).contains(&i);
-            assert!(
-                in_range(n) && in_range(m),
-                "spread {spread}: ({n}, {m}) is outside the range the grid resolves"
-            );
+    // Every pair of peaks across the *whole* readable range, not just the low
+    // end — the bug this replaced made everything above band 10 unreadable, and a
+    // sweep bounded by `MAX_MODE` would have quietly agreed with it.
+    for i in 1..VIZ_BANDS {
+        for j in 1..VIZ_BANDS {
+            for spread in [0.0, 0.5, 3.0, 12.0, 40.0, 59.9] {
+                let bands = bands_with(&[(i, -20.0), (j, -20.0 - spread)]);
+                let (n, m) = settled(&bands, (1.0, 6.0));
+                assert!(
+                    n < m,
+                    "peaks ({i}, {j}) at spread {spread} gave ({n:.3}, {m:.3}) — a \
+                     degenerate pair is a blank plate and a reversed one a mirrored one"
+                );
+                assert!(
+                    (1.0..=DRAWN_MAX as f32).contains(&n) && (1.0..=DRAWN_MAX as f32).contains(&m),
+                    "peaks ({i}, {j}) at spread {spread} gave ({n:.3}, {m:.3}), outside \
+                     the range the plate can resolve"
+                );
+            }
         }
     }
 }
 
-/// The range excludes band 0 for a reason, so pin it: a mode of 0 makes the
-/// whole field term zero, so a pair using band 0 is a blank figure rather than a
-/// second spelling of a pair the view can already draw — and repainting between
-/// the two is the strobe again.
+/// Band 0 is not a mode number, and the reason is worth a test of its own: a
+/// mode of 0 makes the whole field term zero, so it draws a blank figure rather
+/// than a second spelling of a pair the view can already draw. The input is the
+/// one that would produce it — band 0 the loudest thing in the array, which is
+/// what a DC-heavy or clipped frame looks like.
 #[test]
 fn band_zero_is_never_a_mode_number() {
-    let bands = bands_with(&[(0, 0.0), (1, -10.0), (2, -12.0)]);
-    let (n, m) = pick_mode(&bands, None, 0.0);
-    assert_ne!(n, 0, "band 0 draws a blank figure");
-    assert_ne!(m, 0, "band 0 draws a blank figure");
-    assert_eq!((n, m), (1, 2));
+    let bands = bands_with(&[(0, 0.0), (1, -6.0), (7, -6.0)]);
+    let (n, m) = settled(&bands, (1.0, 6.0));
+    assert!(n >= 1.0, "band 0 draws a blank figure, got n = {n:.3}");
+    assert!(m >= 1.0, "band 0 draws a blank figure, got m = {m:.3}");
 }

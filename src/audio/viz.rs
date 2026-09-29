@@ -367,119 +367,224 @@ pub fn compute_bands(viz: &VizBuf, prev: &mut [f32; VIZ_BANDS], attack: f32, rel
 // own tests — `compute_level_on_silence_is_zero_not_nan` and the two beside it
 // were the specification, and they are in this file's history.
 
-/// The highest band index eligible to be a mode number, and so the highest mode
-/// number drawn. Not a taste call: a nodal figure at mode 30 packs ~3 cells per
-/// oscillation on a 48-cell plate, so the lines land in the wrong place, and the
-/// high bands are single FFT bins of noise with no music in them — so they are
-/// the last thing that should be choosing a figure.
+/// The highest mode number drawn, and so the densest nodal figure the plate can
+/// resolve. Not a taste call: a nodal figure at mode 30 packs ~3 oscillations
+/// into a plate's half-width, so the lines land in the wrong place.
+///
+/// **A bound on the drawing, and never on the hearing.** It is the mode *number*
+/// that is capped — how many nodal lines fit on the plate — and not which bands
+/// may drive it. Those were the same number for this view's whole life, and that
+/// is the single worst bug it has had, because the bands are **log-spaced over
+/// 20 Hz .. 22 kHz**: band 10 is 222 Hz. Capping the band index at 10 therefore
+/// left the figure able to see **25 Hz .. 222 Hz — 1% of the spectrum** — and
+/// every vocal, melody, snare and cymbal in the music did nothing to it whatsoever.
+/// Reported as "the nodes move too little and are unrelated to the song", and it
+/// was a bass-only meter wearing a cymatic figure. One band of bass and one band
+/// of vocal produce *identical* mode pairs.
+///
+/// `mode_now` now reads all [`VIZ_BANDS`] and maps them into `1..=MAX_MODE`, so
+/// the cap bounds the drawing and the whole spectrum reaches it.
 pub const MAX_MODE: usize = 10;
-/// `pick_mode` seeds two slots from one band, so it needs a second eligible
-/// band, and it indexes `bands` directly, so it needs a band that exists.
-const _: () = assert!(MAX_MODE >= 2 && MAX_MODE < VIZ_BANDS);
+/// Where the readable bands split between the two mode numbers, and the reason
+/// `mode_now` cannot produce the degenerate figure.
+///
+/// **Two disjoint groups, not one group read twice.** `n == m` cancels the field
+/// to nothing, so the pair has to stay apart; taking two barycentres over
+/// overlapping bands would have to *check* that and would fail it whenever the
+/// spectrum centred, and the check is one more thing to get wrong. Halving the
+/// range makes `m - n` a difference of two quantities that cannot coincide, so
+/// the separation is structural.
+const MODE_SPLIT: usize = MAX_MODE / 2;
+/// Lowest and highest band a mode may be read from, and the low/high divide.
+///
+/// **The whole spectrum, which is the fix.** Band 0 is excluded because a mode of
+/// 0 makes the whole field term zero — a blank figure rather than a coarser one.
+/// Everything above it is fair game now, so `m` is driven by the same cymbals
+/// and air that make a track sound bright.
+const MODE_BAND_LO: usize = 1;
+const MODE_BAND_HI: usize = VIZ_BANDS - 1;
+/// The last band of the low group; the high group starts at the next one.
+const MODE_BAND_SPLIT: usize = MODE_BAND_LO + (MODE_BAND_HI - MODE_BAND_LO + 1).div_ceil(2);
+const _: () = assert!(
+    MODE_BAND_LO >= 1
+        && MODE_SPLIT >= 1
+        && MODE_BAND_SPLIT > MODE_BAND_LO
+        && MODE_BAND_HI >= MODE_BAND_SPLIT
+);
 
-/// How much louder a challenger has to be before the figure changes, in dB.
-pub const MARGIN_DB: f32 = 3.0;
-/// How long the figure stays pinned after a switch, in **seconds**. The
-/// insurance against a genuine two-cycle, which hysteresis always permits, and
-/// with the spectrum tracked briskly it is the *only* thing bounding how often
-/// the figure can change. It costs no latency: a switch happens the moment the
-/// margin is cleared, and only the switch *after* it waits.
+/// How long the plate takes to follow a change in the music, in **seconds**.
 ///
-/// **Seconds, and it used to be a frame count** — `HOLD_FRAMES = 90`, written down
-/// as "1.5 s at 60 fps". That is a duration only at one frame rate: on the 120 Hz
-/// display this was reported on, it was 0.75 s, and the figure changed at 1.3 Hz
-/// against a hold written to mean 0.67 Hz. The measured pass rate came from
-/// `gpu::probe`, and it is the reason this is a `f32`.
+/// A *time constant*, not a per-frame fraction, and not a hold: the read is
+/// continuous so there is nothing to strobe against, and what is left to reject
+/// is frame-to-frame FFT noise. Quarter of a second is the smallest value that
+/// clears the measured noise floor by an order of magnitude while passing a 1 Hz
+/// change essentially unattenuated, and it is well clear of the ~50 ms a bar or a
+/// beat takes to be worth reacting to.
 ///
-/// The same trap twice already in this repo: `gpu::feedback_for_a_dt` exists
-/// because a per-frame multiplier is a fixed fraction per frame, and the VU
-/// meter's hold was a clock for the same reason. Both were `dt`-injected and
-/// pure; this one was a bare integer in a view, and nothing could see it.
-pub const HOLD_SECS: f32 = 1.5;
+/// **Seconds, and it would not be a duration in frames.** The same trap
+/// `feedback_for_a_dt` and the deleted `HOLD_SECS` both existed for: a
+/// per-frame coefficient is a different filter at every frame rate, so the same
+/// build would settle differently on a 60 Hz and a 144 Hz display.
+const PLATE_TAU: f32 = 0.25;
 
-/// Spend one frame of the hold: `hold` seconds remaining after `dt` has passed.
+/// How sharply a band's level is raised to a power before it counts toward the
+/// mode read. **The responsiveness dial, and the only one in this view.**
 ///
-/// The whole fix in one pure function, and pure so it can be tested.
+/// A barycentre weights every band by its energy, which is a *centroid* — and a
+/// centroid of a bass-heavy spectrum is anchored. Measured on the committed
+/// `lena.mp3`: **93% of its energy sits below 741 Hz**, so the low group's
+/// barycentre wanders a fifth of its range no matter what the music does. That is
+/// not a bug in the arithmetic, it is what a centroid *is*, and it is the second
+/// half of "the nodes move too little".
 ///
-/// **A degenerate `dt` spends nothing, and that is the safe direction.** A
-/// negative frame time is not a quantity a caller should have to reason about,
-/// and an *infinite* one — which `dt.max(0.0)` lets straight through, since
-/// infinity is not less than zero — would take `hold - inf` to zero and release
-/// the figure immediately. That is the strobe this whole mechanism exists to
-/// prevent, reached through the guard rather than around it, so the test for it
-/// is not decoration. The shape is deliberately the same as
-/// [`crate::gui::panes::visualizer::gpu::feedback_for_a_dt`], which drops its
-/// frame for the same reason.
-pub fn hold_tick(hold: f32, dt: f32) -> f32 {
-    if !dt.is_finite() || dt <= 0.0 {
-        return hold.max(0.0);
-    }
-    (hold - dt).max(0.0)
-}
+/// Raising the power walks the read from centroid towards **soft argmax**: the
+/// loudest band dominates and the figure follows the peak, which is what actually
+/// moves. Combined travel of the two mode numbers over the 12 s fixture, swept:
+///
+/// ```text
+/// power   1     2     3     4     6     8    12    16
+/// modes  3.05  3.20  3.45  3.68  4.03  4.24  4.43  4.49
+/// ```
+///
+/// **8, and the tail is why.** Everything past it is under 5% of the range for a
+/// read that is by then very nearly an argmax — which is the *old* discrete pick,
+/// and the reason this view was a slideshow is that a discrete pick has to be
+/// rate-limited to be watchable. The read stays continuous in *level* at any
+/// power (a trade between two bands slides the figure continuously, which
+/// `the_read_is_continuous_through_a_handover` pins), but the further towards an
+/// argmax it walks, the more of the figure's movement is a band switching places
+/// and the less of it is the music's *shape*. 8 buys a third more travel than the
+/// original 2 and stops short of that.
+const MODE_POWER: f32 = 8.0;
 
-/// Pick the plate's mode pair from the smoothed band levels, sticking to the
-/// current one.
+/// The plate's mode numbers this frame, read straight off the band levels.
 ///
-/// The mode numbers are a **discrete** pick, so a bare top-two repaints the
-/// whole plate as a different figure whenever two bands are near-equal at the
-/// top — most frames of most music, and every frame of a quiet passage, where
-/// all 32 bands sit on the `-60` floor and the order is decided by hundredths of
-/// a dB of FFT noise. Measured against the real smoothing constants over a
-/// drifting bass line, a bare top-two switched 60 times in 15 s: four
-/// whole-figure redraws a second.
+/// **Continuous in, continuous out — and that is the entire fix.** This replaced a
+/// discrete hysteretic argmax (`pick_mode`) with a 1.5 s hold, and the pair it
+/// returned was the *only* channel the music had into the picture. Because the
+/// pick was discrete, a discrete pick's failure modes applied to it: two bands
+/// near-equal at the top repainted the whole plate, so it needed a margin and a
+/// hold, and the hold capped the figure at one change per 1.5 s by construction
+/// (measured: a hard 0.67/s even with two bands deliberately duelling). The image
+/// was therefore bit-identical between switches and the spectrum could not reach
+/// it — reported as "the viz is rendering at 5fps" and as "kinda still and
+/// unrelated to the music".
 ///
-/// Smoothing cannot fix that, and the cost of it here is not a taste call
-/// either — a discrete pick has nothing for a smoother to average. So the figure
-/// sticks: keep the current pair unless a challenger is louder by
-/// `MARGIN_DB`, and pin it for `hold` seconds after a switch. `hold` is a
-/// duration in seconds and the caller owns the decrement — see [`hold_tick`].
+/// Neither symptom was about drawing. The field is continuous in both mode
+/// numbers, so any real `(n, m)` is a valid cymatic figure, and a *continuous
+/// read* of the spectrum needs no margin, no hold, and no anti-strobe machinery
+/// at all: a figure that slides cannot strobe, and this deleted the slide, the
+/// hold countdown and the stored state along with the pick. Staleness is
+/// prevented by the only thing that can actually cause it — the band smoothing
+/// above, which is per-bin attack/release.
 ///
-/// Candidates are band indices `1..=MAX_MODE`, and **the band index is the mode
-/// number**. Band 0 is excluded because a mode of 0 makes the whole field term
-/// zero, so it can only ever draw a blank figure — a free source of the exact
-/// strobing this exists to stop.
-pub fn pick_mode(
-    bands: &[f32; VIZ_BANDS],
-    current: Option<(usize, usize)>,
-    hold: f32,
-) -> (usize, usize) {
-    // The top two eligible bands, in one pass and without allocating: this runs
-    // every frame. Seeding both slots with band 1 costs nothing because the
-    // second slot is necessarily overwritten by band 2 (MAX_MODE >= 2).
-    let mut top: [(usize, f32); 2] = [(1, f32::MIN); 2];
-    for (i, &level) in bands.iter().enumerate().skip(1).take(MAX_MODE) {
-        if level > top[0].1 {
-            top[1] = top[0];
-            top[0] = (i, level);
-        } else if level > top[1].1 {
-            top[1] = (i, level);
+/// Two barycentres, one per half of the eligible range, so `n < m` always and the
+/// degenerate `n == m` figure is unreachable rather than merely unlikely (see
+/// [`MODE_SPLIT`]). Band 0 is excluded for the same reason `pick_mode` excluded
+/// it: a mode of 0 zeroes the whole field term, so it can only draw a blank.
+///
+/// `prev` is followed over `dt` rather than replaced, and **that is as load-bearing
+/// as the continuity is.** A barycentre is a *ratio* of two sums over the band
+/// levels, so a hundredth of a dB of FFT noise in one bin moves it several times
+/// more than it moves that bin — and weighting by squared energy, which is what
+/// makes the read track peaks, widens that a third time. Measured through the
+/// real `draw` at 60 fps, the *unsmoothed* read moved the plate by 0.046 of a
+/// mode per frame **on a single steady tone with no change in the music at all**,
+/// against 0.064 for music that was actually changing: roughly 70% of the motion
+/// was twinkle, not sound. That is a worse failure than the frozen plate it
+/// replaced, because a plate that jitters reads as broken rather than calm.
+///
+/// One pole, one time constant, and the twinkle goes while the music gets
+/// through. Measured through the real `draw` at 60 fps over the committed
+/// `lena.mp3` fixture, as mean movement per frame: a **held sample** (no change
+/// in the "music" at all) moves the plate 0.0027 per frame and takes 28 large
+/// steps in 736; the **real recording** moves it 0.0253 and takes 334. So the
+/// motion is the music at roughly 10:1 over the noise, and `m` travels 3.6 modes
+/// over the 12 s where the noise floor does not move at all. Before the pole those
+/// two figures were 0.046 and 0.064 — a third of a mode per frame of pure
+/// twinkle, which reads as a broken plate rather than a calm one.
+///
+/// The clock is `dt`, not a per-frame fraction, for the reason
+/// [`crate::gui::panes::visualizer::gpu::feedback_for_a_dt`] exists: a fixed
+/// fraction per frame is a different filter at every frame rate, so the same
+/// build would settle differently on a 60 Hz and a 144 Hz display.
+///
+/// Pure, and `Ui`-free, so the whole read is testable without a window — which
+/// is the half that used to be untestable behind a `Shape::Callback`.
+pub fn mode_now(bands: &[f32; VIZ_BANDS], prev: (f32, f32), dt: f32) -> (f32, f32) {
+    // `level()` in GLSL, kept as the same expression because a band is a level in
+    // dB and every read of one has to agree about that.
+    let level = |d: f32| (d - DB_FLOOR).clamp(0.0, -DB_FLOOR) / -DB_FLOOR;
+    // A band's share of its group's energy, raised to `MODE_POWER`. Squaring was
+    // the original and it is a *centroid* — anchored by the bass, which holds
+    // 93% of a real recording's energy, so the figure barely moved. See
+    // `MODE_POWER` for the sweep that chose the number.
+    let centre = |range: std::ops::RangeInclusive<usize>| {
+        let mut weight = 0.0f32;
+        let mut moment = 0.0f32;
+        for (i, &db) in bands
+            .iter()
+            .enumerate()
+            .take(*range.end() + 1)
+            .skip(*range.start())
+        {
+            let w = level(db).powf(MODE_POWER);
+            weight += w;
+            moment += w * i as f32;
         }
-    }
-    let cand = if top[0].0 > top[1].0 {
-        (top[1].0, top[0].0)
-    } else {
-        (top[0].0, top[1].0)
+        // No energy: no opinion, so the caller keeps what it had.
+        (weight > 0.0).then(|| moment / weight)
     };
-
-    let Some((n, m)) = current else { return cand };
-    let eligible = |i: usize| (1..=MAX_MODE).contains(&i);
-    // A stored pair outside the range, or degenerate, is stale — an edited
-    // MAX_MODE, or egui memory that outlived the build that wrote it — and
-    // re-picking beats drawing a blank or an unresolvable plate.
-    if !eligible(n) || !eligible(m) || n == m {
-        return cand;
-    }
-    if hold > 0.0 || cand == (n, m) {
-        return (n, m);
-    }
-    // The *weaker* band of each pair, not the louder one: a pair is only as
-    // loud as its quieter member, so that is the honest comparison to make.
-    let weak = |p: (usize, usize)| f32::min(bands[p.0], bands[p.1]);
-    if weak(cand) > weak((n, m)) + MARGIN_DB {
-        cand
-    } else {
-        (n, m)
-    }
+    // The barycentre comes back in **band** units and has to be mapped into
+    // **mode** units, because the two are nothing alike: the bands are log-spaced
+    // over 20 Hz .. 22 kHz, while a mode is a count of nodal lines and `MAX_MODE`
+    // bounds that count. Affine over each group's own span, so the mapping is
+    // continuous and monotonic — a curve in it would put figures at musically
+    // meaningless band boundaries.
+    //
+    // Each group maps onto its own half of `1..=MAX_MODE`, and that is what keeps
+    // `n < m` structural rather than checked: `n` cannot reach above `MODE_SPLIT`
+    // and `m` cannot reach below it, whatever the spectrum does.
+    let n = |band: f32| {
+        let (first, last) = (MODE_BAND_LO as f32, MODE_BAND_SPLIT as f32);
+        let along = ((band - first) / (last - first)).clamp(0.0, 1.0);
+        1.0 + along * (MODE_SPLIT as f32 - 1.0)
+    };
+    let m = |band: f32| {
+        let (first, last) = ((MODE_BAND_SPLIT + 1) as f32, MODE_BAND_HI as f32);
+        let along = ((band - first) / (last - first)).clamp(0.0, 1.0);
+        // `MAX_MODE - MODE_SPLIT - 1`, not `MAX_MODE - MODE_SPLIT`: the high
+        // range is `SPLIT+1 ..= MAX_MODE`, and counting the steps *from* its
+        // first value lands the last one on `MAX_MODE + 1`. The range sweep
+        // caught it as an out-of-range mode number.
+        (MODE_SPLIT + 1) as f32 + along * (MAX_MODE - MODE_SPLIT - 1) as f32
+    };
+    let target = match (
+        centre(MODE_BAND_LO..=MODE_BAND_SPLIT),
+        centre((MODE_BAND_SPLIT + 1)..=MODE_BAND_HI),
+    ) {
+        (Some(nb), Some(mb)) => (n(nb), m(mb)),
+        // One half silent and the other not: the silent half keeps the figure it
+        // had and the loud half moves on its own, because a bass note with no
+        // treble above it still has to change the plate.
+        (Some(nb), None) => (n(nb), prev.1),
+        (None, Some(mb)) => (prev.0, m(mb)),
+        (None, None) => return prev,
+    };
+    let settle = |now: f32, was: f32| {
+        // A degenerate `dt` contributes **no elapsed time**, so the plate holds.
+        // That is the same shape as `feedback_for_a_dt`, and the same reason: a
+        // clock that cannot be trusted must not be allowed to move anything, and
+        // egui's predicted frame time is legitimately zero on a session's first
+        // frame. Returning the *target* instead would be a snap, which is the one
+        // thing this view is not supposed to do to a figure.
+        if !dt.is_finite() || dt <= 0.0 {
+            return was;
+        }
+        let k = 1.0 - (-dt / PLATE_TAU).exp();
+        was + (now - was) * k
+    };
+    (settle(target.0, prev.0), settle(target.1, prev.1))
 }
 
 /// Compute a mirrored wave envelope from the ring buffer for the "wave" view.
