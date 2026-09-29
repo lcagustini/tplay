@@ -539,7 +539,7 @@ impl Icon {
     /// `self as usize`. **Append-only**: a new `Icon` goes at the end of the enum
     /// and the end of both arrays, or every later icon decodes the wrong file.
     ///
-    /// 19 of the 23 are [game-icons.net](https://game-icons.net) artwork under
+    /// 16 of the 23 are [game-icons.net](https://game-icons.net) artwork under
     /// CC BY 3.0 (see `CREDITS`); the rest are original. Each is a per-theme SVG
     /// with that theme's own palette token baked into its `fill`, which is why a
     /// single file can never serve two themes. A glyph is only ever painted when
