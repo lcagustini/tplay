@@ -61,21 +61,32 @@ void main() {
     float t = u_time;
 
     // The floor the tongues stand on, and how far up this fragment is inside them:
-    // 0 at the floor, 1 at the tip of a full-height tongue.
+    // 0 at the floor, 1 at the tip of a full-height tongue. **Height in units of
+    // the pane's height**, so the vertical scale is the one the figure is drawn in.
     float base = 0.97;
     float rise = (base - uv.y) / 0.90;
 
     // Fire licks *sideways*, and the shear grows with height — the further from
     // the fuel the more the draught moves it. Without this the tongues are static
     // silhouettes that only scale, which is what reads as a bar chart.
-    float lick = uv.x + 0.020 * sin(t * 1.3 + rise * 4.5);
+    //
+    // **`x` is in units of the pane's height, not its width.** A tongue's
+    // cross-section is a Gaussian and its height is measured in the same units,
+    // so a `tongue()` fed a raw `uv.x` draws a *stretched* flame on a wide pane
+    // and a pinched one on a tall one: the shoulders and the tip change shape
+    // with the splitter, which is the whole of what a flame's silhouette is.
+    // Scaling x by the aspect ratio is the same correction radial.rs, chladni.rs
+    // and trails.rs make, and the three tongue positions below are in the same
+    // units as their widths.
+    float x = (uv.x - 0.5) * (u_resolution.x / max(u_resolution.y, 1.0));
+    float lick = x + 0.020 * sin(t * 1.3 + rise * 4.5);
 
     // Three tongues, each driven by a different part of the spectrum and
     // flickering on its own phase, so the shape changes rather than the scale.
     float h = 0.0;
-    h = max(h, 0.80 * band(0.08) * (0.5 + 0.5 * sin(t * 2.1))      * tongue(lick, 0.30, 0.115));
-    h = max(h, 1.00 * band(0.30) * (0.5 + 0.5 * sin(t * 1.7 + 2.1)) * tongue(lick, 0.52, 0.130));
-    h = max(h, 0.66 * band(0.58) * (0.5 + 0.5 * sin(t * 2.6 + 4.2)) * tongue(lick, 0.72, 0.095));
+    h = max(h, 0.80 * band(0.08) * (0.5 + 0.5 * sin(t * 2.1))      * tongue(lick, -0.11, 0.115));
+    h = max(h, 1.00 * band(0.30) * (0.5 + 0.5 * sin(t * 1.7 + 2.1)) * tongue(lick, 0.06, 0.130));
+    h = max(h, 0.66 * band(0.58) * (0.5 + 0.5 * sin(t * 2.6 + 4.2)) * tongue(lick, 0.26, 0.095));
 
     float inside = step(0.0, rise);
     float body = inside * step(rise, h);
@@ -88,7 +99,8 @@ void main() {
     float glow = smoothstep(-0.13, 0.03, h - rise) * inside;
 
     // A dim bed along the floor, so the tongues stand on something and the bottom
-    // of the pane is never empty.
+    // of the pane is never empty. **Full width, so it is a bed rather than a
+    // third one** — a bed under three tongues only has to reach the outer two.
     float bed = inside * (1.0 - smoothstep(0.0, 0.10, rise)) * (0.25 + 0.75 * band(0.5));
 
     vec3 col = u_bg.rgb;

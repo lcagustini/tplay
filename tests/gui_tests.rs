@@ -691,6 +691,74 @@ fn the_playlist_pane_leaves_its_list_the_height_it_was_given() {
     }
 }
 
+/// The visualizer pane states a minimum size, and the floor it states has to be
+/// one the view can actually be drawn at.
+///
+/// **This is the other half of the pane-size work, and it is the half that is
+/// measurable.** The shader side (`fwidth`, the aspect corrections) is a property
+/// of a string; this is a property of geometry, and it runs the real pane in a
+/// headless `Context` the same way the Playlist geometry test does.
+///
+/// The claim is not "a number is recorded" — that would pass if the floor were
+/// one pixel or a million. It is that the floor is **derived from the view's own
+/// resolution limit**: a 32-band row needs cells at two pixels apiece to be a
+/// row, which is the same threshold `bars` dims out at per fragment, so the pane
+/// asks for the space that threshold implies. A floor smaller than that lets the
+/// splitter reach a size where the view has deliberately stopped drawing itself.
+#[test]
+fn the_visualizer_floor_matches_the_bars_sampling_limit() {
+    use common::TestApp;
+    use eframe::egui::{pos2, vec2, Rect};
+    use tplay::audio::viz::VIZ_BANDS;
+    use tplay::gui::panes::visualizer::visualizer_pane;
+    use tplay::gui::theme::ThemeState;
+
+    let mut t = TestApp::new("visualizer-min-size");
+    let ctx = egui::Context::default();
+    let raw = egui::RawInput {
+        screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(680.0, 460.0))),
+        ..Default::default()
+    };
+    let (mut min_h, mut min_w) = (0.0f32, 0.0f32);
+    let _ = ctx.run(raw, |ctx| {
+        let themes = ThemeState::load(ctx, tplay::gui::theme::Themes::load(), "dark");
+        egui::CentralPanel::default().show(ctx, |ui| {
+            visualizer_pane(&mut t.app, &themes, ui);
+        });
+        min_h = ctx.data(|d| {
+            d.get_temp::<f32>(egui::Id::new("tplay.pane_content_h").with(Pane::Visualizer))
+                .unwrap_or(0.0)
+        });
+        min_w = ctx.data(|d| {
+            d.get_temp::<f32>(egui::Id::new("tplay.pane_content_w").with(Pane::Visualizer))
+                .unwrap_or(0.0)
+        });
+    });
+
+    assert!(
+        min_h > 0.0 && min_w > 0.0,
+        "the visualizer pane recorded no minimum ({min_h:.1}x{min_w:.1}) — it is the \
+         only pane here that draws nothing but a fullscreen shader, so it has no \
+         measured content to floor it and `apply_min_pane_sizes` skips it entirely"
+    );
+    // The width is the direct statement of the sampling limit: two pixels per
+    // band cell, which is where `bars` starts dimming itself out.
+    let cells_at_two_px = VIZ_BANDS as f32 * 2.0;
+    assert!(
+        (min_w - cells_at_two_px).abs() < 0.5,
+        "the pane's width floor is {min_w:.1}, but `bars` stops being legible below \
+         {cells_at_two_px:.1} ({VIZ_BANDS} cells at two pixels). A floor under that \
+         lets the splitter reach a size where the view has drawn itself away."
+    );
+    // And the height has to cover a header *and* that many cells of drawing area,
+    // or the floor is satisfied by a pane that is all header.
+    assert!(
+        min_h > cells_at_two_px,
+        "the height floor is {min_h:.1}, which does not leave room for a band row \
+         under the header — the pane would satisfy the floor with chrome alone"
+    );
+}
+
 /// Both lists emit their rows, and the culling still drops what is off-screen.
 ///
 /// **This is the guard for the bug that emptied the Library and the Playlist at
@@ -1106,7 +1174,184 @@ mod shader_views {
     /// a hardcoded *literal* is a colour someone typed, but a shader that simply
     /// never mentions a palette uniform ignores the theme just as thoroughly and
     /// cannot be caught by pattern-matching literals at all. This is the property
-    /// that says "palette-only" rather than "no hex".
+    /// A view that draws *anything* round reads the aspect ratio.
+    ///
+    /// **This is the pane-size guard, and it is a source-reading test because
+    /// there is no other kind available.** `v_uv` is 0..1 over the pane in both
+    /// axes, so a shader that treats it as a square space draws a *correct*
+    /// picture of the wrong shape, and the distortion scales with the pane: an
+    /// ellipse instead of a circle on a 3:1 pane, a stretched flame on a wide
+    /// one. Nothing crashes, no callback is missed, the program links, and every
+    /// behavioural test passes — which is exactly what a full revert of the
+    /// `trails` fix did, measured.
+    ///
+    /// The failure is also *invisible in a screenshot*, because a screenshot is
+    /// taken at one pane size and at the default size the aspect is close enough
+    /// to square to look right. The bug only shows when someone drags a
+    /// splitter, which is a thing users do constantly and tests never do.
+    ///
+    /// So: a view whose geometry has a notion of round — a distance from a
+    /// centre, a rotation, a Gaussian cross-section — must have aspect-corrected
+    /// it. A view that legitimately does not (`bars`, which is a per-column
+    /// comparison) is named as an exemption, and the exemption is a claim someone
+    /// has to justify in the source rather than an oversight.
+    #[test]
+    fn a_view_that_draws_round_corrects_the_aspect_ratio() {
+        /// Views whose geometry is per-axis and has no notion of round: a bar is
+        /// as wide as the pane gives it, and `bars` deliberately draws sub-pixel
+        /// cells out rather than rescaling them. Everything else must correct.
+        const EXEMPT: &[&str] = &["Bars", "Spectrogram"];
+        /// The property that makes a view "round": it measures a distance, turns
+        /// an angle, or takes a cross-section.
+        const ROUND_SHAPES: &[&str] = &["length(", "atan(", "exp(-", "tongue("];
+        /// Code lines only, so a mention *inside a comment* does not count as the
+        /// view reading it. A whole-file `contains` is the version of this test
+        /// that a mutation walked straight through: reverting a view's aspect
+        /// correction left `u_resolution` mentioned elsewhere in the same file,
+        /// so the file-level check still passed.
+        fn code(body: &str) -> String {
+            body.lines()
+                .map(|l| match l.find("//") {
+                    Some(at) => &l[..at],
+                    None => l,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        for (name, body) in bodies() {
+            if EXEMPT.contains(&name) {
+                continue;
+            }
+            let code = code(body);
+            if !ROUND_SHAPES.iter().any(|s| code.contains(s)) {
+                continue;
+            }
+            // **The correction has to be applied to the coordinate the round shape
+            // is measured in.** Checking that the file mentions `u_resolution` is
+            // not enough, and two mutations proved it: `trails` reads the
+            // resolution on its *sample* line to undo the correction, so a revert
+            // of the correction itself left the mention in place and the whole
+            // file-level check still passed.
+            //
+            // So the property is about the *assignment* that produces the
+            // coordinate, in whichever form a view keeps it — a `vec2` for the
+            // views that measure a distance in two axes, a `float` for the one
+            // that takes a cross-section in x alone. Both are named explicitly
+            // because a view may legitimately correct one and not the other, and
+            // a check that only knew the first would either pass a broken view or
+            // fail a correct one — which is the same trade `EXEMPT` is for, one
+            // level in.
+            const CORRECTED: &[&str] = &[
+                // A two-axis centred coordinate, with the ratio bound or inline.
+                "centred = (uv - 0.5) * vec2(aspect, 1.0)",
+                "centred = (uv - 0.5) * vec2(u_resolution.x / max(u_resolution.y, 1.0), 1.0)",
+                // A one-axis cross-section coordinate: `flame`'s `x`.
+                "x = (uv.x - 0.5) * (u_resolution.x / max(u_resolution.y, 1.0))",
+                "x = (uv.x - 0.5) * aspect",
+            ];
+            assert!(
+                CORRECTED.iter().any(|c| code.contains(c)),
+                "{name} measures a distance in a coordinate that is not aspect-\
+                 corrected, so on a non-square pane the round shape is drawn \
+                 distorted in proportion to how far from square the pane is. Correct \
+                 the coordinate the shape is measured in, as \
+                 `centred = (uv - 0.5) * vec2(aspect, 1.0)`."
+            );
+        }
+    }
+
+    /// A view that aspect-corrects also *un*-corrects before sampling.
+    ///
+    /// The half that is easy to get wrong and has no compile error: a feedback
+    /// view computes its transform in the corrected space but samples a texture
+    /// in the target's own 0..1 space, so a corrected coordinate handed straight
+    /// to `texture()` is a sample from the wrong place — the whole image sheared
+    /// across the pane, and it looks like the trail is drifting rather than like
+    /// an arithmetic slip. The division back is what makes it the same point.
+    #[test]
+    fn a_feedback_view_uncorrects_the_aspect_before_sampling() {
+        for (name, body) in bodies() {
+            // Only a view that *transforms* into the corrected space can get this
+            // wrong, and only one that samples by `texture` afterwards. The
+            // spectrogram's accumulate pass is `texelFetch` in whole texels and
+            // its present pass samples with `v_uv` directly, so it has no
+            // corrected coordinate to divide back — asking it to would be asking
+            // for a property it deliberately does not have.
+            let code: String = body
+                .lines()
+                .map(|l| match l.find("//") {
+                    Some(at) => &l[..at],
+                    None => l,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !code.contains("centred = (uv - 0.5) * vec2(aspect, 1.0)") {
+                continue;
+            }
+            // **The invariant is a round trip, and that is what is asserted.** A
+            // corrected coordinate that is sampled without being divided back
+            // reads a mirrored point and shears the whole trail; one that is
+            // divided back is the same point. The division is what says which.
+            // A mutation that removed it while leaving the sampling alone passed
+            // a check that only looked at the sampled expression, because the
+            // intermediate is a *variable* — the dataflow is one statement
+            // removed, not a name changed.
+            assert!(
+                code.contains("/ vec2(aspect, 1.0)) + 0.5")
+                    || code.contains("/ vec2(aspect, 1.0)) + 0.5;")
+                    || code.contains("/ vec2(aspect, 1.0))"),
+                "{name} builds a corrected coordinate and samples `u_prev` with it \
+                 undivided: `texture(u_prev, ...)` takes the target's own 0..1 \
+                 space, so the sample is a mirrored point and the trail shears \
+                 across the pane. Divide the coordinate back by `vec2(aspect, 1.0)` \
+                 before it reaches the sample."
+            );
+        }
+    }
+
+    /// A view that draws a *cell* says what happens when the cell is sub-pixel.
+    ///
+    /// The property is not "there is a fade" — a test asserting a named constant
+    /// would only pin the number, and a mutation that deleted the fade outright
+    /// passed every other check here. It is that a view dividing the pane into
+    /// cells **declares its own sampling limit**, because a hard `step` on a
+    /// sub-pixel feature is sampling faster than the screen can show it: the row
+    /// shimmers as a splitter moves, and nothing about that is visible in a
+    /// screenshot taken at one size.
+    ///
+    /// `bars` is the only view that cells the pane — `wave` and `flame` read a
+    /// continuous coordinate — and the declaration is `fwidth`, which is what
+    /// makes the threshold *physical* rather than a guess at a pane size. A view
+    /// that cells the pane without naming `fwidth` is drawing at a resolution it
+    /// never checked, and on a HiDPI display or a narrow pane those are not the
+    /// same number.
+    #[test]
+    fn a_view_that_cells_the_pane_declares_its_sampling_limit() {
+        for (name, body) in bodies() {
+            if name != "Bars" {
+                continue;
+            }
+            let code: String = body
+                .lines()
+                .map(|l| match l.find("//") {
+                    Some(at) => &l[..at],
+                    None => l,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                code.contains("fwidth("),
+                "{name} divides the pane into {VIZ_BANDS} cells but never asks how \
+                 many pixels one is: a fixed gap and a fixed tick are a fixed \
+                 fraction of a cell, so both go sub-pixel on a narrow pane and the \
+                 row shimmers as the splitter moves. Read the cell width with \
+                 `fwidth` and either size the feature in pixels or dim the view out \
+                 below the sampling limit."
+            );
+        }
+    }
+
+    /// That says "palette-only" rather than "no hex".
     #[test]
     fn every_shader_reads_the_palette() {
         const PALETTE_UNIFORMS: [&str; 3] = ["u_bg", "u_accent", "u_progress_fill"];

@@ -56,7 +56,17 @@ const HOLD_SECS: f32 = 1.6;
 pub const FRAG: &str = r#"
 void main() {
     vec2 uv = v_uv;
-    vec2 centred = uv - 0.5;
+
+    // **Aspect-corrected, and this view accumulates the error when it is not.**
+    // Three separate things are wrong in a non-square pane, and a feedback view
+    // is the worst place for all three because the trail *keeps* them: the ring
+    // draws as an ellipse rather than a circle, the spin below becomes a shear
+    // instead of a rotation, and the zoom shrinks by a different fraction in
+    // pixels on each axis. So the picture is not merely a squashed version of
+    // itself — it is a different transform each frame, folded into the buffer.
+    // The same correction radial.rs and chladni.rs make.
+    float aspect = u_resolution.x / max(u_resolution.y, 1.0);
+    vec2 centred = (uv - 0.5) * vec2(aspect, 1.0);
 
     // SPIN: the per-frame rotation, radians. Slow enough to read as a drift, and
     // constant rather than tied to `dt` — a scale that varied with the frame rate
@@ -69,7 +79,13 @@ void main() {
     // was in the old one. A positive ZOOM shrinks the trail inward, so the image
     // appears to expand — which is the direction a zoom reads correctly.
     // ZOOM: the per-frame shrink of the sampled copy, 0.35% a frame.
-    vec2 prev = (spun * (1.0 - 0.0035) - centred) + 0.5;
+    //
+    // **Un-corrected on the way out**, because `prev` is a coordinate into
+    // `u_prev`, which is in the target's own 0..1 texture space — not in the
+    // aspect-corrected space the transform was computed in. Dividing by `aspect`
+    // is what makes it the same point rather than a mirrored one; sampling the
+    // corrected value directly would shear the whole trail across the pane.
+    vec2 prev = ((spun * (1.0 - 0.0035) - centred) / vec2(aspect, 1.0)) + 0.5;
 
     // Outside the old frame there is nothing to keep — but **a hard cut there is
     // a visible vertical seam down the pane**: the trail stopped dead at one
