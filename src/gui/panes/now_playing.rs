@@ -96,7 +96,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                 // right-to-left scope under-sizes inside the dock's ScrollArea.)
                 let font = egui::FontId::new(layout.text_time, theme.metadata_font.clone());
                 let label_w = |s: &str| {
-                    ui.fonts(|f| {
+                    ui.fonts_mut(|f| {
                         f.layout_no_wrap(s.to_owned(), font.clone(), theme.palette.text_secondary)
                             .size()
                             .x

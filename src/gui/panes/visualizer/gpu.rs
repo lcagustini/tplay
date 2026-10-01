@@ -1,66 +1,57 @@
-//! GL harness for the shader-drawn visualizer views.
+//! wgpu harness for the shader-drawn visualizer views.
 //!
 //! The one escape hatch egui offers is a `Shape::Callback`, and `epaint`
 //! documents the contract: the backend sets the viewport to the callback's rect
-//! and **restores any state the callback changed** — program, VAO, blend. So a
-//! view may bind whatever it likes inside the callback and egui puts it back.
-//! `egui_glow::paint_primitives` honours that literally, calling
-//! `prepare_painting` under the comment `// Restore state` after every callback.
+//! and restores the state the callback touched. A view may therefore issue its
+//! own draw commands from inside one.
+//!
+//! **eframe 0.36 renders with wgpu, so this speaks wgpu.** That is not a
+//! preference: eframe's default features *changed*, dropping `glow` in favour of
+//! `wgpu`, and a wgpu renderer cannot downcast a `egui_glow::CallbackFn` — the
+//! docs say so plainly, *"if the type cannot be downcast to the type expected by
+//! the current backend the callback will not be drawn"*. Every view therefore
+//! went blank and nothing else did, because ordinary shapes and textures are
+//! backend-agnostic. See `init` for the one piece of setup that needs.
 //!
 //! **The two-tier rule.** DSP stays on the CPU and drawing moves to the GPU.
 //! [`crate::audio::viz::compute_bands`] is 17 µs a frame and is covered by
-//! `viz_tests.rs`; a hand-written WGSL/GLSL FFT would cost a buffer upload per
-//! frame to save 0.1% of a frame, and would move the one part that can be
-//! tested headlessly into the one part that cannot. So a shader view computes
-//! its inputs exactly as the CPU views do and receives them as uniforms.
+//! `viz_tests.rs`; a hand-written WGSL FFT would cost a buffer upload per frame
+//! to save 0.1% of a frame, and would move the one part that can be tested
+//! headlessly into the one part that cannot. So a shader view computes its
+//! inputs exactly as the CPU views do and receives them as uniforms.
 //!
 //! **The uniform block is a fixed superset, and it is finished.** [`Uniforms`]
-//! is every input a visualization may ask for; a shader declares only what it
-//! references, and the whole block is uploaded unconditionally every frame. That
-//! works because GLSL compilers strip unreferenced uniforms, and glow reports a
-//! stripped one as `None` and skips the upload — so a look that reads two of
-//! the eleven fields costs two wasted no-op calls and nothing else. A look that
-//! needs a *new kind* of input is the only thing that may edit this file, and
-//! that is a harness decision rather than per-view boilerplate.
+//! is every input a visualization may ask for, and the whole block is uploaded
+//! unconditionally every frame. Under GLSL that was free because the compiler
+//! stripped what a shader did not reference; under WGSL nothing is stripped, and
+//! it is still the right shape, because one `struct` and one bind group serve
+//! every view — so a look that reads two of the fields costs nothing and a look
+//! needing a *new kind* of input is the only thing that may edit this file.
+//!
+//! **Every member is a `vec4`, and that is the load-bearing part.** WGSL gives
+//! an array in the uniform address space a **16-byte element stride** whatever
+//! its element type, so `array<f32, 32>` costs 512 bytes, not 128. A buffer
+//! packed at 4 bytes per `f32` is then read as garbage — and *silently* garbage,
+//! because naga validates the shader against the shader and the buffer is ours.
+//! So the arrays are `array<vec4<f32>, N/4>` and every scalar rides in a lane.
+//! [`Uniforms::write_block`] is the single writer and [`wgsl_struct`] the single
+//! declaration, and a test compares the two against naga's own layout.
 //!
 //! **A view touches nothing here.** A visualization is a `draw` fn and a shader
-//! string, and the harness names no `VizView` — which is what keeps "adding a
-//! view never means editing the harness" a property rather than a promise.
+//! body, and the harness names no view — which is what keeps "adding a view never
+//! means editing the harness" a property rather than a promise.
 //! `tests/gui_tests.rs` reads this file's source to keep it that way.
-//!
-//! GL 3.3 core is the floor and no fallback is written below it: 3.3 is 2012,
-//! and a `#version 120` twin would be a second copy of every shader to maintain
-//! for hardware that does not ship. A driver that cannot compile a shader logs
-//! it once and the pane keeps its background — see [`resources`].
 
 use crate::audio::viz::{compute_wave, VizBuf, DB_FLOOR, VIZ_BANDS, WAVE_BUCKETS};
 use crate::gui::theme::Palette;
 use eframe::egui;
-use glow::HasContext;
+use eframe::egui_wgpu::{self, wgpu};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
-/// Where a shader's output goes.
-///
-/// The seam a feedback view needs: one that samples its own previous frame cannot
-/// do that from the screen, so it renders into an owned framebuffer first and
-/// then presents the result.
-///
-/// `Clone` rather than `Copy` because the offscreen arm holds an `Arc`. A
-/// [`Target`] is captured by the `Fn` paint callback, which runs on every frame
-/// that shares one `Shape`, so the capture has to be a refcount bump and not a
-/// move — the alternative would be a `Mutex` around the whole draw path, or
-/// `Arc::make_mut` cloning a GL object name, which is worse than both.
-#[derive(Clone)]
-pub enum Target {
-    /// Whatever framebuffer egui has bound, which is the pane's rect.
-    Screen,
-    /// An owned RGBA8 framebuffer, at the size the pane currently is. Held by
-    /// value and refcounted, so a view hands the same `Arc` to every frame and
-    /// the harness never has to know when the view stopped asking for it.
-    Offscreen(Arc<Fbo>),
-}
+// -- the CPU half --------------------------------------------------------------
+// Nothing below this line touches wgpu. Nothing above it does.
 
 /// Every input a shader view may read. A fixed superset, deliberately: see the
 /// module docs for why it is uploaded unconditionally.
@@ -83,8 +74,8 @@ pub struct Uniforms {
     ///
     /// **A fixed count, not a pane-derived one.** The CPU version sized this to
     /// the pane's pixel width, which meant the array length moved with the
-    /// splitter; a uniform array's length is part of its declaration, so it has
-    /// to be a constant. See `WAVE_BUCKETS` for why it is 128 and not 256.
+    /// splitter; an array's length is part of its declaration, so it has to be a
+    /// constant.
     pub wave: [f32; WAVE_BUCKETS],
     pub accent: [f32; 4],
     pub bg: [f32; 4],
@@ -109,13 +100,13 @@ impl Uniforms {
     /// Collect everything a shader view can read, in one place.
     ///
     /// The harness owns the block, so it also owns assembling it: a view never
-    /// names a uniform, which is what keeps the set closed.
+    /// names an input, which is what keeps the set closed.
     ///
     /// **The block is expected to shrink, and it did.** It carried `u_hold`,
     /// `u_slider_track` and `u_border` for the VU meter and then `u_level` with
     /// it, because that view was the sole reader of all four. A field here is not
     /// free even when no shader declares it: `u_level` was filled by a full pass
-    /// over 4 096 samples on **every frame of every view**, for a uniform nobody
+    /// over 4 096 samples on **every frame of every view**, for an input nobody
     /// uploaded. `compute_level` went with it — see the note where it used to
     /// live in `audio::viz`.
     pub fn pack(
@@ -142,6 +133,36 @@ impl Uniforms {
             feedback: 0.0,
         }
     }
+
+    /// The block as the GPU reads it: a flat run of `f32` in [`wgsl_struct`]'s
+    /// order, four to a `vec4`.
+    ///
+    /// **The one place a uniform buffer is written.** The order and the padding
+    /// are both dictated by the WGSL declaration, so a mismatch is a test
+    /// failure (`the_uniform_block_matches_the_shader_struct`) rather than a
+    /// picture made of noise.
+    pub fn write_block(&self) -> Vec<f32> {
+        let mut out = Vec::with_capacity(Self::BLOCK_FLOATS);
+        out.extend_from_slice(&self.bands);
+        out.extend_from_slice(&self.wave);
+        out.extend_from_slice(&self.accent);
+        out.extend_from_slice(&self.bg);
+        out.extend_from_slice(&self.progress_fill);
+        // One lane each, in the order `wgsl_struct` declares them.
+        out.extend_from_slice(&[self.time, self.dt, self.feedback, 0.0]);
+        out.extend_from_slice(&[self.resolution[0], self.resolution[1], 0.0, 0.0]);
+        out.extend_from_slice(&[self.modes[0], self.modes[1], 0.0, 0.0]);
+        debug_assert_eq!(out.len(), Self::BLOCK_FLOATS);
+        out
+    }
+
+    /// Floats in the block, which is `4 *` the `vec4` count.
+    pub const BLOCK_FLOATS: usize = VIZ_BANDS + WAVE_BUCKETS + 12 + 4 + 4 + 4;
+
+    /// The block in bytes — the buffer's size and the bind group layout's
+    /// `min_binding_size`, so wgpu checks the buffer against the shader instead of
+    /// trusting this number.
+    pub const BLOCK_BYTES: u64 = (Self::BLOCK_FLOATS * 4) as u64;
 }
 
 fn srgb(c: egui::Color32) -> [f32; 4] {
@@ -153,37 +174,16 @@ fn srgb(c: egui::Color32) -> [f32; 4] {
     ]
 }
 
-/// Queue `frag` to fill `rect` this frame.
-///
-/// The uniform upload happens here rather than in the callback so that the GLSL
-/// block and the values that fill it are described by the same struct — a
-/// mismatch is then a compile error instead of a wrong picture.
-pub fn add_fullscreen(
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    frag: &'static str,
-    uniforms: Uniforms,
-    target: Target,
-) {
-    painter.add(egui::Shape::Callback(egui::PaintCallback {
-        rect,
-        callback: std::sync::Arc::new(egui_glow::CallbackFn::new(move |info, gl| {
-            draw(gl, &info, frag, &uniforms, target.clone());
-        })),
-    }));
-}
-
 /// A feedback view's state: the ping-pong pair, and which way round it is.
 ///
 /// A view holds one of these in egui memory under its own key, which supplies
 /// the two things a `Shape::Callback` cannot: targets that **outlive the frame**
 /// that asked for them, and a **parity** that alternates them.
 ///
-/// The pair sits behind a `Mutex` because the only place a GL context exists is
-/// inside the paint callback, and that callback is `Fn` — it cannot mutate a
-/// capture. So the creation pass writes the finished pair through the slot and
-/// the *next* frame's `draw` picks it up. The parity is outside the lock because
-/// it is a plain CPU decision made before any callback runs.
+/// The pair sits behind a `Mutex` because a texture can only be made with the
+/// `Device`, and the only step that has one is the callback's `prepare`. The
+/// parity is outside the lock because it is a plain CPU decision made before any
+/// of that runs.
 ///
 /// `id` is the view's egui-memory key, and it is **not** used to write anything
 /// back: everything this struct needs to carry across frames already lives in
@@ -197,7 +197,7 @@ pub struct Feedback {
 }
 
 /// The two targets, as `(source, destination)` for the frame about to be drawn.
-type Pair = (Arc<Fbo>, Arc<Fbo>);
+type Pair = (Arc<FeedbackTarget>, Arc<FeedbackTarget>);
 
 impl Feedback {
     fn slot(&self) -> std::sync::MutexGuard<'_, Option<Pair>> {
@@ -211,8 +211,8 @@ impl Feedback {
     /// smear rather than as a fault, which is why it is worth an explicit call.
     ///
     /// The parity resets with them, so the first frame of a new pair is always
-    /// the same target — otherwise which half of the swap is source would depend
-    /// on how many frames the previous view happened to draw.
+    /// the same target — otherwise which half of the swap was source would
+    /// depend on how many frames the previous view happened to draw.
     pub fn invalidate(&mut self) {
         *self.slot() = None;
         self.parity = false;
@@ -223,21 +223,48 @@ impl Feedback {
     ///
     /// A no-op on the first frame after a fresh, a resize or a view switch, since
     /// the targets do not exist yet. That frame shows the background the pane
-    /// already painted, which is the honest cost of a GL context that exists only
-    /// while something is being drawn.
+    /// already painted, which is the honest cost of a target that can only be
+    /// made where the `Device` is.
+    /// The callback [`Self::draw`] queues, exposed so a test can drive it.
+    ///
+    /// The mirror of [`gpu::callback`] for the feedback half, and for the same
+    /// reason: the test must drive the object the pane queues rather than a second
+    /// copy of it. `pass` is `None` on the frame that is only asking for the pair
+    /// to be created, and the two shader names travel *inside* a pass — they are
+    /// what the callback draws, not what it is made of.
+    pub fn callback(
+        &self,
+        helpers: &'static str,
+        pass: Option<FeedbackPass>,
+        wanted: (i32, i32),
+        uniforms: Uniforms,
+    ) -> FeedbackCallback {
+        FeedbackCallback {
+            slot: self.built.clone(),
+            failed: self.failed.clone(),
+            wanted,
+            helpers,
+            pass,
+            uniforms,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
         painter: &egui::Painter,
         rect: egui::Rect,
+        helpers: &'static str,
         accumulate: &'static str,
         present: &'static str,
         uniforms: Uniforms,
+        advance: bool,
     ) {
-        // A driver that cannot give us a framebuffer is asked **once**. Without
-        // this, a failure means two textures and two framebuffers created and
-        // released 60 times a second, for ever — the same class of runaway as the
-        // per-frame rebuild this function used to do. The program cache learned
-        // this lesson; the feedback path did not.
+        // A driver that cannot give us a render target is asked **once**. Without
+        // this, a failure means two textures created and released 60 times a
+        // second, for ever — the same class of runaway as the per-frame rebuild
+        // this function used to do. The pipeline cache learned this lesson; the
+        // feedback path did not.
         if self.failed.load(Ordering::Relaxed) {
             return;
         }
@@ -250,69 +277,42 @@ impl Feedback {
         };
 
         let Some((a, b)) = ready else {
-            self.create(painter, rect, wanted);
+            // Creation happens in the callback's `prepare`, which is the only
+            // place a `Device` exists. Until then there is nothing to draw, and
+            // the pane's own background stands in.
+            painter.add(egui::Shape::Callback(
+                egui_wgpu::Callback::new_paint_callback(
+                    rect,
+                    self.callback(helpers, None, wanted, uniforms),
+                ),
+            ));
             return;
         };
+        // Parity only advances when something is written, so a held frame keeps
+        // presenting the same target rather than alternating between the newest
+        // picture and the one before it.
         let (src, dst) = if self.parity { (b, a) } else { (a, b) };
-        self.parity = !self.parity;
+        if advance {
+            self.parity = !self.parity;
+        }
 
-        painter.add(egui::Shape::Callback(egui::PaintCallback {
-            rect,
-            callback: Arc::new(egui_glow::CallbackFn::new(move |info, painter| {
-                let gl = painter.gl();
-                // A freshly created target holds undefined contents, and
-                // `glClear` ignores the scissor box, so this clears the whole
-                // target rather than the scissored part. One frame of
-                // undefined texture otherwise shows as a flash of garbage.
-                if dst.needs_clear() {
-                    clear(gl, &dst);
-                    dst.mark_drawn();
-                }
-                run_pass(
-                    gl,
-                    &info,
-                    accumulate,
-                    &uniforms,
-                    Target::Offscreen(dst.clone()),
-                    Some(&src),
-                );
-                // The viewport is re-derived because pass one rebound both.
-                // The destination is the sampler here: the present pass reads
-                // back exactly what the accumulate pass wrote.
-                run_pass(gl, &info, present, &uniforms, Target::Screen, Some(&dst));
-            })),
-        }));
-    }
-
-    /// Build the pair in the one place that has a GL context, releasing whatever
-    /// it replaces.
-    ///
-    /// **The old pair is destroyed here, in the callback, because that is the only
-    /// place a context exists.** An `Fbo` cannot implement `Drop` — deleting a GL
-    /// object needs the context, which `Drop` has no way to reach — so before this,
-    /// the only way to lose a target was for the pane's size to change, and every
-    /// one of those leaked two textures and two framebuffers. See [`target_size`]
-    /// for why the size used to change far more often than it should have.
-    fn create(&self, painter: &egui::Painter, rect: egui::Rect, size: (i32, i32)) {
-        let slot = self.built.clone();
-        let failed = self.failed.clone();
-        painter.add(egui::Shape::Callback(egui::PaintCallback {
-            rect,
-            callback: Arc::new(egui_glow::CallbackFn::new(move |_info, painter| {
-                let gl = painter.gl();
-                let mut guard = slot.lock().unwrap_or_else(PoisonError::into_inner);
-                // Released before the new pair is made, so the peak is one pair
-                // rather than two.
-                if let Some((a, b)) = guard.take() {
-                    a.destroy(gl);
-                    b.destroy(gl);
-                }
-                match (Fbo::new(gl, size), Fbo::new(gl, size)) {
-                    (Some(a), Some(b)) => *guard = Some((a, b)),
-                    _ => failed.store(true, Ordering::Relaxed),
-                }
-            })),
-        }));
+        painter.add(egui::Shape::Callback(
+            egui_wgpu::Callback::new_paint_callback(
+                rect,
+                self.callback(
+                    helpers,
+                    Some(FeedbackPass::Feedback {
+                        accumulate,
+                        present,
+                        src,
+                        dst,
+                        advance,
+                    }),
+                    wanted,
+                    uniforms,
+                ),
+            ),
+        ));
     }
 }
 
@@ -321,17 +321,14 @@ impl Feedback {
 /// **Physical pixels, not points.** The pane rect is in points and the screen is
 /// in physical pixels, and on a HiDPI display those differ by the scale factor —
 /// so sizing a render target from the rect alone gives a target a *quarter* of
-/// the on-screen area at 2x, and the trail is drawn at a quarter of the
-/// resolution and stretched. That reads as a soft low-resolution smear rather
-/// than as a bug.
+/// the on-screen area at 2x, and the trail is drawn at a quarter resolution and
+/// looks like a soft smear.
 ///
-/// **Quantised to a multiple of [`TARGET_GRID`], and that half is the
-/// load-bearing one.** A dock's pane rect jitters by fractions of a pixel as a
-/// splitter settles, and an exact size check reads that jitter as "the targets
-/// are the wrong size" — so every jitter rebuilt both targets, and each rebuild
-/// leaked the pair it replaced. Rounding to a coarse grid means the size changes
-/// only when the pane really did, which is the one event that should cost a
-/// rebuild.
+/// **Quantised, and the reason is churn.** A dock's pane rect jitters by
+/// fractions of a pixel as a splitter settles, and an exact size check reads that
+/// jitter as "wrong size" — so every jitter rebuilt both targets. Rounding to a
+/// coarse grid means the size changes only when the pane really did, which is the
+/// one event that should cost a rebuild.
 ///
 /// Coarse rather than exact because the content is a soft accumulating trail: a
 /// few pixels of upscale is invisible, whereas being wrong by a pixel every frame
@@ -341,9 +338,10 @@ pub fn target_size(rect: egui::Rect, pixels_per_point: f32) -> (i32, i32) {
         let cells = (points * pixels_per_point / TARGET_GRID as f32).ceil();
         // The floor is a whole grid cell, so a zero or negative extent — which a
         // pane really does report for a frame while a splitter is dragged —
-        // cannot produce a zero-sized target. GL rejects one with `INVALID_VALUE`
-        // and a driver reporting an error on a path nobody checks leaves nothing
-        // in any log, so the symptom is a blank pane and nothing else.
+        // cannot produce a zero-sized target, which wgpu rejects as
+        // `INVALID_VALUE`. A driver reporting an error on a path nobody checks
+        // leaves nothing in any log, so the symptom is a blank pane and nothing
+        // else.
         ((cells as i32).max(1) * TARGET_GRID).max(TARGET_GRID)
     };
     (quantise(rect.width()), quantise(rect.height()))
@@ -352,188 +350,12 @@ pub fn target_size(rect: egui::Rect, pixels_per_point: f32) -> (i32, i32) {
 /// The grid [`target_size`] rounds to, in physical pixels.
 const TARGET_GRID: i32 = 64;
 
-/// An owned RGBA8 framebuffer and the texture it renders into.
-///
-/// `Clone` is a refcount bump, not a GL copy, which is what lets a view hold one
-/// in egui memory and hand the same `Arc` to every frame.
-///
-/// `Send + Sync` is a consequence of the design, not an oversight: the paint
-/// callback is `Send + Sync`, so a target has to cross into it. The GL objects
-/// are only ever used on the thread that owns the context, which is the thread
-/// egui paints on, and the one mutable field is an `AtomicBool` written once a
-/// frame — so a relaxed ordering is the correct one, and a `Mutex` would be a
-/// lock on the paint path for no gain.
-pub struct Fbo {
-    framebuffer: glow::Framebuffer,
-    texture: glow::Texture,
-    size: (i32, i32),
-    /// Set once the target has been rendered into, so a first frame starts from a
-    /// defined state rather than from whatever was in a fresh texture.
-    drawn: AtomicBool,
-}
-
-impl Clone for Fbo {
-    fn clone(&self) -> Self {
-        Self {
-            framebuffer: self.framebuffer,
-            texture: self.texture,
-            size: self.size,
-            drawn: AtomicBool::new(self.drawn.load(Ordering::Relaxed)),
-        }
-    }
-}
-
-// SAFETY: `glow::Framebuffer` and `glow::Texture` are `NonZeroU32` newtypes with
-// no interior state of their own, and the one mutable field is an `AtomicBool`.
-// The GL objects are only ever used on the thread that holds the context, which
-// is the thread egui paints on — and `egui_glow::CallbackFn` requires `Sync`, so
-// this is the bound the library's own signature asks for rather than a widening
-// this module chose.
-unsafe impl Send for Fbo {}
-unsafe impl Sync for Fbo {}
-
-impl Fbo {
-    /// Create a target of `size` physical pixels.
-    ///
-    /// Returns `None` rather than a zero-sized framebuffer, which GL rejects
-    /// with `INVALID_VALUE` and which would otherwise surface as a blank pane
-    /// with nothing in the log.
-    /// `size` must come from [`target_size`], which floors it — see there for why
-    /// a zero dimension is the failure mode worth designing out.
-    pub fn new(gl: &glow::Context, size: (i32, i32)) -> Option<Arc<Fbo>> {
-        let (w, h) = size;
-        // SAFETY: `gl` is the context egui is painting with. Every object created
-        // here is deleted on every failure path below, so a rejected framebuffer
-        // leaks nothing; a successful one lives for the process, as documented on
-        // the type.
-        unsafe {
-            let texture = gl.create_texture().ok()?;
-            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-            gl.tex_image_2d(
-                glow::TEXTURE_2D,
-                0,
-                glow::RGBA8 as i32,
-                w,
-                h,
-                0,
-                glow::RGBA,
-                glow::UNSIGNED_BYTE,
-                glow::PixelUnpackData::Slice(None),
-            );
-            // Linear filtering, clamped edges. The accumulate pass samples this
-            // at a different scale than it renders it, and `REPEAT` on a
-            // non-power-of-two texture is an error on every GL 3.3 driver.
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_MIN_FILTER,
-                glow::LINEAR as i32,
-            );
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_MAG_FILTER,
-                glow::LINEAR as i32,
-            );
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_WRAP_S,
-                glow::CLAMP_TO_EDGE as i32,
-            );
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_WRAP_T,
-                glow::CLAMP_TO_EDGE as i32,
-            );
-
-            let framebuffer = gl.create_framebuffer().ok()?;
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
-            gl.framebuffer_texture_2d(
-                glow::FRAMEBUFFER,
-                glow::COLOR_ATTACHMENT0,
-                glow::TEXTURE_2D,
-                Some(texture),
-                0,
-            );
-            let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
-            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-            if status != glow::FRAMEBUFFER_COMPLETE {
-                eprintln!(
-                    "tplay: feedback framebuffer incomplete ({status:#x}) — the view keeps \
-                     its background"
-                );
-                gl.delete_framebuffer(framebuffer);
-                gl.delete_texture(texture);
-                return None;
-            }
-            Some(Arc::new(Fbo {
-                framebuffer,
-                texture,
-                size: (w, h),
-                drawn: AtomicBool::new(false),
-            }))
-        }
-    }
-
-    pub fn size(&self) -> (i32, i32) {
-        self.size
-    }
-
-    /// Whether this target has been rendered into since it was created.
-    pub fn needs_clear(&self) -> bool {
-        !self.drawn.load(Ordering::Relaxed)
-    }
-
-    pub fn mark_drawn(&self) {
-        self.drawn.store(true, Ordering::Relaxed);
-    }
-
-    /// The texture to sample, on texture unit 0.
-    ///
-    /// Binds it and leaves unit 0 active, which is what the harness's
-    /// `u_prev = 0` upload assumes.
-    pub fn bind_texture(&self, gl: &glow::Context) {
-        // SAFETY: a texture this module created, bound to a unit egui's own state
-        // reset rebinds after the callback.
-        unsafe {
-            gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, Some(self.texture));
-        }
-    }
-
-    /// Make this the render target.
-    pub fn bind(&self, gl: &glow::Context) {
-        // SAFETY: a framebuffer this module created and verified complete. egui
-        // rebinds its own after the callback (see `draw`'s safety note).
-        unsafe {
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.framebuffer));
-        }
-    }
-
-    /// Release the GL objects.
-    ///
-    /// A free function rather than a `Drop` because deleting a GL object needs the
-    /// context and `Drop` has no way to reach it — so any target that went out of
-    /// scope without this leaked both its framebuffer and its texture. Called from
-    /// the one place that has a context, when a target is replaced.
-    pub fn destroy(&self, gl: &glow::Context) {
-        // SAFETY: both objects were created by `Fbo::new`, and nothing reachable
-        // still refers to them — `Feedback::create` has taken the pair out of the
-        // slot, and the other `Arc` to each target died with the frame that queued
-        // the callback. Deleting a still-bound name is defined by GL (it unbinds),
-        // and egui restores its own state after the callback regardless.
-        unsafe {
-            gl.delete_framebuffer(self.framebuffer);
-            gl.delete_texture(self.texture);
-        }
-    }
-}
-
 /// How much of the previous frame survives into this one, given a frame time.
 ///
 /// **Time-based, not frame-counted**, and that is the whole point: a per-frame
 /// multiplier is a fixed fraction per frame, so the trail is twice as long at
 /// 30 Hz as at 60 Hz, and nothing in a screenshot would reveal it. This is the
-/// same "inject the clock" discipline as `config::should_flush` and as `vu.rs`'s
-/// `HOLD_SECS`.
+/// same "inject the clock" discipline as `config::should_flush`.
 ///
 /// `hold_secs` is the time constant, so the trail's visible length is a number
 /// the view's own constant states rather than one that depends on the frame rate.
@@ -556,458 +378,71 @@ pub fn feedback_for_a_dt(dt: f32, hold_secs: f32) -> f32 {
     kept.clamp(0.0, 0.999)
 }
 
-// -- the GL half -------------------------------------------------------------
-// Everything below touches `glow` and `unsafe`. Nothing above this line does.
+// -- the WGSL half -------------------------------------------------------------
+// Everything below this line touches wgpu. Nothing above it does.
 
-/// `#version` must be the first bytes of the source, so it is a prefix built
-/// here rather than a line in a shader a view wrote.
-const VERSION: &str = "#version 330 core\n";
-
-/// The one vertex shader, shared by every look. A fullscreen triangle needs no
+/// The one vertex stage, shared by every look. A fullscreen triangle needs no
 /// attributes, so there is no vertex buffer anywhere in this module.
 const VERT: &str = r#"
-out vec2 v_uv;
+struct VOut {
+    @builtin(position) pos : vec4<f32>,
+    @location(0) uv : vec2<f32>,
+}
 
-void main() {
+@vertex
+fn vs_main(@builtin(vertex_index) vi : u32) -> VOut {
+    var out : VOut;
     // (0,0) (2,0) (0,2) -> the oversized triangle that covers clip space.
-    vec2 corner = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
-    gl_Position = vec4(corner * 2.0 - 1.0, 0.0, 1.0);
+    let corner = vec2<f32>(f32((vi << 1u) & 2u), f32(vi & 2u));
+    out.pos = vec4<f32>(corner * 2.0 - 1.0, 0.0, 1.0);
     // 0..1 across the callback's OWN rect. The viewport is set to the pane, so
     // NDC -1..1 *is* the pane and `corner` is already that fraction — no uniform
     // and no per-fragment divide.
     //
-    // **This varying exists because `gl_FragCoord` is window-relative, and every
-    // view here is pane-relative.** Dividing `gl_FragCoord.xy` by the pane's size
-    // gives a uv that runs from `pane_left / pane_w` to that plus one, so a dock
-    // tab anywhere but the left edge of the window reads part of its pattern from
-    // outside itself and saturates on the rest: the bars and the wave froze on a
-    // vertical seam at a constant, and the rings drew off-centre because `0.5` is
-    // `pane_w / 2` of *window* x. `gl_FragCoord` is also **bottom-left origin**,
-    // which put the ridgeline upside down.
+    // **This varying exists because a pixel coordinate is window-relative, and
+    // every view here is pane-relative.** `@builtin(position)` is window- and
+    // device-relative; dividing it by the pane's size gives a uv that runs from
+    // `pane_left / pane_w` to that plus one, so a dock tab anywhere but the left
+    // edge of the window reads part of its pattern from outside itself and
+    // saturates on the rest: the bars and the wave froze on a vertical seam at a
+    // constant, and the rings drew off-centre because `0.5` is `pane_w / 2` of
+    // *window* x. It is also **bottom-left origin**, which put the ridgeline
+    // upside down.
     //
     // y is flipped here, once, because that is the one place the difference can
     // be stated once: every view reasons in the pane's top-down point space, and
     // `uv.y == 0.0` has to mean the top of the pane for all of them.
-    v_uv = vec2(corner.x, 1.0 - corner.y);
+    out.uv = vec2<f32>(corner.x, 1.0 - corner.y);
+    return out;
 }
 "#;
 
-/// The complete vertex shader source, for a test that links against it.
+/// The uniform block's WGSL declaration, in [`Uniforms::write_block`]'s order.
 ///
-/// `pub` only so `every_shader_compiles_and_links` can build the same pair the
-/// driver does. Nothing in the app reads this — and the `main` binary compiles
-/// this module too, which is the only reason the exemption needs saying aloud.
-#[allow(dead_code)]
-pub fn vertex_source() -> String {
-    format!("{VERSION}{VERT}")
-}
-
-/// A compiled program plus every uniform location in the superset.
-///
-/// `Copy` so it can be handed out from under the cache's lock. Every location is
-/// an `Option` because GLSL strips what a shader does not reference, and glow
-/// reports a stripped uniform as `None` — which is what lets one struct describe
-/// eleven uniforms for a shader that reads two.
-#[derive(Clone, Copy)]
-struct Program {
-    handle: glow::Program,
-    bands: Option<glow::UniformLocation>,
-    wave: Option<glow::UniformLocation>,
-    accent: Option<glow::UniformLocation>,
-    bg: Option<glow::UniformLocation>,
-    progress_fill: Option<glow::UniformLocation>,
-    time: Option<glow::UniformLocation>,
-    dt: Option<glow::UniformLocation>,
-    resolution: Option<glow::UniformLocation>,
-    modes: Option<glow::UniformLocation>,
-    feedback: Option<glow::UniformLocation>,
-    prev: Option<glow::UniformLocation>,
-}
-
-struct Gl {
-    /// One empty VAO for everything. Core profile refuses a draw with no VAO
-    /// bound even when the shader reads no attributes.
-    vao: Option<glow::VertexArray>,
-    /// Keyed by fragment source: the assembled program is a pure function of it,
-    /// and two views with identical shaders correctly share one program.
-    programs: HashMap<&'static str, Option<Program>>,
-}
-
-static GL: LazyLock<Mutex<Gl>> = LazyLock::new(|| {
-    Mutex::new(Gl {
-        vao: None,
-        programs: HashMap::new(),
-    })
-});
-
-static REPORTED: LazyLock<Mutex<std::collections::HashSet<&'static str>>> =
-    LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
-
-/// Print `msg` the first time `key` is seen, and never again.
-///
-/// The project cannot look at the window, so a shader view's only way to report
-/// anything is stderr. A blank pane has two very different causes — a program
-/// that would not build, and one that builds but is handed a viewport of zero —
-/// and they are indistinguishable from outside, so the harness says which.
-fn diag(key: &'static str, msg: impl FnOnce() -> String) {
-    let mut seen = REPORTED.lock().unwrap_or_else(PoisonError::into_inner);
-    if seen.insert(key) {
-        eprintln!("tplay: [shader] {}", msg());
-    }
-}
-
-fn draw(
-    painter: &egui_glow::Painter,
-    info: &egui::PaintCallbackInfo,
-    frag: &'static str,
-    uniforms: &Uniforms,
-    target: Target,
-) {
-    run_pass(painter.gl(), info, frag, uniforms, target, None);
-}
-
-/// One fullscreen pass: bind the target, set the viewport, upload, draw.
-fn run_pass(
-    gl: &glow::Context,
-    info: &egui::PaintCallbackInfo,
-    frag: &'static str,
-    uniforms: &Uniforms,
-    target: Target,
-    sample: Option<&Arc<Fbo>>,
-) {
-    let (program, vao) = resources(gl, frag);
-    let (Some(program), Some(vao)) = (program, vao) else {
-        return;
-    };
-
-    let viewport = info.viewport_in_pixels();
-    let clip = info.clip_rect_in_pixels();
-    // One-shot, because a per-frame path that reports is a per-frame path that
-    // spams — and because a shader that draws nothing and a shader that is never
-    // reached look identical from outside the window.
-    diag("first-draw", || {
-        format!(
-            "first draw: viewport {}x{} px, clip {}x{}, resolution uniform {:.0}x{:.0}, \
-             {} program",
-            viewport.width_px,
-            viewport.height_px,
-            clip.width_px,
-            clip.height_px,
-            uniforms.resolution[0],
-            uniforms.resolution[1],
-            if sample.is_some() {
-                "feedback"
-            } else {
-                "screen"
-            },
-        )
-    });
-    // SAFETY: the context is current on the thread egui is painting on, and
-    // `egui_glow`'s own doc for `PaintCallback` promises the state changed here
-    // is restored afterwards — which `paint_primitives` does by re-running
-    // `prepare_painting`. Every call below is one of viewport/scissor, a
-    // framebuffer or texture bind, state toggles, a program and VAO bind, a
-    // uniform upload, or a draw, and each is followed by nothing that can leave
-    // the context in a state egui does not reset. `info` comes from egui
-    // mid-frame, so the viewport is already the callback's rect; it is set again
-    // because correct-by-construction is not worth less than
-    // correct-by-accident.
-    unsafe {
-        match &target {
-            // **Bind the default framebuffer, do not assume it.** For a single
-            // pass egui has it bound already, but a feedback view's first pass
-            // rebinds to its own target, and the second pass then draws the
-            // *present* into that offscreen texture instead of onto the screen —
-            // which renders correctly, raises no error, and shows a blank pane.
-            // `None` is the default framebuffer, which is where egui paints.
-            Target::Screen => gl.bind_framebuffer(glow::FRAMEBUFFER, None),
-            Target::Offscreen(fbo) => fbo.bind(gl),
-        }
-        if let Some(src) = sample {
-            src.bind_texture(gl);
-        }
-        gl.disable(glow::BLEND);
-        gl.enable(glow::SCISSOR_TEST);
-        // **An offscreen pass fills the whole target.** The callback's viewport
-        // and clip are the *pane's* rectangle in window coordinates, which is the
-        // right frame for the default framebuffer and the wrong one for an owned
-        // target: a framebuffer's viewport is its own space, so using the pane's
-        // window position wrote the accumulation at a scroll offset inside the
-        // texture and dropped whatever fell outside it. The quantised target is
-        // then slightly larger than the pane, and `v_uv` spans all of it, so the
-        // present pass upscales by at most one grid cell.
-        let (sx, sy, sw, sh) = match &target {
-            Target::Screen => (
-                clip.left_px,
-                clip.from_bottom_px,
-                clip.width_px,
-                clip.height_px,
-            ),
-            Target::Offscreen(fbo) => {
-                let (w, h) = fbo.size();
-                (0, 0, w, h)
-            }
-        };
-        let (vx, vy, vw, vh) = match &target {
-            Target::Screen => (
-                viewport.left_px,
-                viewport.from_bottom_px,
-                viewport.width_px,
-                viewport.height_px,
-            ),
-            Target::Offscreen(fbo) => {
-                let (w, h) = fbo.size();
-                (0, 0, w, h)
-            }
-        };
-        gl.scissor(sx, sy, sw, sh);
-        gl.viewport(vx, vy, vw, vh);
-        gl.use_program(Some(program.handle));
-        gl.bind_vertex_array(Some(vao));
-        program.upload(gl, uniforms);
-        gl.draw_arrays(glow::TRIANGLES, 0, 3);
-    }
-}
-
-/// Fill a target with transparent black.
-///
-/// A fresh texture's contents are undefined, so the first accumulate pass would
-/// otherwise mix against whatever the driver left there. `glClear` ignores the
-/// scissor box, so the whole target is cleared — which is what is wanted, and why
-/// this cannot be a scissored quad.
-fn clear(gl: &glow::Context, fbo: &Fbo) {
-    // SAFETY: a framebuffer this module created and verified complete, cleared
-    // and then immediately drawn over.
-    unsafe {
-        fbo.bind(gl);
-        gl.clear_color(0.0, 0.0, 0.0, 0.0);
-        gl.clear(glow::COLOR_BUFFER_BIT);
-    }
-}
-
-impl Program {
-    /// The whole superset, every frame, unconditionally. See the module docs:
-    /// a uniform this shader stripped reports `None` and glow skips it.
-    unsafe fn upload(&self, gl: &glow::Context, u: &Uniforms) {
-        gl.uniform_1_f32_slice(self.bands.as_ref(), &u.bands);
-        gl.uniform_1_f32_slice(self.wave.as_ref(), &u.wave);
-        gl.uniform_4_f32_slice(self.accent.as_ref(), &u.accent);
-        gl.uniform_4_f32_slice(self.bg.as_ref(), &u.bg);
-        gl.uniform_4_f32_slice(self.progress_fill.as_ref(), &u.progress_fill);
-        gl.uniform_1_f32(self.time.as_ref(), u.time);
-        gl.uniform_1_f32(self.dt.as_ref(), u.dt);
-        gl.uniform_2_f32_slice(self.resolution.as_ref(), &u.resolution);
-        gl.uniform_2_f32_slice(self.modes.as_ref(), &u.modes);
-        gl.uniform_1_f32(self.feedback.as_ref(), u.feedback);
-        // The feedback texture is unit 0. Declared by the superset and read by
-        // no shipped view yet; `Trails` binds it to an owned framebuffer.
-        gl.uniform_1_i32(self.prev.as_ref(), 0);
-    }
-}
-
-/// The cached program for `frag` and the shared VAO, in one lock.
-///
-/// A `None` in the cache is a *recorded failure*, not a miss: a driver that
-/// cannot compile a shader would otherwise be asked again on every one of 60
-/// frames a second, and a compile is a driver round trip and a log line.
-fn resources(
-    gl: &glow::Context,
-    frag: &'static str,
-) -> (Option<Program>, Option<glow::VertexArray>) {
-    let mut state = GL.lock().unwrap_or_else(PoisonError::into_inner);
-    if state.vao.is_none() {
-        state.vao = unsafe { gl.create_vertex_array() }.ok();
-    }
-    if !state.programs.contains_key(frag) {
-        let built = build(gl, frag);
-        state.programs.insert(frag, built);
-    }
-    (state.programs.get(frag).copied().flatten(), state.vao)
-}
-
-/// Compile and link one program, or record why it could not be built.
-fn build(gl: &glow::Context, frag: &'static str) -> Option<Program> {
-    // SAFETY: `gl` is the context egui is painting with. Every object created
-    // here is released on every failure path, and on success the two shader
-    // objects are detached and deleted *after* linking, which leaves the program
-    // itself valid and holding its own copy of the compiled code.
-    unsafe {
-        let program = gl.create_program().ok()?;
-        // Held so they can be released after the link. **A shader must stay
-        // attached until then**: `glAttachShader` before a link only records the
-        // association, and `glDetachShader` undoes it, so detaching straight away
-        // — which this did, to avoid leaking the object — leaves the program with
-        // nothing attached and `glLinkProgram` fails with "no shaders attached to
-        // the program". The shaders are freed on the line below the link, which is
-        // the earliest that is legal.
-        let mut shaders: Vec<glow::Shader> = Vec::with_capacity(2);
-        for (stage, source) in [
-            (glow::VERTEX_SHADER, format!("{VERSION}{VERT}")),
-            (glow::FRAGMENT_SHADER, fragment_source(frag)),
-        ] {
-            let Some(shader) = gl.create_shader(stage).ok() else {
-                for s in &shaders {
-                    gl.delete_shader(*s);
-                }
-                gl.delete_program(program);
-                return None;
-            };
-            gl.shader_source(shader, &source);
-            gl.compile_shader(shader);
-            if !gl.get_shader_completion_status(shader) {
-                eprintln!(
-                    "tplay: {} shader failed to compile: {}",
-                    stage_name(stage),
-                    gl.get_shader_info_log(shader).trim()
-                );
-                for s in &shaders {
-                    gl.delete_shader(*s);
-                }
-                gl.delete_shader(shader);
-                gl.delete_program(program);
-                return None;
-            }
-            gl.attach_shader(program, shader);
-            shaders.push(shader);
-        }
-
-        gl.link_program(program);
-        let linked = gl.get_program_link_status(program);
-        if !linked {
-            eprintln!(
-                "tplay: shader program failed to link: {}",
-                gl.get_program_info_log(program).trim()
-            );
-        }
-        // Detach and delete whether or not it linked: a linked program keeps its
-        // own copy of the compiled code, and an unlinked one is about to be
-        // deleted anyway.
-        for shader in &shaders {
-            gl.detach_shader(program, *shader);
-            gl.delete_shader(*shader);
-        }
-        if !linked {
-            gl.delete_program(program);
-            return None;
-        }
-        diag("program-built", || {
-            format!(
-                "linked a program from {} bytes of fragment source",
-                frag.len()
-            )
-        });
-        let loc = |name: &str| gl.get_uniform_location(program, name);
-        Some(Program {
-            handle: program,
-            bands: loc("u_bands[0]"),
-            wave: loc("u_wave[0]"),
-            accent: loc("u_accent"),
-            bg: loc("u_bg"),
-            progress_fill: loc("u_progress_fill"),
-            time: loc("u_time"),
-            dt: loc("u_dt"),
-            resolution: loc("u_resolution"),
-            modes: loc("u_modes"),
-            feedback: loc("u_feedback"),
-            prev: loc("u_prev"),
-        })
-    }
-}
-
-fn stage_name(stage: u32) -> &'static str {
-    if stage == glow::VERTEX_SHADER {
-        "vertex"
-    } else {
-        "fragment"
-    }
-}
-
-/// Prefix a view's shader body with the version, the fragment output, and only
-/// the uniforms it actually mentions.
-///
-/// Two properties, one function. The band count is interpolated from
-/// [`VIZ_BANDS`], so the array cannot drift out of step with the DSP — a
-/// literal would fail *silently*, since extra uniforms are dropped and missing
-/// ones read as undefined. And a shader cannot reference an input the harness
-/// does not upload, because the harness owns this list, so no test is needed to
-/// keep the two in step.
-///
-/// `pub` so `every_shader_compiles_and_links` can validate **exactly** the source
-/// the driver gets, assembled by this same function, rather than a hand-copied
-/// approximation in a test that could drift from the real thing.
-pub fn fragment_source(frag: &str) -> String {
-    let mut out = String::with_capacity(frag.len() + 1024);
-    out.push_str(VERSION);
-    out.push_str("in vec2 v_uv;\n");
-    out.push_str("out vec4 frag_color;\n");
-    // A shared helper brings its own inputs with it, so the declarations it needs
-    // are pulled in by *its* presence and not only by the body mentioning them.
-    let bearing = mentions(frag, "spectrum_at_bearing");
-    // `spectrum_at_bearing` reads the bands, so it needs the same two
-    // declarations the body would have needed for itself.
-    let needed: &[&str] = if bearing {
-        &["VIZ_BANDS", "u_bands", "level"]
-    } else {
-        &[]
-    };
-    for (name, decl) in declarations() {
-        if mentions(frag, name) || needed.contains(&name) {
-            out.push_str(&decl);
-            out.push('\n');
-        }
-    }
-    out.push('\n');
-    if bearing {
-        out.push_str(BEARING);
-        out.push('\n');
-    }
-    out.push_str(frag);
-    out
-}
-
-/// The dB → 0..1 mapping every view draws with, built from the DSP's own constant.
-///
-/// It was a hand-written `float level(float d)` in six view bodies plus two inlined
-/// copies, and the number in it is a **boundary between two halves that cannot see
-/// each other** — see [`DB_FLOOR`]. Interpolating it here means the floor is
-/// written down once, and `the_db_floor_is_one_number_across_the_dsp_and_every_shader`
-/// is what proves the two ends still agree.
-///
-/// Emitted on a mention of `level`, `DB_FLOOR` or `DB_SPAN`, so a view gets it by
-/// calling `level(u_bands[i])` and a view that wants the raw range for its own
-/// arithmetic can name the constants instead.
-fn level_source() -> String {
+/// **Generated from the same constants the DSP uses, and every member is a
+/// `vec4`** — see the module docs for why that is the load-bearing part. Both
+/// arrays are `N / 4` long, which is why `VIZ_BANDS` and `WAVE_BUCKETS` must
+/// both be multiples of four; a test says so rather than letting a future
+/// constant produce a shader that silently reads the wrong lane.
+fn wgsl_struct() -> String {
     format!(
-        "const float DB_FLOOR = {DB_FLOOR};\n\
-         const float DB_SPAN = {};\n\
-         float level(float d) {{\n    return clamp((d - DB_FLOOR) / DB_SPAN, 0.0, 1.0);\n}}",
-        -DB_FLOOR
+        "struct Uniforms {{\n\
+         \x20   bands      : array<vec4<f32>, {}>,\n\
+         \x20   wave       : array<vec4<f32>, {}>,\n\
+         \x20   accent     : vec4<f32>,\n\
+         \x20   bg         : vec4<f32>,\n\
+         \x20   progress   : vec4<f32>,\n\
+         \x20   scalars    : vec4<f32>,\n\
+         \x20   resolution : vec4<f32>,\n\
+         \x20   modes      : vec4<f32>,\n\
+         }}",
+        VIZ_BANDS / 4,
+        WAVE_BUCKETS / 4
     )
 }
 
-/// The one safe way to read the spectrum **as a function of a direction**, and the
-/// only reason this string exists.
-///
-/// Three of the views want "the band at the angle this fragment sits at", and the
-/// obvious spelling of that is `atan(y, x)` indexed into `u_bands`. **`atan` has a
-/// branch cut**: it jumps from `+pi` to `-pi` along `x < 0` at `y == 0`, which is
-/// a fixed line up the middle of the pane's left side. So the band index — and
-/// with it whatever the index drives — steps discontinuously there, and **no edge
-/// fade can hide it, because the break is in the *function* and not at a boundary
-/// of it.** That is what the two seams reported from `Plasma` and `Trails` were.
-///
-/// A projection onto the first two harmonics of the bearing is the same shape — a
-/// band lookup smeared around the circle, `R * cos(a - phi)` for the two
-/// coefficients — and it is continuous and periodic by construction, so there is
-/// no cut left to find. The third harmonic is what stops the result being
-/// symmetric under a half turn, which one harmonic alone would be.
-///
-/// It is in the harness rather than copied into three view bodies because the
-/// alternative is three copies of a hazard, and a copy can be got wrong in a way
-/// the original cannot. `a_shader_never_indexes_a_band_through_an_angle` is what
-/// makes that a rule rather than a preference: the broken form is forbidden and
-/// this is the replacement, so a new view that wants a radial spectrum read has one
-/// path to find rather than one trap to rediscover.
+/// A shared helper brings its own inputs with it, so it is emitted in full and a
+/// body mentioning it is enough.
 const BEARING: &str = r#"
 // A continuous, periodic read of the spectrum around the circle.
 //
@@ -1015,64 +450,806 @@ const BEARING: &str = r#"
 // that centre, where the length is zero and the division is undefined — and it is
 // a `max` rather than an `if` because a guard has to be as continuous as the thing
 // it guards: a branch here would put the discontinuity somewhere new.
-float spectrum_at_bearing(vec2 p) {
-    vec2 dir = p / max(length(p), 0.12);
-    float b0 = 0.0, b1 = 0.0, b2 = 0.0;
-    for (int i = 0; i < VIZ_BANDS; i++) {
-        float a = 6.2831853 * float(i) / float(VIZ_BANDS);
-        float l = level(u_bands[i]);
-        b0 += l * cos(a);
-        b1 += l * sin(a);
-        b2 += l * cos(2.0 * a);
+fn spectrum_at_bearing(p : vec2<f32>) -> f32 {
+    let dir = p / max(length(p), 0.12);
+    var b0 = 0.0;
+    var b1 = 0.0;
+    var b2 = 0.0;
+    for (var i = 0u; i < VIZ_BANDS; i = i + 1u) {
+        let a = 6.2831853 * f32(i) / f32(VIZ_BANDS);
+        let l = level(band_at(i));
+        b0 = b0 + l * cos(a);
+        b1 = b1 + l * sin(a);
+        b2 = b2 + l * cos(2.0 * a);
     }
-    float n = float(VIZ_BANDS);
+    let n = f32(VIZ_BANDS);
     return clamp(0.5 + (0.6 * (b0 * dir.x + b1 * dir.y) + 0.3 * b2) / n, 0.0, 1.0);
 }
 "#;
 
-/// The superset as `(identifier, declaration)` pairs, filtered by what a shader
-/// references. Order is the field order of [`Uniforms`].
+/// The complete shader module for one view: the shared prelude, then the body.
 ///
-/// `VIZ_BANDS` is offered as a `const` and not left to the shader to hardcode,
-/// for the same reason the array length is interpolated: a shader writing its own
-/// `32` would compile fine and read the wrong band after the band count moved.
-fn declarations() -> Vec<(&'static str, String)> {
-    vec![
-        ("VIZ_BANDS", format!("const int VIZ_BANDS = {VIZ_BANDS};")),
-        ("level", level_source()),
-        ("u_bands", format!("uniform float u_bands[{VIZ_BANDS}];")),
-        (
-            "WAVE_BUCKETS",
-            format!("const int WAVE_BUCKETS = {WAVE_BUCKETS};"),
-        ),
-        ("u_wave", format!("uniform float u_wave[{WAVE_BUCKETS}];")),
-        ("u_accent", "uniform vec4 u_accent;".into()),
-        ("u_bg", "uniform vec4 u_bg;".into()),
-        ("u_progress_fill", "uniform vec4 u_progress_fill;".into()),
-        ("u_time", "uniform float u_time;".into()),
-        ("u_dt", "uniform float u_dt;".into()),
-        ("u_resolution", "uniform vec2 u_resolution;".into()),
-        ("u_modes", "uniform vec2 u_modes;".into()),
-        ("u_feedback", "uniform float u_feedback;".into()),
-        ("u_prev", "uniform sampler2D u_prev;".into()),
+/// **The prelude is unconditional.** Under GLSL this filtered the declarations
+/// down to whatever the body mentioned, because the compiler would have
+/// stripped the rest anyway; under WGSL nothing is stripped, and a declared
+/// binding is free. That deletes the filter *and* the class of bug it could
+/// have — a body whose helper needed an input the filter did not know about.
+pub fn wgsl_module(helpers: &str, body: &str) -> String {
+    let mut out = String::with_capacity(body.len() + 2048);
+    out.push_str(&wgsl_struct());
+    out.push('\n');
+    out.push_str(
+        "@group(0) @binding(0) var<uniform> U : Uniforms;\n\
+         @group(0) @binding(1) var u_samp : sampler;\n\
+         @group(0) @binding(2) var u_prev : texture_2d<f32>;\n",
+    );
+    out.push('\n');
+    // The dB floor is derived from the DSP's own constant rather than written
+    // out, so a floor that stops being half the ceiling cannot leave a literal
+    // span behind.
+    out.push_str(&format!(
+        "const DB_FLOOR : f32 = {DB_FLOOR};\n\
+         const DB_SPAN : f32 = {};\n\
+         const VIZ_BANDS : u32 = {}u;\n\
+         const WAVE_BUCKETS : u32 = {}u;\n\
+         \n\
+         fn level(d : f32) -> f32 {{\n    return clamp((d - DB_FLOOR) / DB_SPAN, 0.0, 1.0);\n}}\n",
+        -DB_FLOOR, VIZ_BANDS, WAVE_BUCKETS
+    ));
+    out.push_str(BEARING);
+    out.push('\n');
+    out.push_str(
+        "// One accessor per input, so a view never learns the block's shape.\n\
+         // The arrays are `vec4`-packed: see the module docs on the uniform\n\
+         // stride, which is why indexing is a shift and a mask.\n\
+         fn band_at(i : u32) -> f32 { return U.bands[i >> 2u][i & 3u]; }\n\
+         fn wave_at(i : u32) -> f32 { return U.wave[i >> 2u][i & 3u]; }\n\
+         fn u_accent() -> vec4<f32> { return U.accent; }\n\
+         fn u_bg() -> vec4<f32> { return U.bg; }\n\
+         fn u_progress_fill() -> vec4<f32> { return U.progress; }\n\
+         fn u_time() -> f32 { return U.scalars.x; }\n\
+         fn u_dt() -> f32 { return U.scalars.y; }\n\
+         fn u_feedback() -> f32 { return U.scalars.z; }\n\
+         fn u_resolution() -> vec2<f32> { return U.resolution.xy; }\n\
+         fn u_modes() -> vec2<f32> { return U.modes.xy; }\n",
+    );
+    out.push('\n');
+    out.push_str(VERT);
+    out.push('\n');
+    // A view's own module-scope functions, which WGSL has no way to nest inside
+    // the entry point — so they are a separate slot rather than something the
+    // prelude knows about. The harness concatenates; it never reads them.
+    if !helpers.is_empty() {
+        out.push_str(helpers);
+        out.push('\n');
+    }
+    // The body assigns `frag_color` and reads `v_uv`, both declared here so a
+    // view writes neither a signature nor an output declaration. `@location(0)`
+    // is the swapchain; the two passes of a feedback view use the same module and
+    // the same entry point, differing only in what they sample.
+    out.push_str(
+        "@fragment\n\
+         fn fs_main(in : VOut) -> @location(0) vec4<f32> {\n\
+         \x20   let v_uv = in.uv;\n\
+         \x20   var frag_color : vec4<f32> = vec4<f32>(0.0, 0.0, 0.0, 1.0);\n",
+    );
+    out.push_str(body);
+    out.push_str("\n    return frag_color;\n}\n");
+    out
+}
+
+/// The complete module, for a test that validates it the way the driver will.
+#[allow(dead_code)]
+pub fn module_source(helpers: &str, body: &str) -> String {
+    wgsl_module(helpers, body)
+}
+
+/// Where a pipeline, the bind group layout and the one shared sampler live.
+///
+/// **A static rather than the renderer's `callback_resources`,** and the
+/// difference is lifetime: `callback_resources` is dropped and rebuilt with the
+/// render pass, which is right for a pass-scoped object and wrong for a pipeline
+/// that is expensive to make and identical every time. A `RenderPipeline` is a
+/// refcounted handle inside wgpu, so holding one for the process costs a
+/// refcount, and the trade is one shader compilation per view per session.
+struct Gpu {
+    device: wgpu::Device,
+    /// **Kept because wgpu 30 moved it off `Device`**, and the uniform upload
+    /// needs it. It is here for the cached-buffer rewrite in `prepare`; the
+    /// callback's own `queue` argument would do for a fresh buffer per frame.
+    queue: wgpu::Queue,
+    target_format: wgpu::TextureFormat,
+    layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    /// A 1x1 texture for the views that sample nothing, so one bind group
+    /// layout serves every shader.
+    blank: wgpu::TextureView,
+    /// Keyed by body text: the pipeline is a pure function of it, and two views
+    /// with identical shaders correctly share one.
+    /// Keyed by body *and* the format it was built for. A feedback view's
+    /// accumulate pass renders into an owned `Rgba8Unorm` target while everything
+    /// else renders into the surface, and a wgpu pipeline carries its colour
+    /// target format — so one body is one pipeline only because no body is ever
+    /// drawn to both. Keying on the format makes that true by construction rather
+    /// than by an assumption nobody would notice breaking.
+    pipelines: HashMap<(&'static str, &'static str, wgpu::TextureFormat), Option<Entry>>,
+}
+
+/// A built shader, plus the uniform buffer it reads.
+///
+/// **The buffer is cached beside the pipeline and rewritten each frame, not
+/// rebuilt.** `add_fullscreen` constructs a *new* callback object every frame, so
+/// nothing else could outlive a frame — and a ~750-byte buffer allocated 60 times
+/// a second is real driver work.
+///
+/// That means the buffer is per *body*, so two views sharing a shader body would
+/// share a buffer. They cannot both draw in one frame: the pane draws only the
+/// selected view, and it is a single ComboBox. The invariant is stated here
+/// because it is the whole reason this is safe, and because a second view
+/// drawing beside it is the change that would break it.
+struct Entry {
+    pipeline: wgpu::RenderPipeline,
+    buffer: wgpu::Buffer,
+}
+
+static GPU: LazyLock<Mutex<Option<Gpu>>> = LazyLock::new(|| Mutex::new(None));
+
+/// Give the harness the device and the surface format, once per process.
+///
+/// **Called from `main.rs`, because that is the only place with a
+/// `CreationContext`** — and the surface format is not something a callback can
+/// discover: a `RenderPipeline` has to name the format of the attachment it will
+/// draw into, and `prepare` is handed a size and a scale factor and nothing
+/// else. Everything else about the callback API is self-sufficient; this is the
+/// one hole in it.
+///
+/// Returns whether there is a wgpu renderer to draw with. False means the
+/// program runs and every view shows the pane's background, with the reason on
+/// stderr — which is the honest outcome for a machine with no wgpu adapter, and
+/// not something to crash over.
+/// Take the three things the harness needs, and nothing else.
+///
+/// The surface's **format** is the one input the callback API cannot hand a view:
+/// a `PaintCallback` is told its rect in points and nothing about the surface it
+/// will be composited onto. That is why this function exists at all, and why it
+/// takes three arguments rather than the whole `RenderState` — the rest of that
+/// struct (an `Arc<RwLock<Renderer>>`, the adapter list, the surface config) is
+/// eframe's business, and depending on it would make this unreachable from a test
+/// that has no window and no `Renderer`.
+///
+/// So the caller reports whether there is a backend at all, and this says how to
+/// set up given one.
+pub fn init(device: &wgpu::Device, queue: &wgpu::Queue, target_format: wgpu::TextureFormat) {
+    // Sampled with a filter: a feedback view renders at the quantised target size
+    // and presents it across a pane that is rarely exactly that size, so the
+    // present pass is a linear upsample and a blocky one would read as a
+    // staircase. Clamped, because the accumulate pass samples outside its own
+    // edges.
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("tplay.viz.sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+        ..Default::default()
+    });
+
+    let fragment = |binding: u32, vis: wgpu::ShaderStages| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: vis,
+        ty: match binding {
+            0 => wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                // The block's real size, so wgpu checks the buffer against the
+                // shader rather than trusting this number.
+                min_binding_size: wgpu::BufferSize::new(Uniforms::BLOCK_BYTES),
+            },
+            1 => wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            _ => wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+        },
+        count: None,
+    };
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("tplay.viz.layout"),
+        entries: &[
+            fragment(0, wgpu::ShaderStages::FRAGMENT),
+            fragment(1, wgpu::ShaderStages::FRAGMENT),
+            fragment(2, wgpu::ShaderStages::FRAGMENT),
+        ],
+    });
+
+    let blank = device
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some("tplay.viz.blank"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: OFFSCREEN_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        })
+        .create_view(&wgpu::TextureViewDescriptor::default());
+
+    let mut gpu = GPU.lock().unwrap_or_else(PoisonError::into_inner);
+    *gpu = Some(Gpu {
+        device: device.clone(),
+        queue: queue.clone(),
+        target_format,
+        layout,
+        sampler,
+        blank,
+        pipelines: HashMap::new(),
+    });
+}
+
+/// The format a feedback target is created in.
+///
+/// **`Rgba8Unorm`, not `Rgba8UnormSrgb`,** and that is deliberate: the shaders
+/// write straight (non-premultiplied) sRGB components, which is what the GL path
+/// did into a framebuffer treated as linear storage. An `-Srgb` view would have
+/// the sampler and the blend apply a linear→sRGB conversion the GL path never
+/// did, and every colour would come out wrong in a way no test can see.
+const OFFSCREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+/// The pipeline for one shader body, built once.
+///
+/// A `None` is a **recorded** failure rather than a miss: a driver that cannot
+/// compile would otherwise be asked again 60 times a second, and a compile is a
+/// driver round trip and a log line. This is also why the blank pane was such a
+/// bad symptom to debug by eye: a broken shader and a working one both render as
+/// the background, so the failure is indistinguishable from the success case by
+/// anything you can see. `eprintln!` goes to stderr, which is where to look.
+fn entry(
+    gpu: &mut Gpu,
+    helpers: &'static str,
+    body: &'static str,
+    format: wgpu::TextureFormat,
+) -> Option<(wgpu::RenderPipeline, wgpu::Buffer)> {
+    let key = (helpers, body, format);
+    if !gpu.pipelines.contains_key(&key) {
+        let built = build_entry(gpu, helpers, body, format);
+        gpu.pipelines.insert(key, built);
+    }
+    // Cloned out so the `&mut` borrow of the cache ends here: the caller still
+    // needs the sampler, the blank view and the queue. Both handles are
+    // refcounts, so this costs nothing measurable.
+    gpu.pipelines
+        .get(&key)
+        .and_then(|e| e.as_ref())
+        .map(|e| (e.pipeline.clone(), e.buffer.clone()))
+}
+
+fn build_entry(
+    gpu: &Gpu,
+    helpers: &'static str,
+    body: &'static str,
+    format: wgpu::TextureFormat,
+) -> Option<Entry> {
+    let module = gpu
+        .device
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("tplay.viz.shader"),
+            source: wgpu::ShaderSource::Wgsl(wgsl_module(helpers, body).into()),
+        });
+    let layout = gpu
+        .device
+        .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("tplay.viz.pipeline_layout"),
+            bind_group_layouts: &[Some(&gpu.layout)],
+            immediate_size: 0,
+        });
+    let pipeline = gpu
+        .device
+        .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("tplay.viz.pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    // **No blend.** The pane's background is painted by egui and the
+                    // view covers it outright, so a shader that returned a partly
+                    // transparent colour would composite against nothing.
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+    // A `None` here is a *recorded* failure: `create_render_pipeline` reports
+    // through wgpu's error scope and a panic rather than a value, so the real
+    // check is `every_shader_validates`, which runs naga over the same source and
+    // names the shader. This function exists to be told "no" at all.
+    let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("tplay.viz.uniforms"),
+        size: Uniforms::BLOCK_BYTES,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    Some(Entry { pipeline, buffer })
+}
+
+/// The bind group for one draw, rebuilt each frame.
+///
+/// Cheap and obviously correct: a bind group embeds the buffer it reads, so
+/// caching one would mean caching the buffer with it, and the buffer's contents
+/// are this frame's band levels.
+fn bind_group(gpu: &Gpu, buffer: &wgpu::Buffer, sampled: &wgpu::TextureView) -> wgpu::BindGroup {
+    gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("tplay.viz.bind_group"),
+        layout: &gpu.layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&gpu.sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(sampled),
+            },
+        ],
+    })
+}
+
+/// The wgpu viewport that makes a fullscreen triangle cover **the pane**.
+///
+/// The vertex stage has no vertex buffer — three synthesised corners — so the
+/// *viewport* is the only thing that decides which fragments it reaches. Left at
+/// egui_wgpu's whole-surface viewport, every view paints over whatever else is on
+/// screen, which is exactly what this pane did: a shader that renders somewhere
+/// plausible is the failure mode it has already had twice (see
+/// `no_shader_reads_a_window_relative_pixel_coordinate`).
+///
+/// **The trap is `PaintCallbackInfo::viewport_in_pixels`, and it is a trap because
+/// the method is right and the use is wrong.** It reports `from_bottom_px`, which
+/// is OpenGL's convention; wgpu's viewport origin is the **top** left. Fed to
+/// `set_viewport` it puts the pane a window-height off and mirrored — a real
+/// report, a real off-screen render, and no error anywhere. `info.viewport` is the
+/// same rect in **egui points, y down from the top**, which is the space wgpu
+/// wants, so the whole conversion is a scale by `pixels_per_point`.
+///
+/// A free function rather than three lines at each call site, because this is the
+/// one piece of the port that no headless test can reach and the one the last two
+/// bugs lived in — see `the_pane_viewport_is_top_left_pixels_not_gl_bottom_left`.
+///
+/// Returns `(x, y, width, height)`, all in physical pixels.
+pub fn pane_viewport(viewport: egui::Rect, pixels_per_point: f32) -> [f32; 4] {
+    [
+        viewport.min.x * pixels_per_point,
+        viewport.min.y * pixels_per_point,
+        viewport.width() * pixels_per_point,
+        viewport.height() * pixels_per_point,
     ]
 }
 
-/// Whether `src` uses `ident` as a whole word.
+/// Push this frame's block into the cached buffer for `body`.
 ///
-/// The boundary test exists for one reason: without it `u_bands` matches inside
-/// `u_bands_scaled`, and a false positive costs one unused declaration and one
-/// no-op upload. So the failure mode here is free, and there is nothing to gain
-/// from parsing GLSL properly.
-fn mentions(src: &str, ident: &str) -> bool {
-    if ident.is_empty() {
-        return false;
+/// `bytemuck` is not a dependency and this is one line: a uniform buffer is a
+/// flat run of little-endian `f32`, and `f32::to_le_bytes` is that.
+fn upload(gpu: &Gpu, buffer: &wgpu::Buffer, uniforms: &Uniforms) {
+    let block = uniforms.write_block();
+    debug_assert_eq!((block.len() * 4) as u64, Uniforms::BLOCK_BYTES);
+    let bytes: Vec<u8> = block.iter().flat_map(|f| f.to_le_bytes()).collect();
+    gpu.queue.write_buffer(buffer, 0, &bytes);
+}
+
+/// Queue `body` to fill `rect` this frame.
+///
+/// The uniform upload happens here rather than in the callback so that the WGSL
+/// block and the values that fill it are described by the same struct — a
+/// mismatch is then a test failure instead of a wrong picture.
+pub fn add_fullscreen(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    helpers: &'static str,
+    body: &'static str,
+    uniforms: Uniforms,
+) {
+    painter.add(egui::Shape::Callback(
+        egui_wgpu::Callback::new_paint_callback(rect, callback(helpers, body, uniforms)),
+    ));
+}
+
+/// The callback [`add_fullscreen`] queues, exposed so a test can drive it.
+///
+/// A `pub fn` rather than a `#[cfg(test)]` hook: the test needs the *same* object
+/// the pane queues, and a second construction site would be exactly the drift the
+/// view table exists to prevent. It is inert on its own — a callback does nothing
+/// until a renderer calls it.
+pub fn callback(helpers: &'static str, body: &'static str, uniforms: Uniforms) -> VizCallback {
+    VizCallback {
+        helpers,
+        body,
+        uniforms,
     }
-    let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
-    src.match_indices(ident).any(|(at, _)| {
-        let before = at == 0 || !word(src.as_bytes()[at - 1]);
-        let end = at + ident.len();
-        let after = end >= src.len() || !word(src.as_bytes()[end]);
-        before && after
-    })
+}
+
+/// What this frame's callback draws: a feedback accumulate followed by a present.
+pub enum FeedbackPass {
+    Feedback {
+        accumulate: &'static str,
+        present: &'static str,
+        src: Arc<FeedbackTarget>,
+        dst: Arc<FeedbackTarget>,
+        /// Record this frame's audio into the target, or hold the picture.
+        ///
+        /// **The accumulate is the only thing here that moves.** The present pass
+        /// just samples what is already in the target, so skipping the accumulate
+        /// leaves the last frame on screen — which is what pausing is supposed to
+        /// look like. Gating the whole callback instead, at the pane, was the
+        /// obvious thing and it is wrong: the pane goes blank, so the view reads
+        /// as *gone* rather than as *held*.
+        advance: bool,
+    },
+}
+
+/// The callback for a view that draws straight to the screen. See
+/// [`callback`].
+pub struct VizCallback {
+    helpers: &'static str,
+    body: &'static str,
+    uniforms: Uniforms,
+}
+
+impl egui_wgpu::CallbackTrait for VizCallback {
+    fn prepare(
+        &self,
+        _device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+        _screen: &egui_wgpu::ScreenDescriptor,
+        _encoder: &mut wgpu::CommandEncoder,
+        _resources: &mut egui_wgpu::CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        let Ok(mut gpu) = GPU.lock() else {
+            return Vec::new();
+        };
+        let Some(gpu) = gpu.as_mut() else {
+            return Vec::new();
+        };
+        // The upload happens here, where the queue is, and the draw in `paint`.
+        // This is also the one step that builds a pipeline, so a driver that
+        // cannot compile is asked once rather than sixty times a second.
+        if let Some((_, buffer)) = entry(gpu, self.helpers, self.body, gpu.target_format) {
+            upload(gpu, &buffer, &self.uniforms);
+        }
+        Vec::new()
+    }
+
+    fn paint(
+        &self,
+        info: egui::PaintCallbackInfo,
+        render_pass: &mut wgpu::RenderPass<'static>,
+        _resources: &egui_wgpu::CallbackResources,
+    ) {
+        let Ok(mut gpu) = GPU.lock() else {
+            return;
+        };
+        let Some(gpu) = gpu.as_mut() else {
+            return;
+        };
+        let Some((pipeline, buffer)) = entry(gpu, self.helpers, self.body, gpu.target_format)
+        else {
+            return;
+        };
+        // **The viewport is the pane, and the scissor is left entirely alone.**
+        // Both halves of that are argued on [`pane_viewport`]; what belongs here is
+        // only that egui_wgpu has already clipped to `info.clip_rect` for this
+        // primitive, and it owns resetting the viewport and scissor for the next
+        // one.
+        let [x, y, w, h] = pane_viewport(info.viewport, info.pixels_per_point);
+        render_pass.set_viewport(x, y, w, h, 0.0, 1.0);
+        let bind_group = bind_group(gpu, &buffer, &gpu.blank);
+        render_pass.set_pipeline(&pipeline);
+        render_pass.set_bind_group(0, &bind_group, &[]);
+        // The oversized triangle: three vertices, no index buffer, no attributes.
+        render_pass.draw(0..3, 0..1);
+    }
+}
+
+/// Must this pair be (re)built at `wanted`?
+///
+/// **Both halves matter and the second one is the bug this exists for.** A pair
+/// that is *absent* must be created; so must one whose targets are not `wanted`,
+/// because the pane sized the request from the rect it is drawing into and a
+/// texture of a different size cannot be drawn into. Testing only for absence
+/// meant a resized pane kept a pair at the old size, `Feedback::draw` went on
+/// queueing `pass: None`, and the view never drew again — permanently blank, with
+/// no error and no log line, after any resize.
+///
+/// Free and `Pair`-free so a test can reach it: it is a question about two pairs of
+/// integers, and the reason it was wrong for a release is that nothing could ask
+/// it.
+pub fn pair_is_unusable(pair: Option<((i32, i32), (i32, i32))>, wanted: (i32, i32)) -> bool {
+    match pair {
+        None => true,
+        Some((a, b)) => a != wanted || b != wanted,
+    }
+}
+
+/// The callback for a feedback view's two passes.
+pub struct FeedbackCallback {
+    slot: Arc<Mutex<Option<Pair>>>,
+    failed: Arc<AtomicBool>,
+    wanted: (i32, i32),
+    /// The view's module-scope functions, shared by both passes.
+    helpers: &'static str,
+    /// `None` on the frame that creates the pair, which has nothing to draw yet.
+    pass: Option<FeedbackPass>,
+    uniforms: Uniforms,
+}
+
+impl egui_wgpu::CallbackTrait for FeedbackCallback {
+    fn prepare(
+        &self,
+        _device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+        _screen: &egui_wgpu::ScreenDescriptor,
+        encoder: &mut wgpu::CommandEncoder,
+        _resources: &mut egui_wgpu::CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        let Ok(mut gpu) = GPU.lock() else {
+            return Vec::new();
+        };
+        let Some(gpu) = gpu.as_mut() else {
+            return Vec::new();
+        };
+
+        // The frame that was queued because no pair of the right size exists.
+        // Creating it is here rather than in a `create` step of its own because
+        // this is the only place a `Device` is available, and wgpu releases the old
+        // pair when it is replaced — so there is no destroy call and no `Drop` to
+        // get wrong.
+        //
+        // **The size is part of the condition, and it is the whole fix.** This
+        // asked only whether the slot was empty, so after a resize the pair was
+        // still there — at the old size — the check passed, nothing was rebuilt,
+        // and `Feedback::draw` kept queueing `pass: None` for ever. The pane went
+        // blank on every resize and never came back, with no error anywhere: the
+        // view drew nothing because the callback it queued could not draw.
+        //
+        // It reads as a rendering fault and is a lifetime one. The size compare is
+        // the same one `Feedback::draw` uses to decide the pair is unusable, so the
+        // two cannot disagree about what "the right size" means.
+        if self.pass.is_none() {
+            let mut slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
+            if pair_is_unusable(
+                slot.as_ref().map(|(a, b)| (a.size(), b.size())),
+                self.wanted,
+            ) {
+                match (
+                    FeedbackTarget::new(&gpu.device, self.wanted),
+                    FeedbackTarget::new(&gpu.device, self.wanted),
+                ) {
+                    (Some(a), Some(b)) => *slot = Some((Arc::new(a), Arc::new(b))),
+                    _ => self.failed.store(true, Ordering::Relaxed),
+                }
+            }
+            return Vec::new();
+        }
+
+        let Some(FeedbackPass::Feedback {
+            accumulate,
+            src,
+            dst,
+            advance,
+            ..
+        }) = &self.pass
+        else {
+            return Vec::new();
+        };
+        // A fresh target holds undefined contents, so it is cleared before the
+        // first accumulate rather than after. One frame of undefined texture
+        // otherwise shows as a flash of garbage.
+        //
+        // **Cleared to the pane's background, not to black.** Both feedback views
+        // present their target directly, so a black clear means an unwarmed
+        // history reads as a black hole in the pane — and the spectrogram cannot
+        // paper over it in the shader either, because a floor below 1.0 that
+        // hides black also washes the background into every column of the
+        // history, which is a blur of its own. Clearing to `u_bg` lets the
+        // present pass be a straight read-back at full strength.
+        //
+        // The pass ends when `rp` is dropped — wgpu 30 has no `end()` to call.
+        if dst.needs_clear() {
+            let bg = wgpu::Color {
+                r: self.uniforms.bg[0] as f64,
+                g: self.uniforms.bg[1] as f64,
+                b: self.uniforms.bg[2] as f64,
+                a: 1.0,
+            };
+            let rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("tplay.viz.clear"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &dst.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(bg),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            drop(rp);
+            dst.mark_drawn();
+        }
+
+        // **After** the clear, not before it: a fresh target is undefined, and
+        // the present pass samples it whether or not anything was recorded. Putting
+        // the gate here rather than around the accumulate pass also skips the
+        // pipeline lookup and the uniform upload, which are pure waste on a frame
+        // that records nothing.
+        if !advance {
+            return Vec::new();
+        }
+
+        let Some((pipeline, buffer)) = entry(gpu, self.helpers, accumulate, OFFSCREEN_FORMAT)
+        else {
+            return Vec::new();
+        };
+        upload(gpu, &buffer, &self.uniforms);
+
+        // The accumulate pass draws into the offscreen target, so its viewport
+        // is the target's own extent — an offscreen render pass sizes its own
+        // frame, and the pane's window rectangle is meaningless in it. The quantised
+        // target is then a little larger than the pane, and the present pass
+        // upscales across it.
+        let bind_group = bind_group(gpu, &buffer, &src.view);
+        let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("tplay.viz.accumulate"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &dst.view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        // No viewport and no scissor: a fresh pass already covers the whole
+        // attachment, which *is* the target. The pane's screen rect has no meaning
+        // here — this pass fills its own texture, and the present pass is what
+        // places it.
+        rp.set_pipeline(&pipeline);
+        rp.set_bind_group(0, &bind_group, &[]);
+        rp.draw(0..3, 0..1);
+        Vec::new()
+    }
+
+    fn paint(
+        &self,
+        info: egui::PaintCallbackInfo,
+        render_pass: &mut wgpu::RenderPass<'static>,
+        _resources: &egui_wgpu::CallbackResources,
+    ) {
+        let Ok(mut gpu) = GPU.lock() else {
+            return;
+        };
+        let Some(gpu) = gpu.as_mut() else {
+            return;
+        };
+        let Some(FeedbackPass::Feedback { present, dst, .. }) = &self.pass else {
+            return;
+        };
+        let Some((pipeline, buffer)) = entry(gpu, self.helpers, present, gpu.target_format) else {
+            return;
+        };
+        // Same top-left conversion as `VizCallback::paint`, and the scissor is
+        // again egui's: it is the *clip* that limits this pass, and egui has
+        // already applied it.
+        let [x, y, w, h] = pane_viewport(info.viewport, info.pixels_per_point);
+        render_pass.set_viewport(x, y, w, h, 0.0, 1.0);
+        // The destination is the sampler here: the present pass reads back
+        // exactly what the accumulate pass wrote. Its own uniform buffer, because
+        // it is a different shader with a different `Entry`.
+        upload(gpu, &buffer, &self.uniforms);
+        let bind_group = bind_group(gpu, &buffer, &dst.view);
+        render_pass.set_pipeline(&pipeline);
+        render_pass.set_bind_group(0, &bind_group, &[]);
+        render_pass.draw(0..3, 0..1);
+    }
+}
+
+/// An owned RGBA8 render target and the view that samples it.
+///
+/// **No `Send`/`Sync` override to justify here:** wgpu's `Texture` is already
+/// both. The GL version of this type needed `unsafe impl Send/Sync` for exactly
+/// that reason, which is what a backend change here buys.
+pub struct FeedbackTarget {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    size: (i32, i32),
+    /// Set once this target has been rendered into, so a first frame starts from
+    /// a defined state rather than from whatever was in a fresh texture.
+    drawn: AtomicBool,
+}
+
+impl FeedbackTarget {
+    fn new(device: &wgpu::Device, size: (i32, i32)) -> Option<Self> {
+        let (w, h) = size;
+        // `size` must come from [`target_size`], which floors it — see there for
+        // why a zero dimension is the failure mode worth designing out.
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("tplay.viz.target"),
+            size: wgpu::Extent3d {
+                width: w as u32,
+                height: h as u32,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: OFFSCREEN_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Some(Self {
+            texture,
+            view,
+            size,
+            drawn: AtomicBool::new(false),
+        })
+    }
+
+    pub fn size(&self) -> (i32, i32) {
+        self.size
+    }
+
+    /// Whether this target has been rendered into since it was created.
+    pub fn needs_clear(&self) -> bool {
+        !self.drawn.load(Ordering::Relaxed)
+    }
+
+    pub fn mark_drawn(&self) {
+        self.drawn.store(true, Ordering::Relaxed);
+    }
+}
+
+impl std::fmt::Debug for FeedbackTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FeedbackTarget")
+            .field("texture", &self.texture)
+            .field("size", &self.size)
+            .finish_non_exhaustive()
+    }
 }

@@ -1,5 +1,5 @@
-//! Visualizer views — one file per view, each exposing a single `draw` fn and a
-//! GLSL body. The registry (`VizView` + `VizView::ALL`) lives in app.rs; the
+//! Visualizer views — one file per view, each exposing a single `draw` fn, its
+//! own WGSL functions, and one or two shader bodies. The registry (`VizView` + `VizView::ALL`) lives in app.rs; the
 //! pane dispatches through the table below. Views own per-frame state in egui
 //! memory under their own keys (see bars.rs), so a new view needs nothing
 //! shared.
@@ -7,7 +7,7 @@
 //! **Every view is a shader.** There is no CPU-drawing half left, and that is
 //! the point rather than an accident of the migration: one code path means one
 //! set of failure modes, and no question about which of eleven looks survive a
-//! driver with no GL. The cost is that a driver which cannot compile a shader
+//! driver with no GPU. The cost is that a driver which cannot compile a shader
 //! now loses the whole pane rather than four of eleven views — which is a real
 //! trade, and the reason [`ShaderView::frags`] is `pub` is so the sweeps in
 //! `gui_tests.rs` can hold every shipped shader to the compiler.
@@ -21,6 +21,26 @@
 use crate::audio::viz::VizBuf;
 use crate::gui::theme::Palette;
 use eframe::egui;
+
+/// The frame time every view's time-based smoothing is calibrated against.
+///
+/// **One definition, because it is the same number for all of them** — a view
+/// that derived its own would be one more place for the clock to disagree with
+/// itself, and `u_dt` (which `trails` and `chladni` read) is the same value from
+/// the same place.
+///
+/// **A caveat that is measured, not hypothetical.** On a 120 Hz output this reads
+/// `0.01667` while the real interval between frames is `0.00833` — egui's
+/// prediction is running at half the true rate, so every time constant in the
+/// pane is calibrated against a clock half as fast as the wall. It is left as egui
+/// reports it rather than second-guessed here, because it is the clock the whole
+/// visualizer already uses (`u_dt`, `feedback_for_a_dt`, `PLATE_TAU`) and a
+/// hand-rolled second clock would be worse than one wrong clock. The consequence
+/// to be aware of: time-based smoothing here is roughly twice as long as intended
+/// on a high-refresh display.
+pub fn frame_dt(painter: &egui::Painter) -> f32 {
+    painter.ctx().input(|i| i.predicted_dt)
+}
 
 /// A view drawn by a fragment shader.
 ///
@@ -46,9 +66,20 @@ pub struct ShaderView {
     // it — which is the only reason it needs saying out loud.
     #[allow(dead_code)]
     pub file: &'static str,
-    /// Every GLSL body this view ships. Not complete shaders: the harness
-    /// prefixes the version, the fragment output, and the uniforms each body
-    /// references.
+    /// This view's module-scope WGSL: any function it defines for itself.
+    ///
+    /// **A separate slot, not part of the body**, because WGSL has no nested
+    /// functions — a view that defines `envelope` or `fbm` cannot put it inside
+    /// the entry point, and cannot put it in the prelude either without the
+    /// harness naming a view. So the view owns its functions and the harness
+    /// concatenates them. Empty for a view that defines none.
+    // The `main` binary compiles this module too, and nothing in the binary reads
+    // it — which is the only reason it needs saying out loud.
+    #[allow(dead_code)]
+    pub helpers: &'static str,
+    /// Every WGSL body this view ships. Not complete shaders: the harness
+    /// supplies the uniform block, the entry points and the prelude, and each
+    /// body only fills in `frag_color` between them.
     ///
     /// A **slice**, not a single string, because a view may run more than one
     /// program — `Trails` accumulates and then presents — and one program per row
@@ -80,18 +111,21 @@ pub const SHADER_VIEWS: &[ShaderView] = &[
     ShaderView {
         name: "Bars",
         file: "bars",
+        helpers: bars::HELPERS,
         frags: &[bars::FRAG],
         draw: bars::draw,
     },
     ShaderView {
         name: "Wave",
         file: "wave",
+        helpers: wave::HELPERS,
         frags: &[wave::FRAG],
         draw: wave::draw,
     },
     ShaderView {
         name: "Radial",
         file: "radial",
+        helpers: radial::HELPERS,
         frags: &[radial::FRAG],
         draw: radial::draw,
     },
@@ -103,30 +137,35 @@ pub const SHADER_VIEWS: &[ShaderView] = &[
     ShaderView {
         name: "Spectrogram",
         file: "spectrogram",
+        helpers: spectrogram::HELPERS,
         frags: &[spectrogram::ACCUMULATE, spectrogram::PRESENT],
         draw: spectrogram::draw,
     },
     ShaderView {
         name: "Flame",
         file: "flame",
+        helpers: flame::HELPERS,
         frags: &[flame::FRAG],
         draw: flame::draw,
     },
     ShaderView {
         name: "Chladni",
         file: "chladni",
+        helpers: chladni::HELPERS,
         frags: &[chladni::FRAG],
         draw: chladni::draw,
     },
     ShaderView {
         name: "Nebula",
         file: "nebula",
+        helpers: nebula::HELPERS,
         frags: &[nebula::FRAG],
         draw: nebula::draw,
     },
     ShaderView {
         name: "Plasma",
         file: "plasma",
+        helpers: plasma::HELPERS,
         frags: &[plasma::FRAG],
         draw: plasma::draw,
     },
@@ -135,6 +174,7 @@ pub const SHADER_VIEWS: &[ShaderView] = &[
     ShaderView {
         name: "Trails",
         file: "trails",
+        helpers: trails::HELPERS,
         frags: &[trails::FRAG, trails::PRESENT],
         draw: trails::draw,
     },

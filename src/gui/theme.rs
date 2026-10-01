@@ -703,7 +703,12 @@ pub fn apply(ctx: &egui::Context, theme: &Theme) {
     // Kill widget color cross-fades so a mid-session switch lands on the very
     // next frame: the aesthetic is instant, Winamp-style, and the default
     // ~0.08s animation smears token colors across every widget.
-    ctx.style_mut(|s| s.animation_time = 0.0);
+    //
+    // Both styles, not the active one: `set_visuals` above writes only into
+    // the active style, and which of the two that is follows the system
+    // preference, so zeroing one would leave the app animating a switch the
+    // moment the OS theme changed under it.
+    ctx.all_styles_mut(|s| s.animation_time = 0.0);
 }
 
 /// System font files probed (in order) for the text fallback — covers

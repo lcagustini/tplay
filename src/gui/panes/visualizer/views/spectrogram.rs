@@ -23,6 +23,7 @@
 //! the view means than a frame-rate wart is worth. `Trails` is the view where the
 //! time-based version matters, and it is time-based.
 
+use super::frame_dt;
 use crate::audio::viz::{compute_bands, VizBuf, DB_FLOOR, VIZ_BANDS};
 use crate::gui::panes::visualizer::gpu::{self, Feedback};
 use crate::gui::theme::Palette;
@@ -39,19 +40,20 @@ fn history_id() -> egui::Id {
 }
 
 /// Pass one: the shifted history plus the new column, into the owned target.
-pub const ACCUMULATE: &str = r#"
+pub const HELPERS: &str = r#"
 // The history's length in columns, and the *fewest* columns there can be: a
 // column is a whole number of texels (see below), so the target's own width
-// decides how many of them there are. As a GLSL literal rather than an
+// decides how many of them there are. As a WGSL literal rather than an
 // interpolated value — the harness owns no view's constants, and the version with
 // substitution machinery is what once made the test table name a shader the app
 // never ran.
-const int COLUMNS = 256;
+const COLUMNS : i32 = 256;
+"#;
 
-void main() {
+pub const ACCUMULATE: &str = r#"
     // The target's own size, which the shader cannot be handed: it is quantised
     // to a 64px grid, so it is neither the pane's size nor `u_resolution`.
-    ivec2 sz = textureSize(u_prev, 0);
+    let sz = textureDimensions(u_prev);
 
     // **A column is a whole number of texels, and that is load-bearing rather
     // than a rounding preference.** This shifted by a fixed `1.0 / 256.0` of the
@@ -66,38 +68,53 @@ void main() {
     // column count is the target's width over the column width, so the history
     // spans a different number of seconds on a narrow pane than on a wide one —
     // the honest consequence of being sharp.
-    int colw = max(1, sz.x / COLUMNS);
+    let colw = max(1, i32(sz.x) / COLUMNS);
 
-    // The texel this fragment writes, and it is **not** `v_uv * sz` — because a
-    // framebuffer's rows run *bottom-up* (row 0 is at NDC y = -1) while `v_uv.y`
-    // is 0 at the pane's *top*. Using the top-down index reads one row and writes
-    // the mirrored one, which mirrors the whole history on every frame; the
-    // present pass then samples that bottom-up texture with a top-down uv, so the
-    // two flips alternate and the picture reads as its own mirror image, softened
-    // by the present pass's interpolation. x needs no flip: column 0 is the left
-    // in both conventions, which is the only reason this was a y-only trap.
+    // The texel this fragment writes. **There is no `y` flip here, and that is
+    // the load-bearing half of this view.** Row 0 of a framebuffer is at NDC
+    // `y = +1` in wgpu, which is the pane's *top* — the same place `v_uv.y = 0`
+    // is — so the texel a fragment lands in is simply `v_uv * sz`, with no
+    // conversion. The OpenGL habit (`gl_FragCoord` is bottom-up, and GL row 0 is
+    // at NDC `-1`) says otherwise, and taking it here is what produced the
+    // vertical striping this view had: the pass read `sz.y - 1 - …` while the
+    // rasteriser wrote `int(v_uv.y * sz.y)`, so each row read the row its mirror
+    // image read. Mirroring is an involution, so that did not smear the picture —
+    // it made **alternate columns** of the history the mirror of their
+    // neighbours, which at two pixels a column is a stripe. `trails.rs` samples
+    // its target with no flip anywhere and is therefore immune, because its
+    // transform is a spin and a zoom, which a whole-image flip happens to
+    // commute with.
     // Clamped before the cast, because `v_uv` reaches 1.0 at the far edge.
-    ivec2 p = ivec2(
-        clamp(int(v_uv.x * float(sz.x)), 0, sz.x - 1),
-        clamp(sz.y - 1 - int(v_uv.y * float(sz.y)), 0, sz.y - 1)
+    let p = vec2<i32>(
+        clamp(i32(v_uv.x * f32(sz.x)), 0, i32(sz.x) - 1),
+        clamp(i32(v_uv.y * f32(sz.y)), 0, i32(sz.y) - 1)
     );
 
     // The new column: the band at this fragment's height, low bands at the
     // bottom the way the spectrum is read everywhere else. The heat axis is
     // bg -> accent, so the two ends are already in the palette and no view adds a
     // token for it.
-    float f = (1.0 - v_uv.y) * float(VIZ_BANDS);
-    int lo = min(int(floor(f)), VIZ_BANDS - 1);
-    int hi = min(lo + 1, VIZ_BANDS - 1);
-    float lvl = mix(level(u_bands[lo]), level(u_bands[hi]), fract(f));
-    vec3 fresh = mix(u_bg.rgb, u_accent.rgb, lvl);
+    // **A band is a flat step, not a ramp, and that is what makes the waterfall
+    // read as bands.** This interpolated between the two neighbouring bands, so a
+    // 32-band history over a 1150px pane painted 36 rows of gradient per band —
+    // every band boundary was a smooth blend and the picture came out looking
+    // out of focus. The eye reads a waterfall's frequency axis as discrete
+    // regions, and a ramp erases exactly the edges it is there to show. `step`
+    // picks one band per row; the 1px boundary is left crisp for the same reason.
+    let f = (1.0 - v_uv.y) * f32(VIZ_BANDS);
+    let lo = clamp(i32(floor(f)), 0, i32(VIZ_BANDS) - 1);
+    let lvl = level(band_at(u32(lo)));
+    let fresh = mix(u_bg().rgb, u_accent().rgb, lvl);
 
     // The history, one column to the right, so the picture moves **left** and
     // the rightmost column is the one the shift vacates. The modulo is what makes
     // it a ring buffer: a clamped read of column -1 *is* column 0, so the one
     // column the shift should have consumed is the one it re-reads, and the
     // leftmost column freezes for ever.
-    vec3 old = texelFetch(u_prev, ivec2((p.x + colw) % sz.x, p.y), 0).rgb;
+    // **`textureLoad`, the WGSL `texelFetch`**: whole texels, no sampler, no
+    // resampling. An interpolated read here is a low-pass filter applied to the
+    // whole history once a frame, 256 times over.
+    let old = textureLoad(u_prev, vec2<i32>((p.x + colw) % i32(sz.x), p.y), 0).rgb;
 
     // ... and the new column lands there, so a transient is a vertical streak
     // that drifts left as it ages. **Writing it on the other edge is the bug this
@@ -107,8 +124,11 @@ void main() {
     // The column the shift consumes and the column that gets overwritten are the
     // same column; that is the invariant, and it is the one line of arithmetic
     // that says which edge the new data belongs on.
-    frag_color = vec4(p.x >= sz.x - colw ? fresh : old, 1.0);
-}
+    if (p.x >= i32(sz.x) - colw) {
+        frag_color = vec4<f32>(fresh, 1.0);
+    } else {
+        frag_color = vec4<f32>(old, 1.0);
+    }
 "#;
 
 /// Pass two: the accumulated target, presented.
@@ -120,23 +140,31 @@ void main() {
 /// stretched across. One program cannot be both, and the wrong one of the two is
 /// a picture that looks plausible and is wrong.
 pub const PRESENT: &str = r#"
-void main() {
-    // The same y flip as the accumulate pass, at the other end of the round trip.
-    // A texture's row 0 is its bottom and `v_uv.y` is 0 at the pane's top, so
-    // sampling `v_uv` straight through would present the target upside down. The
-    // two passes must agree: flip in both and the target survives the round trip
-    // unchanged, flip in neither and the same, flip in one and every frame is the
-    // mirror of the last. That is the whole requirement, and it is invisible
-    // until it is not.
-    vec3 c = texture(u_prev, vec2(v_uv.x, 1.0 - v_uv.y)).rgb;
+    // A straight read-back, **with no `y` flip** — the same reason the accumulate
+    // pass has none: `textureSampleLevel`'s `uv.y = 0` is texture row 0, row 0 is
+    // at NDC `+1`, and that is the pane's top. So the coordinate the accumulate
+    // pass wrote with is the coordinate this one reads with, and the round trip is
+    // the identity. A flip here would mirror the history on presentation without
+    // the accumulate pass agreeing, which is the mirror-image of the striping
+    // above and just as invisible until it is not.
+    // `textureSampleLevel` rather than `textureSample`: the level is explicit
+    // because this pass reads a single-mip target and the two are only equivalent
+    // when there is no mip chain to pick a level from.
+    var c = textureSampleLevel(u_prev, u_samp, v_uv, 0.0).rgb;
     // The `u_bg` floor is `Trails`' trick and here it carries a second job. A
     // fresh target is cleared to transparent black, so the history reads as a
     // black hole in the pane for the 256 frames it takes to fill. Flooring at the
     // pane's own background makes an unwarmed waterfall read as the surface it is
     // drawn on rather than as a gap in it, and a cleared column is the same
     // colour as a silent one, so the warm-up is invisible.
-    frag_color = vec4(mix(u_bg.rgb, c, 0.92), 1.0);
-}
+    // **`1.0`, not a floor below it.** The floor was there so an unwarmed target
+    // read as the pane's surface rather than as a hole in it, and it also washed
+    // 8% of the background into every column of the history — which is a second
+    // blur, and a subtler one than the ramp above because it is uniform. The
+    // warm-up problem it was solving does not need it: a fresh target is cleared
+    // to the background colour, so an empty history *is* the surface, and a
+    // cleared column is the background rather than a black bar.
+    frag_color = vec4<f32>(c, 1.0);
 "#;
 
 pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &Palette) {
@@ -148,9 +176,9 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &P
 
     // No release smoothing: a waterfall is the place the raw transient is the
     // point, and the history already shows decay over the columns behind.
-    const ATTACK: f32 = 0.6;
-    const RELEASE: f32 = 0.6;
-    compute_bands(viz, &mut prev, ATTACK, RELEASE);
+    const ATTACK_MS: f32 = 18.2;
+    const RELEASE_MS: f32 = 18.2;
+    compute_bands(viz, &mut prev, frame_dt(painter), ATTACK_MS, RELEASE_MS);
     painter
         .ctx()
         .memory_mut(|m| m.data.insert_temp(prev_id(), prev));
@@ -180,9 +208,11 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &P
     history.draw(
         painter,
         rect,
+        HELPERS,
         ACCUMULATE,
         PRESENT,
         gpu::Uniforms::pack(viz, prev, palette, rect, painter.ctx()),
+        viz.take_arrival(),
     );
     painter
         .ctx()

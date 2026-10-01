@@ -7,7 +7,7 @@ use crate::gui::panes;
 use crate::gui::theme;
 use crate::gui::theme::ThemeState;
 use eframe::egui;
-use egui_dock::{DockArea, DockState, Node, NodeIndex, Style, TabIndex, TabViewer};
+use egui_dock::{DockArea, DockState, Node, NodeIndex, NodePath, Style, SurfaceIndex, TabViewer};
 use serde_json;
 use std::path::PathBuf;
 
@@ -41,16 +41,28 @@ fn apply_min_pane_sizes(
             continue;
         }
         let main = tree.main_surface_mut();
-        let Some(leaf) = main.find_tab(&pane).map(|(node, _)| node) else {
+        // `Tree::find_tab` still hands back a `(node, tab)` pair, but 0.19 made
+        // the *walk* speak `NodePath` — a node plus the surface owning it — so
+        // the node is widened into a path to compare against the walk's
+        // neighbours. The main surface is surface 0 by definition.
+        let Some(leaf) = main
+            .find_tab(&pane)
+            .map(|(node, _)| NodePath::new(SurfaceIndex::main(), node))
+        else {
             continue;
         };
         for (i, node) in main.iter_mut().enumerate() {
-            let parent = NodeIndex(i);
-            let (vertical, fraction, rect) = match node {
-                Node::Vertical { fraction, rect, .. } => (true, fraction, rect),
-                Node::Horizontal { fraction, rect, .. } => (false, fraction, rect),
+            // 0.17 moved a node's data into `SplitNode`/`LeafNode` beside the
+            // `Node` enum rather than inside its variants, and 0.19 replaced
+            // the index arithmetic's neighbours with `NodePath`s — so the walk
+            // carries a path rather than a bare `NodeIndex`.
+            let parent = NodePath::new(SurfaceIndex::main(), NodeIndex(i));
+            let (vertical, split) = match node {
+                Node::Vertical(s) => (true, s),
+                Node::Horizontal(s) => (false, s),
                 _ => continue,
             };
+            let (fraction, rect) = (&mut split.fraction, split.rect);
             let dim = if vertical {
                 rect.height()
             } else {
@@ -65,7 +77,7 @@ fn apply_min_pane_sizes(
                 min_w + border_h
             };
             let min_frac = (leaf_min / dim).clamp(0.05, 0.95);
-            let (c0, c1) = (parent.left(), parent.right());
+            let (c0, c1) = (parent.left_node(), parent.right_node());
             let old = *fraction;
             // All panes are Fill: floor at the minimum size, never pin to it.
             if c0 == leaf {
@@ -119,12 +131,17 @@ fn add_pane(tree: &mut DockState<Pane>, pane: Pane) {
 
 /// Remove a pane from the dock tree (wherever it lives — main or floating).
 fn remove_pane(tree: &mut DockState<Pane>, pane: Pane) {
+    // egui_dock 0.19 folded the `(surface, node, tab)` triple into one
+    // `TabPath`, and `iter_all_tabs` now yields it alongside the tab — so the
+    // tab index no longer has to be guessed, it comes back with the hit.
+    // Bound before the `if` so the iterator's borrow of `tree` ends here and
+    // the removal below can take it mutably.
     let target = tree
         .iter_all_tabs()
         .find(|(_, t)| **t == pane)
-        .map(|((s, n), _)| (s, n));
-    if let Some((surface, node)) = target {
-        tree.remove_tab((surface, node, TabIndex(0)));
+        .map(|(path, _)| path);
+    if let Some(path) = target {
+        tree.remove_tab(path);
     }
 }
 
@@ -135,6 +152,14 @@ struct PaneViewer<'a> {
 
 impl TabViewer for PaneViewer<'_> {
     type Tab = Pane;
+
+    /// egui_dock 0.21 made this mandatory: a tab's egui identity is no longer
+    /// derived from its position, so a stable id per pane is what keeps the
+    /// active-tab highlight, the drag state and the memory keys attached to the
+    /// pane across a re-split.
+    fn id(&mut self, pane: &mut Pane) -> egui::Id {
+        egui::Id::new("tplay.pane").with(pane)
+    }
 
     fn title(&mut self, pane: &mut Pane) -> egui::WidgetText {
         let accent = self.themes.current().palette.accent;
@@ -214,13 +239,25 @@ fn list_layouts(dir: &std::path::Path) -> Vec<PathBuf> {
 /// Draw one frame. Called from the `TPlay` shell in `main.rs`, which owns
 /// `themes` — the app deliberately does not, so a theme switch re-decodes
 /// icons with a `Context` the state layer never holds.
-pub fn update_ui(app: &mut TPlayApp, themes: &mut ThemeState, ctx: &egui::Context) {
+///
+/// Takes the frame's root `Ui` as well as the `Context`: egui 0.36 draws a
+/// frame as a `Ui` and every panel is shown *inside* one, where 0.30 took the
+/// `Context` directly. `ctx` is that `Ui`'s context, cloned at the call site,
+/// so nothing below needs the indirection.
+pub fn update_ui(
+    app: &mut TPlayApp,
+    themes: &mut ThemeState,
+    ctx: &egui::Context,
+    ui: &mut egui::Ui,
+) {
     // Theme tokens -> egui visuals, every frame so a mid-session switch lands
     // instantly.
     theme::apply(ctx, themes.current());
     // egui selects label text on drag by default; the playlist reorders by
-    // dragging track titles, so kill text selection app-wide.
-    ctx.style_mut(|s| s.interaction.selectable_labels = false);
+    // dragging track titles, so kill text selection app-wide. `all_styles_mut`
+    // rather than the one active style, because which one is active depends on
+    // the system preference and this setting is not a theme choice.
+    ctx.all_styles_mut(|s| s.interaction.selectable_labels = false);
 
     // Load DockState from egui memory (per-session) or disk (first run). The
     // tree is the single source of truth: which panes are open, their splits and
@@ -240,9 +277,13 @@ pub fn update_ui(app: &mut TPlayApp, themes: &mut ThemeState, ctx: &egui::Contex
 
     // Top-left menu button (app logo per theme): pane checkboxes reflect the
     // tree and toggles edit it, and the Theme section switches themes.
-    egui::TopBottomPanel::top("pane_dropdown_panel")
-        .frame(egui::Frame::none())
-        .show(ctx, |ui| {
+    //
+    // 0.34 folded `TopBottomPanel`/`SidePanel`/`CentralPanel` into one `Panel`
+    // enum, and 0.36 made `show` take the enclosing `Ui` rather than a
+    // `Context`. `Frame::none()` became the `Frame::NONE` const.
+    egui::Panel::top("pane_dropdown_panel")
+        .frame(egui::Frame::NONE)
+        .show(ui, |ui| {
             // No native title bar (decorations off — see main.rs), so the whole
             // bar drags the window. Added first, at the bottom of the z-stack:
             // the menu logo and the window controls drawn after still win their
@@ -291,7 +332,7 @@ pub fn update_ui(app: &mut TPlayApp, themes: &mut ThemeState, ctx: &egui::Contex
                     // `set` owns the icon re-decode a switch needs, and the
                     // config compare persists the new id — nothing to flag here.
                     themes.set(ctx, &sel);
-                    ui.close_menu();
+                    ui.close();
                 }
                 ui.separator();
                 ui.label("Library");
@@ -355,7 +396,7 @@ pub fn update_ui(app: &mut TPlayApp, themes: &mut ThemeState, ctx: &egui::Contex
                                         path.to_string_lossy().into_owned(),
                                     )
                                 });
-                                ui.close_menu();
+                                ui.close();
                             }
                         }
                         // Delete button (✕) — uses the same remove icon as window close
@@ -378,7 +419,7 @@ pub fn update_ui(app: &mut TPlayApp, themes: &mut ThemeState, ctx: &egui::Contex
                             );
                             // The modal asks before anything happens, so the menu
                             // can close now — it would otherwise sit open behind it.
-                            ui.close_menu();
+                            ui.close();
                         }
                     });
                 }
@@ -402,7 +443,7 @@ pub fn update_ui(app: &mut TPlayApp, themes: &mut ThemeState, ctx: &egui::Contex
                             "layout.json".into(),
                         );
                     }
-                    ui.close_menu();
+                    ui.close();
                 }
             };
             ui.horizontal(|ui| {
@@ -473,26 +514,35 @@ pub fn update_ui(app: &mut TPlayApp, themes: &mut ThemeState, ctx: &egui::Contex
 
     // Each leaf holds exactly one pane, so its tab (a draggable full-width header
     // strip) doubles as the pane's title bar. No tabbing ever occurs.
-    let mut style = Style::from_egui(ctx.style().as_ref());
+    //
+    // `ctx.style()` is gone in 0.36; `style_of(ctx.theme())` is the same style
+    // it returned — the one in force right now. The margins are `i8` since
+    // 0.35 dropped the `impl Into<f32>` arguments, so they are widened here
+    // rather than at each use.
+    let mut style = Style::from_egui(&ctx.style_of(ctx.theme()));
     style.tab_bar.fill_tab_bar = true;
 
-    let border_v = style.tab_bar.height
-        + style.tab.tab_body.inner_margin.top
-        + style.tab.tab_body.inner_margin.bottom;
-    let border_h = style.tab.tab_body.inner_margin.left + style.tab.tab_body.inner_margin.right;
+    let inner = style.tab.tab_body.inner_margin;
+    let border_v = style.tab_bar.height + f32::from(inner.top) + f32::from(inner.bottom);
+    let border_h = f32::from(inner.left) + f32::from(inner.right);
 
-    let mut viewer = PaneViewer {
-        app,
-        themes: &*themes,
-    };
-    DockArea::new(&mut tree)
-        .show_add_buttons(false)
-        .show_add_popup(false)
-        .show_close_buttons(false)
-        .show_leaf_close_all_buttons(false)
-        .show_leaf_collapse_buttons(false)
-        .style(style)
-        .show(ctx, &mut viewer);
+    // The dock area takes whatever the top panel left, so it is shown in a
+    // central panel — the 0.36 spelling of "everything that is not a panel".
+    egui::CentralPanel::default().show(ui, |ui| {
+        let mut viewer = PaneViewer {
+            app,
+            themes: &*themes,
+        };
+        DockArea::new(&mut tree)
+            .show_add_buttons(false)
+            .show_add_popup(false)
+            .show_close_buttons(false)
+            // The close-all button was deprecated in favour of the collapse one
+            // in 0.21, and both are already off; clippy runs `-D warnings`.
+            .show_leaf_collapse_buttons(false)
+            .style(style.clone())
+            .show_inside(ui, &mut viewer);
+    });
 
     // Enforce minimum pane sizes after layout: the splitter drag and floating
     // window resize both happen inside `show()`, so this is the only pass that
@@ -508,7 +558,7 @@ pub fn update_ui(app: &mut TPlayApp, themes: &mut ThemeState, ctx: &egui::Contex
         let eq_surface = tree
             .iter_all_tabs()
             .find(|(_, t)| **t == Pane::Equalizer)
-            .map(|((s, _), _)| s);
+            .map(|(path, _)| path.surface);
         if let Some(surface) = eq_surface {
             if let Some(ws) = tree.get_window_state_mut(surface) {
                 let cur = ws.rect();

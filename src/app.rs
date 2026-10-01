@@ -8,7 +8,7 @@ use crate::library_db;
 use crate::network;
 use crate::playlist;
 use crate::tracks;
-use rodio::{mixer::Mixer, Decoder, Sink, Source};
+use rodio::{mixer::Mixer, Decoder, Player, Source};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -56,13 +56,13 @@ pub use crate::config::{Config, EqData, LibraryData, VizView};
 
 pub struct TPlayApp {
     /// Where every sink is attached. **Not a device**: the app only ever needs
-    /// something to hand `Sink::connect_new`, and `rodio::mixer::mixer` builds
+    /// something to hand `Player::connect_new`, and `rodio::mixer::mixer` builds
     /// one with no audio hardware involved — which is what lets a test build
     /// this same struct (see `main.rs`'s `TPlay`, which owns the device and
     /// passes its mixer in). A `Mixer` is a cheap `Arc` clone, so keeping it
     /// costs nothing.
     mixer: Mixer,
-    sink: Sink,
+    sink: Player,
 
     current_path: Option<PathBuf>,
     total_duration: Option<Duration>,
@@ -118,7 +118,7 @@ pub struct TPlayApp {
     /// `current_path` was already flipped to the incoming track at arm time, so
     /// "the current track" names the one playing from `xf_sink`, not from
     /// `sink`. Faded or held per frame in `advance()`.
-    xf_sink: Option<Sink>,
+    xf_sink: Option<Player>,
     /// The outgoing track's duration, captured at arm time — the arm flips
     /// `total_duration` to the incoming track for the seek bar, so the fade
     /// math needs the old total.
@@ -166,7 +166,7 @@ impl TPlayApp {
             config::Persisted::new(&serde_json::to_string_pretty(config).unwrap_or_default());
         let saved_db = config::Persisted::new(&db.snapshot());
 
-        let sink = Sink::connect_new(&mixer);
+        let sink = Player::connect_new(&mixer);
 
         // Channels + worker are owned by `network::Network`.
         let mut app = Self {
@@ -362,7 +362,7 @@ impl TPlayApp {
         self.seek_target = None;
         self.position_offset = Duration::ZERO;
         self.viz.clear();
-        self.sink = Sink::connect_new(&self.mixer);
+        self.sink = Player::connect_new(&self.mixer);
         self.sink.set_volume(self.volume);
     }
 
@@ -600,7 +600,7 @@ impl TPlayApp {
             }
         };
 
-        self.sink = Sink::connect_new(&self.mixer);
+        self.sink = Player::connect_new(&self.mixer);
         self.sink.set_volume(self.volume);
         // get_pos() on the fresh sink counts only post-skip samples; the
         // skipped `target` is the new position offset from here on.
@@ -643,7 +643,7 @@ impl TPlayApp {
         }
 
         // 2) No live xf — arm one when the current track nears its end. The
-        // sink-shape gate lives here because it is `Sink` state with no data
+        // sink-shape gate lives here because it is `Player` state with no data
         // equivalent: from the playlist, unpaused, exactly one source queued
         // (the current track, nothing pre-buffered). The mode check is
         // duplicated by `arm_plan` on purpose — with both modes off this block
@@ -706,7 +706,7 @@ impl TPlayApp {
                 // flipping total_duration to the incoming track below.
                 self.xf_out_total = Some(armed.out_total);
                 // Second sink on the same mixer, so they play simultaneously.
-                let xf_sink = Sink::connect_new(&self.mixer);
+                let xf_sink = Player::connect_new(&self.mixer);
                 xf_sink.append(xf_source);
                 xf_sink.set_volume(0.0);
                 self.xf_sink = Some(xf_sink);
@@ -1413,6 +1413,16 @@ impl TPlayApp {
         }
     }
 
+    /// Is audio actually moving — the sink has something queued and is not
+    /// paused. **The one definition of it, and both readers use it:** `update`'s
+    /// repaint answer and the Visualizer pane's "should a view run". As two
+    /// inline expressions the pane's guard could drift from the term the repaint
+    /// policy is built on, and the symptom of that is a pane animating on a
+    /// clock nothing else is on.
+    pub fn is_playing(&self) -> bool {
+        !self.sink.empty() && !self.sink.is_paused()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.sink.empty()
     }
@@ -1485,9 +1495,52 @@ impl TPlayApp {
         // same frame it lands.
         self.flush_config(now, closing, theme_id);
         self.flush_db(now, closing);
-        scanning || self.network.busy() || (!self.sink.empty() && !self.sink.is_paused())
+        scanning || self.network.busy() || self.is_playing()
     }
 }
+
+/// The real interval between two frames, as a `dt` a time-based smoother can use.
+///
+/// **`None` means "do not believe this clock"**, and every rejection is a case
+/// where the alternative is worse than leaving egui's own default in place.
+///
+/// **Why this exists at all: eframe 0.36 never sets `predicted_dt`.** Its
+/// `prepare_raw_input` fills in `time` and then calls the app's `raw_input_hook`,
+/// but `predicted_dt` is left at `RawInput`'s default of `1.0 / 60.0` — and
+/// `pending_raw_input` is `mem::take`n each frame, so the default is restored
+/// every frame and the field is *permanently* 16.67 ms. Measured on a 120 Hz
+/// output where frames are 8.33 ms apart, it read `0.01667` without exception.
+///
+/// Every time-based quantity in the visualizer is derived from it, so on any
+/// display that is not 60 Hz they are all wrong by the refresh ratio: a trail
+/// decays at half (or a quarter) its intended rate, a held mode pair follows at
+/// half the rate `PLATE_TAU` names, and — the visible one — a band smoother
+/// calibrated per frame instead of per second converges `hz / 60` times too fast,
+/// which is why the panes judder worse the faster the display is.
+///
+/// The rejections, each for a reason rather than as caution:
+/// - **No previous frame.** There is nothing to measure yet, and the first frame
+///   of a session is the one place a wrong `dt` does the most damage because
+///   there is no picture to compare it against.
+/// - **The clock did not move.** Two frames at the same instant. Reporting `0`
+///   would be worse than useless: every smoother here treats `dt <= 0` as "hold",
+///   so the visualizer would freeze and stay frozen.
+/// - **A gap too long to be a frame.** A window dragged, a laptop resuming, the
+///   first frame after a shader compile — measured at 805 ms in a startup trace.
+///   One such delta would make every per-frame smoother snap to its target in a
+///   single step, which is the single most visible artefact available. Measured
+///   frames while playing are flat 8.33 ms, so anything past
+///   [`MAX_PLAUSIBLE_FRAME_SECS`] is not a frame.
+pub fn frame_dt_from(prev: Option<f64>, now: f64) -> Option<f32> {
+    let dt = now - prev?;
+    if !(dt > 0.0 && dt < MAX_PLAUSIBLE_FRAME_SECS) {
+        return None;
+    }
+    Some(dt as f32)
+}
+
+/// The longest interval [`frame_dt_from`] will believe. See its rejection list.
+const MAX_PLAUSIBLE_FRAME_SECS: f64 = 0.25;
 
 /// Wall-clock seconds since the epoch, for the play history.
 ///

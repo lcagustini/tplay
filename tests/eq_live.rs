@@ -37,11 +37,11 @@ impl Source for TestSrc {
     fn current_span_len(&self) -> Option<usize> {
         Some(self.samples.len() - self.pos)
     }
-    fn channels(&self) -> u16 {
-        1
+    fn channels(&self) -> rodio::ChannelCount {
+        rodio::ChannelCount::new(1).expect("1 is not zero")
     }
-    fn sample_rate(&self) -> u32 {
-        self.sr
+    fn sample_rate(&self) -> rodio::SampleRate {
+        rodio::SampleRate::new(self.sr).expect("sample rate is never zero")
     }
     fn total_duration(&self) -> Option<Duration> {
         None
@@ -189,7 +189,11 @@ fn try_seek_forwards_to_inner_and_resets_filter_state() {
     // assert the stream resumes at the mid-file sample.
     let sr = 44100u32;
     let samples: Vec<f32> = (0..sr as usize * 2).map(|i| i as f32).collect();
-    let buf = SamplesBuffer::new(2, sr, samples);
+    let buf = SamplesBuffer::new(
+        rodio::ChannelCount::new(2).expect("channel count is not zero"),
+        rodio::SampleRate::new(sr).expect("sample rate is not zero"),
+        samples,
+    );
 
     // EQ enabled with a boost so the seek's filter-history reset is observable.
     let shared = Arc::new(RwLock::new(EqShared {

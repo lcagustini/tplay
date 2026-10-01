@@ -8,7 +8,7 @@
 //! layout has finite rects; `lay_out` + `finite` replicate that state.
 
 use eframe::egui::{pos2, vec2, Rect};
-use egui_dock::{DockState, NodeIndex, SurfaceIndex, TabIndex};
+use egui_dock::{DockState, NodeIndex, SurfaceIndex};
 use tplay::app::Pane;
 
 /// Mirror of `coordinator::default_tree` (NowPlaying above Playlist).
@@ -95,13 +95,15 @@ fn all_four_panes_survive_serialization() {
 #[test]
 fn removed_pane_is_gone_and_stays_gone() {
     let mut tree = two_pane_tree();
-    // remove_tab is how the coordinator closes a pane from the ☰ menu.
-    let (surface, node) = tree
+    // remove_tab is how the coordinator closes a pane from the ☰ menu. Since
+    // egui_dock 0.19 the path comes back whole from `iter_all_tabs`, so there
+    // is no tab index to guess.
+    let target = tree
         .iter_all_tabs()
         .find(|(_, t)| **t == Pane::Playlist)
-        .map(|((s, n), _)| (s, n))
+        .map(|(path, _)| path)
         .unwrap();
-    tree.remove_tab((surface, node, TabIndex(0)));
+    tree.remove_tab(target);
     assert_eq!(tree.iter_all_tabs().count(), 1);
     lay_out(&mut tree);
 
@@ -125,10 +127,10 @@ fn floating_window_round_trips() {
 
     let restored = round_trip(&tree);
 
-    let (surface, _) = restored
+    let surface = restored
         .iter_all_tabs()
         .find(|(_, t)| **t == Pane::Equalizer)
-        .map(|((s, n), _)| (s, n))
+        .map(|(path, _)| path.surface)
         .unwrap();
     assert_eq!(
         restored.iter_all_tabs().count(),
@@ -158,7 +160,7 @@ fn floating_window_size_hint_round_trips() {
     let surface = restored
         .iter_all_tabs()
         .find(|(_, t)| **t == Pane::Equalizer)
-        .map(|((s, _), _)| s)
+        .map(|(path, _)| path.surface)
         .unwrap();
 
     // set_size is what the coordinator applies to the EQ window's width; it

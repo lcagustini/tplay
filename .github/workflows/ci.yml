@@ -16,10 +16,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # cpal/ALSA is the only build-time system dep. X11, xkbcommon, wayland
-      # and GL all arrive via dlopen, and the tests are headless — no xvfb,
-      # no audio device.
-      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      # cpal/ALSA is the only build-time system dep. X11, xkbcommon and wayland
+      # arrive via dlopen, and the tests are headless — no xvfb, no audio device.
+      #
+      # mesa-vulkan-drivers is for `the_callback_paints_the_pane_and_nothing_
+      # outside_it`, the one test that runs a real wGPU device: lavapipe is a
+      # software Vulkan ICD, so it renders the view and reads the pixels back
+      # with no GPU. Without it that test skips, which is exactly how a broken
+      # viewport or a shader that draws nothing survives to a release.
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev mesa-vulkan-drivers
 
       - uses: dtolnay/rust-toolchain@stable
         with:

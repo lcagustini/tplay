@@ -52,8 +52,9 @@
 //! `mode_now` reads two disjoint halves of the band range, so `n < m` holds by
 //! construction.
 
+use super::frame_dt;
 use crate::audio::viz::{compute_bands, mode_now, VizBuf, DB_FLOOR, VIZ_BANDS};
-use crate::gui::panes::visualizer::gpu::{self, Target};
+use crate::gui::panes::visualizer::gpu;
 use crate::gui::theme::Palette;
 use eframe::egui;
 
@@ -65,10 +66,12 @@ fn mode_id() -> egui::Id {
     egui::Id::new("tplay.viz.chladni.mode")
 }
 
-pub const FRAG: &str = r#"
+/// This view's own functions. See `ShaderView::helpers` for why they are a
+/// separate slot from the body.
+pub const HELPERS: &str = r#"
 // The plate as a fraction of the pane's short side. A square, because stretching
 // it distorts the figure's symmetry, which is most of the content.
-const float PLATE_FRAC = 0.94;
+const PLATE_FRAC : f32 = 0.94;
 
 // The nodal set: |sin(pi n x) sin(pi m y) - sin(pi m x) sin(pi n y)|. `u_modes`
 // is the (n, m) pair `mode_now` read off the spectrum, which is where this view's
@@ -78,51 +81,51 @@ const float PLATE_FRAC = 0.94;
 // both numbers, so any real `n, m` is a valid cymatic figure rather than an
 // error — which is what lets the plate follow the music between one integer pair
 // and the next instead of waiting to be handed one.
-float field(vec2 p) {
-    float n = u_modes.x;
-    float m = u_modes.y;
-    float px = 3.14159265 * n * p.x;
-    float py = 3.14159265 * n * p.y;
-    float qx = 3.14159265 * m * p.x;
-    float qy = 3.14159265 * m * p.y;
+fn field(p : vec2<f32>) -> f32 {
+    let n = u_modes().x;
+    let m = u_modes().y;
+    let px = 3.14159265 * n * p.x;
+    let py = 3.14159265 * n * p.y;
+    let qx = 3.14159265 * m * p.x;
+    let qy = 3.14159265 * m * p.y;
     return abs(sin(px) * sin(qy) - sin(qx) * sin(py));
 }
+"#;
 
-void main() {
-    vec2 uv = v_uv;
-    vec2 centred = (uv - 0.5) * vec2(u_resolution.x / max(u_resolution.y, 1.0), 1.0);
+pub const FRAG: &str = r#"
+    let uv = v_uv;
+    let centred = (uv - 0.5) * vec2<f32>(u_resolution().x / max(u_resolution().y, 1.0), 1.0);
     // The plate, square and centred, in 0..1 over the pane's short side.
-    vec2 p = centred / PLATE_FRAC * 0.5;
+    let p = centred / PLATE_FRAC * 0.5;
 
-    float d = field(p);
+    let d = field(p);
 
     // The nodal line's half-width, from the field's own screen-space gradient.
     // This is what a fixed field-space cutoff cannot do: it makes the stroke fat
     // where the field is flat and hairline where it is steep, so the same figure
     // would be drawn at two different weights.
-    float w = max(fwidth(d) * 0.75, 1e-5);
-    float line = 1.0 - smoothstep(0.0, w, d);
+    let w = max(fwidth(d) * 0.75, 1e-5);
+    let line = 1.0 - smoothstep(0.0, w, d);
 
     // A second, wider band around the same line. One threshold alone reads as a
     // wireframe; the falloff is what reads as sand settled into a plate, and it
     // is free here because the field is already evaluated.
-    float glow = 1.0 - smoothstep(0.0, 0.42, d);
+    let glow = 1.0 - smoothstep(0.0, 0.42, d);
 
     // Off the plate, and a fade at its edge so the figure does not end on a hard
     // rectangle. Both multiply out rather than branch, because `fwidth` above has
     // to be reached by *every* fragment — a derivative taken in non-uniform
     // control flow is undefined, and a shader that returned early for the
     // off-plate fragments would never reach it at all.
-    float extent = max(abs(p.x), abs(p.y));
-    float on_plate = step(extent, 1.0);
-    float edge = 1.0 - smoothstep(0.92, 1.0, extent);
+    let extent = max(abs(p.x), abs(p.y));
+    let on_plate = step(extent, 1.0);
+    let edge = 1.0 - smoothstep(0.92, 1.0, extent);
 
     // The same body/edge split bars.rs and the flame view make: a dim mass in the
     // accent, the sharp nodal set in the brighter token.
-    vec3 col = mix(u_bg.rgb, u_accent.rgb, glow * 0.30);
-    col = mix(col, u_progress_fill.rgb, line);
-    frag_color = vec4(mix(u_bg.rgb, col, edge * on_plate), 1.0);
-}
+    var col = mix(u_bg().rgb, u_accent().rgb, glow * 0.30);
+    col = mix(col, u_progress_fill().rgb, line);
+    frag_color = vec4<f32>(mix(u_bg().rgb, col, edge * on_plate), 1.0);
 "#;
 
 pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &Palette) {
@@ -143,9 +146,9 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &P
     // Release is faster than attack, so a band that stops being loud stops holding
     // the figure. The other direction is a transient, and a transient should not
     // win a plate.
-    const ATTACK: f32 = 0.3;
-    const RELEASE: f32 = 0.6;
-    compute_bands(viz, &mut prev, ATTACK, RELEASE);
+    const ATTACK_MS: f32 = 46.7;
+    const RELEASE_MS: f32 = 18.2;
+    compute_bands(viz, &mut prev, frame_dt(painter), ATTACK_MS, RELEASE_MS);
 
     // Read the plate off the smoothed levels, every frame. `prev` is here only to
     // be held on silence, where there is no energy to have an opinion — there is
@@ -161,5 +164,5 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &P
 
     let mut uniforms = gpu::Uniforms::pack(viz, prev, palette, rect, painter.ctx());
     uniforms.modes = modes.into();
-    gpu::add_fullscreen(painter, rect, FRAG, uniforms, Target::Screen);
+    gpu::add_fullscreen(painter, rect, HELPERS, FRAG, uniforms);
 }

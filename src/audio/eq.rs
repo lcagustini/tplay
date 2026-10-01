@@ -246,7 +246,10 @@ where
     S: Source<Item = f32>,
 {
     pub fn new(inner: S, shared: Arc<RwLock<EqShared>>) -> Self {
-        let sample_rate = inner.sample_rate();
+        // rodio 0.22 types the rate as `NonZero<u32>`; the filter coefficients
+        // and this struct's own field are plain `u32`, so unwrap it once here
+        // rather than carrying the newtype through the whole chain.
+        let sample_rate = inner.sample_rate().get();
         let (gains, enabled) = {
             let state = shared.read().unwrap_or_else(PoisonError::into_inner);
             (state.gains, state.enabled)
@@ -327,11 +330,11 @@ where
         self.inner.current_span_len()
     }
 
-    fn channels(&self) -> u16 {
+    fn channels(&self) -> rodio::ChannelCount {
         self.inner.channels()
     }
 
-    fn sample_rate(&self) -> u32 {
+    fn sample_rate(&self) -> rodio::SampleRate {
         self.inner.sample_rate()
     }
 

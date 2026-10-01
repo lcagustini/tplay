@@ -183,7 +183,12 @@ impl TestApp {
     /// a `pump` of N seconds means roughly N seconds of the track.
     pub fn new(name: &str) -> Self {
         let dir = test_dir(name);
-        let (mixer, driver) = rodio::mixer::mixer(2, 44_100);
+        // rodio 0.22 types both mixer arguments as `NonZero`, so the two
+        // constants below are wrapped rather than passed bare.
+        let (mixer, driver) = rodio::mixer::mixer(
+            rodio::ChannelCount::new(2).expect("2 is not zero"),
+            rodio::SampleRate::new(44_100).expect("44_100 is not zero"),
+        );
         let config = tplay::config::Config {
             library: tplay::config::LibraryData {
                 last_dir: dir.to_string_lossy().into_owned(),
@@ -242,7 +247,11 @@ impl TestApp {
         // A real driver has to take its place, because `self.driver` is moved.
         // A detached, never-pumped one is the cheapest stand-in: this method
         // hands the real driver to the thread below for the whole of `f`.
-        let spare = rodio::mixer::mixer(2, self.rate).1;
+        let spare = rodio::mixer::mixer(
+            rodio::ChannelCount::new(2).expect("2 is not zero"),
+            rodio::SampleRate::new(self.rate).expect("rate is not zero"),
+        )
+        .1;
         let driver = std::mem::replace(&mut self.driver, spare);
 
         let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));

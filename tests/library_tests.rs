@@ -401,7 +401,7 @@ fn symphonia_misreads_the_aiff_sample_rate() {
 
     let decoded = Decoder::try_from(fs::File::open(&path).unwrap()).expect("rodio decodes it");
     assert_eq!(
-        decoded.sample_rate(),
+        decoded.sample_rate().get(),
         3_904,
         "symphonia read the rate wrong. If it is now 8000, the bug is FIXED: add \
          \"aif\" and \"aiff\" back to library::AUDIO_EXTENSIONS (lofty already reads \

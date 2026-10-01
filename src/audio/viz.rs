@@ -11,8 +11,24 @@ use std::collections::VecDeque;
 use std::f32::consts::PI;
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
-/// Cap for the ring buffer (mono samples). 4096 @ 44.1 kHz ≈ 93 ms.
-pub const VIZ_BUFFER_CAP: usize = 4096;
+/// Cap for the ring buffer (mono samples). 16384 @ 44.1 kHz ≈ 372 ms.
+///
+/// **It has to exceed the audio device's `buffer_size`, and that is the whole
+/// reason it is this size.** cpal hands rodio a whole `buffer_size` per output
+/// callback — 8192 at the shipped default — and `TapSource::next` runs once per
+/// sample inside that one call. So the tap receives all 8192 samples at once,
+/// and `read_window`'s cursor then walks them out over the frames that follow.
+/// A ring smaller than one burst cannot hold the backlog: the cursor outruns the
+/// ring, `read_window` re-anchors to the newest sample, and the picture jumps
+/// again — measured at 8 distinct spectra over 22 frames with a 4096 ring, and a
+/// 20.9 dB step in one frame. 16384 holds two default bursts, so the cursor
+/// always has somewhere to walk.
+///
+/// `config.buffer_size` is clamped to 512..=65536 in `main.rs`, so a
+/// hand-set 65536 would outrun this again. That is a ceiling worth naming rather
+/// than a bug to design out: 65536 is 1.5 s of ring, and the visualizer
+/// tolerating it buys nothing.
+pub const VIZ_BUFFER_CAP: usize = 16384;
 /// FFT window size — power of two. 1024 gives ~43 Hz bins at 44.1 kHz.
 pub const FFT_SIZE: usize = 1024;
 /// Number of log-spaced output bands for drawing.
@@ -61,6 +77,24 @@ struct VizState {
     /// Until a source reports its own: only observable with nothing playing.
     rate: u32,
     buf: VecDeque<f32>,
+    /// How many samples have ever been pushed. An absolute index, so the
+    /// reader can tell "no audio yet" from "audio, and here is how far through
+    /// it we have read" without inspecting the ring.
+    written: u64,
+    /// The read cursor: an absolute index one past the newest sample a reader
+    /// has looked at. This is what makes the picture slide instead of jump.
+    /// See [`VizBuf::read_window`].
+    cursor: u64,
+    /// Set whenever the cursor moved, cleared by `take_arrival`.
+    advanced: bool,
+    /// Set by `push`, cleared by the next read. Separate from `advanced` because
+    /// a push is news on its own: a burst that arrived but whose backlog the
+    /// cursor has not reached yet is still audio that happened.
+    arrived_since_read: bool,
+    /// Has any read ever happened? The first read has no clock to spend and no
+    /// backlog to walk, so it takes the tail outright; without this the cursor
+    /// sits at `written = 0` and a cold buffer reads as empty.
+    started: bool,
 }
 
 /// Shared ring buffer for the tap source → GUI.
@@ -85,6 +119,11 @@ impl VizBuf {
             inner: Arc::new(Mutex::new(VizState {
                 rate: 44100,
                 buf: VecDeque::with_capacity(VIZ_BUFFER_CAP),
+                written: 0,
+                cursor: 0,
+                advanced: false,
+                arrived_since_read: false,
+                started: false,
             })),
         }
     }
@@ -106,18 +145,179 @@ impl VizBuf {
             state.buf.pop_front();
         }
         state.buf.push_back(sample);
+        state.written += 1;
+        state.arrived_since_read = true;
     }
 
-    /// The most recent `n` samples (GUI thread), oldest first, up to `n` long.
-    pub fn snapshot_tail(&self, n: usize) -> Vec<f32> {
-        let state = self.lock();
-        let len = state.buf.len().min(n);
-        state.buf.iter().rev().take(len).rev().copied().collect()
+    /// The newest `n` samples, ending at a cursor that **advances with the
+    /// clock** (GUI thread), oldest first.
+    ///
+    /// **This is the stutter fix, and the ring alone cannot do it.** Audio does
+    /// not reach the tap one sample at a time. `TapSource::next` is called from
+    /// inside rodio's mixer pull, and the mixer is pulled by cpal's output
+    /// callback, which asks for a whole `buffer_size` at a time — 8192 samples,
+    /// one call every ~186 ms at the shipped default. So `push` runs 8192 times
+    /// in a burst and then not at all for the rest of the period.
+    ///
+    /// A reader that takes "the newest `n` samples" therefore sees the **same
+    /// window** for ~22 frames at 120 fps and then a window of completely
+    /// different audio. Measured, that is **0 distinct spectra across 22 idle
+    /// frames**: the picture is frozen and then snaps, which is stutter, and no
+    /// frame rate removes it because the discontinuity is in the data. (It is
+    /// also why the judder got worse as the display got faster: a 186 ms hole
+    /// is 11 frames at 60 Hz, where it hides under the eye's persistence, and
+    /// 22 at 120 Hz, where it does not.)
+    ///
+    /// So the window ends at a **cursor** that advances by `rate * elapsed`
+    /// rather than jumping to the newest sample. A burst then feeds the cursor
+    /// over the frames that follow it, each frame reading a slightly later slice
+    /// of the audio, and the spectrum moves continuously. `dt` is clamped for the
+    /// same reason `feedback_for_a_dt` clamps it: a gap that is not a frame must
+    /// not be spent as one, and a burst that arrives late must still be consumed.
+    pub fn read_window(&self, n: usize, dt: f32) -> Vec<f32> {
+        let mut state = self.lock();
+        Self::read_locked(&mut state, n, dt, true).0
+    }
+
+    /// Read the window **without** advancing the cursor, and report whether the
+    /// cursor has moved since the last advancing read.
+    ///
+    /// **This exists because `read_window` had a side effect the app could not
+    /// see, and it cost the spectrogram its whole picture.** Every view calls
+    /// `compute_bands` *and* `compute_wave` (inside `Uniforms::pack`), so there
+    /// are two reads per frame. The second one consumed the arrival flag, and the
+    /// two feedback views — the only two that call `take_arrival`, and so the only
+    /// two whose picture depends on it — read nothing left. Trails kept its
+    /// previous frame; the spectrogram, which has no history of its own to fall
+    /// back on, showed nothing at all. A second read was never a second
+    /// *arrival*, so it must not move the cursor.
+    /// Move the cursor on without reading a window.
+    ///
+    /// **This exists for `wave`, and it is the view's whole reason for existing.**
+    /// Every other view advances the cursor as a side effect of `compute_bands`,
+    /// which it needs anyway. `wave` is the only view with no `compute_bands` call
+    /// — it is a function of time, not of frequency — so its cursor stood still
+    /// for 44 frames at a time (one ring's worth of audio), and the envelope it
+    /// drew was a frozen picture of one burst rather than a moving waveform. The
+    /// `wave` shader is correct for whatever window it is handed, which is exactly
+    /// why nothing in it was wrong.
+    ///
+    /// Advancing here rather than in `compute_wave` keeps the one-advancing-read
+    /// rule intact: `compute_wave` is called from `Uniforms::pack` for *every*
+    /// view, so if it advanced, the ten views that already advanced through
+    /// `compute_bands` would each spend the backlog twice per frame — the
+    /// spectrogram's blank again, by another route.
+    pub fn advance(&self, dt: f32) {
+        let mut state = self.lock();
+        Self::read_locked(&mut state, 0, dt, true);
+    }
+
+    pub fn read_window_peek(&self, n: usize) -> Vec<f32> {
+        let mut state = self.lock();
+        Self::read_locked(&mut state, n, 0.0, false).0
+    }
+
+    fn read_locked(state: &mut VizState, n: usize, dt: f32, advance: bool) -> (Vec<f32>, bool) {
+        let before = state.cursor;
+
+        // **The cursor is the newest sample the reader has looked at, and it is
+        // allowed to trail `written` by more than a window** — that trail is the
+        // backlog, and consuming it a little per frame is the entire fix. So the
+        // only thing that forces a jump is the trail outgrowing the ring, which
+        // is a seek or a track change rather than a burst.
+        let oldest = state.written.saturating_sub(state.buf.len() as u64);
+        // **The re-anchor is not gated on `advance`, and that is the fix for the
+        // wave view.** A cursor behind the ring is not a lagging cursor, it is an
+        // invalid index — the samples it names are gone — so repairing it is not
+        // part of consuming the backlog. `wave` is the only view with no
+        // `compute_bands` call, so it is the only one whose cursor never advances;
+        // with the anchor inside `if advance` its cursor sat wherever `clear` left
+        // it while the ring turned over under it, and after one ring's worth of
+        // audio (~372 ms) every peek read an empty window. An empty wave envelope
+        // and a subtraction wrap are the same bug, and the second one only showed
+        // up in a debug build.
+        //
+        // An advancing read is unaffected: its own arm below reaches the same
+        // place, and a read that has never run anchors at `written` either way.
+        if state.cursor < oldest {
+            state.cursor = state.written;
+        }
+        if advance {
+            if !state.started {
+                // The first read has no backlog to walk and possibly no clock to
+                // spend, so start at the newest sample and mark the buffer read.
+                state.started = true;
+                state.cursor = state.written;
+            }
+            if dt > 0.0 {
+                let want = (state.rate as f32 * dt.min(Self::MAX_CATCHUP_SECS)) as u64;
+                state.cursor = state.cursor.saturating_add(want).min(state.written);
+            }
+        }
+        // **Any read folds a pending arrival into the flag, and only ever ORs.**
+        // Two rules, both learned the hard way:
+        //
+        // - *Any* read, not just an advancing one. A `push` between two reads in
+        //   one frame is still an arrival, and only an advancing read folding it
+        //   in meant a frame whose reads were all peeks reported nothing — which
+        //   is the spectrogram's blank again, by a different route.
+        // - *OR*, never assign. Assigning is what broke it outright: a second
+        //   read in the same frame overwrote a true with a false.
+        state.advanced = state.advanced || state.arrived_since_read || state.cursor != before;
+        state.arrived_since_read = false;
+
+        // The `n` samples ending at `cursor`. Ring offsets count back from the
+        // newest sample, so the cursor maps to `cursor - oldest` and the window is
+        // the `n` before it. A cursor nearer the oldest than `n` yields a short
+        // window, which the FFT caller treats as "not enough data yet".
+        //
+        // **`saturating_sub`, and the peek-only view is why.** The re-anchor above
+        // is inside `if advance`, so a view that only ever peeks never re-anchors.
+        // `wave` is the one: it is the only view with no `compute_bands` call, so
+        // its cursor sits at whatever `clear` left there and the ring turns over
+        // underneath it — after one ring's worth of audio (~372 ms at 44.1 kHz)
+        // `cursor < oldest`, and unsigned subtraction panics in a debug build. The
+        // `.min(len)` is then what keeps a release build honest: a wrapping
+        // subtraction lands near 2^64 and only this caps the window at the ring.
+        let len = state.buf.len();
+        let end = (state.cursor.saturating_sub(oldest) as usize).min(len);
+        let start = end.saturating_sub(n);
+        let window = state
+            .buf
+            .iter()
+            .skip(start)
+            .take(end - start)
+            .copied()
+            .collect();
+        (window, state.advanced)
+    }
+
+    /// The longest span a single `read_window` will consume, so one late frame
+    /// cannot spend the whole backlog in one step.
+    const MAX_CATCHUP_SECS: f32 = 0.25;
+
+    /// Did the read cursor move since the last caller asked? **Consumes the
+    /// answer**, so one arrival is one frame's worth of history rather than one
+    /// per viewer.
+    ///
+    /// This is the whole of "the visualizer pauses with the song", and it is here
+    /// rather than in the pane because the pane cannot see the audio thread. A
+    /// view holds a *history*, and a history of nothing is not a picture — while
+    /// paused nothing is pushed, the cursor has nothing left to consume, and it
+    /// stops moving.
+    pub fn take_arrival(&self) -> bool {
+        std::mem::replace(&mut self.lock().advanced, false)
     }
 
     /// Clear the buffer (e.g. on track load/stop).
     pub fn clear(&self) {
-        self.lock().buf.clear();
+        let mut state = self.lock();
+        state.buf.clear();
+        state.written = 0;
+        state.cursor = 0;
+        state.advanced = false;
+        state.arrived_since_read = false;
+        state.started = false;
     }
 
     /// The shared state, absorbing a poisoned lock rather than unwrapping it:
@@ -149,10 +349,12 @@ where
     S: Source<Item = f32>,
 {
     pub fn new(inner: S, buf: VizBuf) -> Self {
-        let channels = inner.channels();
+        // rodio 0.22 types both as `NonZero`; the ring buffer's own frame count
+        // and rate are plain integers, so unwrap them at the boundary.
+        let channels = inner.channels().get();
         // The band→bin mapping needs the real rate; a source is the only thing
         // that knows it.
-        buf.set_rate(inner.sample_rate());
+        buf.set_rate(inner.sample_rate().get());
         Self {
             inner,
             buf,
@@ -194,11 +396,11 @@ where
         self.inner.current_span_len()
     }
 
-    fn channels(&self) -> u16 {
+    fn channels(&self) -> rodio::ChannelCount {
         self.inner.channels()
     }
 
-    fn sample_rate(&self) -> u32 {
+    fn sample_rate(&self) -> rodio::SampleRate {
         self.inner.sample_rate()
     }
 
@@ -291,9 +493,54 @@ pub fn fft_magnitude(input: &mut [f32]) -> Vec<f32> {
 
 /// Compute log-spaced band magnitudes from the most recent audio samples.
 /// Returns `VIZ_BANDS` values in dB (0 dB = full scale), smoothed externally.
-pub fn compute_bands(viz: &VizBuf, prev: &mut [f32; VIZ_BANDS], attack: f32, release: f32) {
-    // Snapshot enough for one FFT window
-    let mut samples = viz.snapshot_tail(FFT_SIZE);
+/// The per-frame fraction of a one-pole smoother, given its time constant.
+///
+/// **The band smoothing is the last per-frame coefficient in this file, and it is
+/// wrong for the same reason `feedback_for_a_dt` and `PLATE_TAU` were.** A fixed
+/// fraction per frame is a fixed fraction per frame *whatever the frame rate*: at
+/// 60 fps an attack of `0.3` closes in about 47 ms, and on a 120 Hz display the
+/// same `0.3` closes in about 28 ms — half the smoothing, on the same music. It
+/// is not a small difference here: a percussive spectrum moves a band by ~10 dB
+/// between consecutive frames, which at this pane's height is ~57 px of bar
+/// travel, so the attack is the only thing standing between that and a juddering
+/// picture. Measured on a 120 Hz output, the coefficients really were smoothing
+/// at half their intended strength.
+///
+/// The time constant is what the view means ("a 47 ms attack"), so that is what a
+/// view now writes down, and the fraction is derived per frame from `dt`. **At 60
+/// Hz this reproduces the old numbers to within a rounding error**, so a 60 Hz
+/// display is unchanged and only the higher-refresh case moves — the property that
+/// makes this safe to do without being able to look at it.
+///
+/// Both degenerate inputs are guarded, for the reason
+/// [`feedback_for_a_dt`](crate::audio::viz::feedback_for_a_dt) gives: a clock that
+/// cannot be trusted must not move anything, and a zero time constant is not
+/// smoothing at all rather than a division by zero.
+pub fn smoothing_for_a_dt(dt: f32, tau_ms: f32) -> f32 {
+    if dt <= 0.0 {
+        return 0.0;
+    }
+    if tau_ms <= 0.0 {
+        return 1.0;
+    }
+    1.0 - (-(dt * 1000.0) / tau_ms).exp()
+}
+
+/// `attack_ms` / `release_ms` are **time constants in milliseconds**, not per-frame
+/// fractions — see [`smoothing_for_a_dt`] for why, and for the `dt` clock's own
+/// caveat.
+pub fn compute_bands(
+    viz: &VizBuf,
+    prev: &mut [f32; VIZ_BANDS],
+    dt: f32,
+    attack_ms: f32,
+    release_ms: f32,
+) {
+    let attack = smoothing_for_a_dt(dt, attack_ms);
+    let release = smoothing_for_a_dt(dt, release_ms);
+    // One FFT window, ending at the read cursor so the window slides rather than
+    // jumping a whole audio burst at a time.
+    let mut samples = viz.read_window(FFT_SIZE, dt);
     if samples.len() < FFT_SIZE {
         // Not enough data yet — decay previous values toward -60 dB (noise floor)
         for v in prev.iter_mut() {
@@ -598,7 +845,11 @@ pub fn mode_now(bands: &[f32; VIZ_BANDS], prev: (f32, f32), dt: f32) -> (f32, f3
 /// its GLSL declaration and the harness interpolates that one.
 pub fn compute_wave(viz: &VizBuf, buckets: usize) -> Vec<f32> {
     const WAVE_WINDOW: usize = 1024;
-    let samples = viz.snapshot_tail(WAVE_WINDOW);
+    // **A peek, not an advancing read.** `compute_bands` already advanced the
+    // cursor this frame, and `Uniforms::pack` runs both, so advancing here too
+    // would spend the backlog twice per frame — which is what took the
+    // spectrogram's picture. See `read_window_peek`.
+    let samples = viz.read_window_peek(WAVE_WINDOW);
     if samples.is_empty() {
         return vec![0.0; buckets.max(1)];
     }

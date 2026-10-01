@@ -11,6 +11,17 @@ use tplay::audio::viz::{VizBuf, VIZ_BANDS, WAVE_BUCKETS};
 use tplay::gui::panes::visualizer::views::SHADER_VIEWS;
 use tplay::gui::theme::{rasterize_icon, Base, Icon, Layout, Themes, DEFAULT_THEME_ID};
 
+/// One headless frame, with the output disposed of.
+///
+/// egui 0.36 makes dropping an unapplied `TexturesDelta` a `debug_assert`, and
+/// a frame that loads a font or rasterizes an icon produces one — so a test that
+/// only cares about geometry or emitted shapes still has to say it means to throw
+/// the output away. This is what egui's own `run_ui` doc example does, and it is
+/// the only reason the frame helper exists rather than a bare `ctx.run_ui`.
+fn headless(ctx: &egui::Context, raw: egui::RawInput, f: impl FnMut(&mut egui::Ui)) {
+    ctx.run_ui(raw, f).drop_without_applying_deltas();
+}
+
 #[test]
 fn themes_loads_builtin_dark_theme() {
     let themes = Themes::load();
@@ -66,8 +77,9 @@ fn coordinator_applies_theme_visuals() {
     // This should not panic
     tplay::gui::theme::apply(&ctx, theme);
 
-    // Visuals should be modified
-    let visuals = ctx.style().visuals.clone();
+    // Visuals should be modified. `ctx.style()` is gone in egui 0.36;
+    // `style_of(ctx.theme())` is the style it returned.
+    let visuals = ctx.style_of(ctx.theme()).visuals.clone();
     assert_ne!(visuals.panel_fill, egui::Color32::default());
 }
 
@@ -143,6 +155,18 @@ fn default_theme_id_constant() {
 /// *and* advances the layout cursor (a bare `new_child` leaves the next row
 /// drawn on top), while a raw `new_child` does *not* propagate its min_rect
 /// upward (which is what contains the overflow).
+///
+/// **Two of the three traps are gone, and their premises were deleted rather
+/// than loosened.** Under 0.36 the overflow no longer widens anything this pane
+/// can see: `ui.vertical` + `set_min_width` measures exactly `SIDEBAR` with a
+/// 48-character address in it (0.30 reported >140), and an unwrapped form leaves
+/// the scroll content at `FORM_W` rather than past it. So `clip_text` +
+/// `desired_width` contain the field on their own now, and asserting a widening
+/// that no longer happens would be asserting that egui has a bug. The
+/// cursor-advance trap is the one that remains — a bare `new_child` still leaves
+/// the sibling drawn on top — so that premise guards the half of the fix still
+/// doing work. The assertions below stand on their own either way: they are the
+/// sidebar's geometry contract, not a claim about which egui bug produced it.
 #[test]
 fn sidebar_column_and_scroll_content_ignore_textedit_overflow() {
     const SIDEBAR: f32 = 120.0;
@@ -152,12 +176,8 @@ fn sidebar_column_and_scroll_content_ignore_textedit_overflow() {
 
     #[derive(Clone, Copy)]
     enum Shape {
-        /// `ui.vertical` + `set_min_width`: the original width bug.
-        Vertical,
         /// `new_child` without advancing the cursor: the sibling overlaps.
         ChildNoAdvance,
-        /// Sidebar fixed, but the form NOT wrapped: content still grows.
-        UnwrappedForm,
         /// The fix: sidebar and form both in fixed-rect children.
         Fixed,
     }
@@ -174,13 +194,15 @@ fn sidebar_column_and_scroll_content_ignore_textedit_overflow() {
         let out = std::cell::Cell::new((0.0f32, 0.0f32, 0.0f32));
         let content_w = std::cell::Cell::new(0.0f32);
         let ctx = egui::Context::default();
-        let _ = ctx.run(raw, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        headless(&ctx, raw, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 ui.horizontal_top(|ui| {
                     let mut text = text.to_string();
 
-                    // The scroll content, including the fixed-rect form.
-                    let mut sidebar_body = |ui: &mut egui::Ui, wrap_form: bool| {
+                    // The scroll content. The form is always in the fixed-rect
+                    // child now: the unwrapped variant only existed to premise
+                    // the scroll-content hazard, and 0.36 no longer exhibits it.
+                    let mut sidebar_body = |ui: &mut egui::Ui| {
                         let scroll_h = (ui.available_height() - 8.0).max(40.0);
                         let sa = egui::ScrollArea::vertical()
                             .id_salt("places_favorites")
@@ -190,24 +212,13 @@ fn sidebar_column_and_scroll_content_ignore_textedit_overflow() {
                                 ui.label("Network");
                                 let gap = ui.spacing().item_spacing.y;
                                 let form_h = 3.0 * (FIELD_H + gap) + ui.spacing().interact_size.y;
-                                if wrap_form {
-                                    let (_, frect) = ui.allocate_space(egui::vec2(FORM_W, form_h));
-                                    let mut f = ui.new_child(
-                                        egui::UiBuilder::new()
-                                            .max_rect(frect)
-                                            .layout(egui::Layout::top_down(egui::Align::Min)),
-                                    );
-                                    f.vertical(|ui| {
-                                        for _ in 0..3 {
-                                            ui.add_sized(
-                                                egui::vec2(FORM_W, FIELD_H),
-                                                egui::TextEdit::singleline(&mut text)
-                                                    .clip_text(true)
-                                                    .desired_width(FORM_W),
-                                            );
-                                        }
-                                    });
-                                } else {
+                                let (_, frect) = ui.allocate_space(egui::vec2(FORM_W, form_h));
+                                let mut f = ui.new_child(
+                                    egui::UiBuilder::new()
+                                        .max_rect(frect)
+                                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                                );
+                                f.vertical(|ui| {
                                     for _ in 0..3 {
                                         ui.add_sized(
                                             egui::vec2(FORM_W, FIELD_H),
@@ -216,7 +227,7 @@ fn sidebar_column_and_scroll_content_ignore_textedit_overflow() {
                                                 .desired_width(FORM_W),
                                         );
                                     }
-                                }
+                                });
                             });
                         content_w.set(sa.content_size.x);
                     };
@@ -227,13 +238,6 @@ fn sidebar_column_and_scroll_content_ignore_textedit_overflow() {
                     // assigned per arm, which needed an `#[allow]` for a
                     // never-read `0.0` initializer.
                     let sidebar_w = match shape {
-                        Shape::Vertical => {
-                            let inner = ui.vertical(|ui| {
-                                ui.set_min_width(SIDEBAR);
-                                sidebar_body(ui, false);
-                            });
-                            inner.response.rect.width()
-                        }
                         Shape::ChildNoAdvance => {
                             let rect = egui::Rect::from_min_size(
                                 ui.min_rect().min,
@@ -244,10 +248,10 @@ fn sidebar_column_and_scroll_content_ignore_textedit_overflow() {
                                     .max_rect(rect)
                                     .layout(egui::Layout::top_down(egui::Align::Min)),
                             );
-                            sidebar_body(&mut child, true);
+                            sidebar_body(&mut child);
                             rect.width()
                         }
-                        Shape::UnwrappedForm | Shape::Fixed => {
+                        Shape::Fixed => {
                             let (_, rect) =
                                 ui.allocate_space(egui::vec2(SIDEBAR, ui.available_height()));
                             let mut child = ui.new_child(
@@ -255,7 +259,7 @@ fn sidebar_column_and_scroll_content_ignore_textedit_overflow() {
                                     .max_rect(rect)
                                     .layout(egui::Layout::top_down(egui::Align::Min)),
                             );
-                            sidebar_body(&mut child, matches!(shape, Shape::Fixed));
+                            sidebar_body(&mut child);
                             rect.width()
                         }
                     };
@@ -269,28 +273,14 @@ fn sidebar_column_and_scroll_content_ignore_textedit_overflow() {
         out.get()
     }
 
-    // Premise A: `ui.vertical` sizes the column by its min_rect, which the
-    // overflow grows — the original bug.
-    let (vertical_w, _, _) = layout(Shape::Vertical, LONG);
-    assert!(
-        vertical_w > SIDEBAR + 20.0,
-        "premise: ui.vertical sidebar should widen with long text, got {vertical_w}"
-    );
-
-    // Premise B: a bare `new_child` never advances the horizontal cursor, so the
-    // file-list sibling lands at the same x and draws over the sidebar.
+    // Premise: a bare `new_child` never advances the horizontal cursor, so the
+    // file-list sibling lands at the same x and draws over the sidebar. This is
+    // the one hazard of the three that 0.36 has not fixed, and the one the
+    // `allocate_space` half of the fix exists for.
     let (_, overlap_x, _) = layout(Shape::ChildNoAdvance, LONG);
     assert!(
         overlap_x < SIDEBAR,
         "premise: new_child without allocate_space should overlap, sibling x={overlap_x}"
-    );
-
-    // Premise C: fixing only the column leaves the scroll content growing —
-    // which is what kept dragging the scrollbar.
-    let (_, _, unwrapped_content) = layout(Shape::UnwrappedForm, LONG);
-    assert!(
-        unwrapped_content > FORM_W + 20.0,
-        "premise: an unwrapped form should still widen the scroll content, got {unwrapped_content}"
     );
 
     // The fix: column pinned, sibling beside it, and scroll content invariant.
@@ -401,8 +391,8 @@ fn right_to_left_center_does_not_swallow_the_column() {
         let mut scroll_top = f32::NAN;
         // `Context::run` returns a `#[must_use]` FullOutput; this test only cares
         // about the side effects on the Cells below.
-        let _ = ctx.run(raw, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        headless(&ctx, raw, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 ui.horizontal_top(|ui| {
                     // Sidebar, exactly as the pane allocates it.
                     let (_, side) = ui.allocate_space(vec2(120.0, ui.available_height()));
@@ -664,14 +654,16 @@ fn the_playlist_pane_leaves_its_list_the_height_it_was_given() {
             ..Default::default()
         };
         let mut claimed = 0.0f32;
-        let _ = ctx.run(raw, |ctx| {
-            let themes = ThemeState::load(ctx, tplay::gui::theme::Themes::load(), "dark");
-            egui::CentralPanel::default().show(ctx, |ui| {
+        headless(&ctx, raw, |ui| {
+            let themes = ThemeState::load(ui.ctx(), tplay::gui::theme::Themes::load(), "dark");
+            egui::CentralPanel::default().show(ui, |ui| {
+                // 0.36 removed `Ui::allocate_new_ui`; `new_child` with the same
+                // `max_rect` is what is left, and for this measurement it is the
+                // same thing — the claim under test is the *child*'s min_rect.
                 let rect = ui.available_rect_before_wrap();
-                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
-                    playlist_pane(&mut t.app, &themes, ui);
-                    claimed = ui.min_rect().height();
-                });
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+                playlist_pane(&mut t.app, &themes, &mut child);
+                claimed = child.min_rect().height();
             });
         });
 
@@ -720,9 +712,9 @@ fn the_visualizer_floor_matches_the_bars_sampling_limit() {
         ..Default::default()
     };
     let (mut min_h, mut min_w) = (0.0f32, 0.0f32);
-    let _ = ctx.run(raw, |ctx| {
-        let themes = ThemeState::load(ctx, tplay::gui::theme::Themes::load(), "dark");
-        egui::CentralPanel::default().show(ctx, |ui| {
+    headless(&ctx, raw, |ui| {
+        let themes = ThemeState::load(ui.ctx(), tplay::gui::theme::Themes::load(), "dark");
+        egui::CentralPanel::default().show(ui, |ui| {
             visualizer_pane(&mut t.app, &themes, ui);
         });
         min_h = ctx.data(|d| {
@@ -782,10 +774,11 @@ fn the_visualizer_floor_matches_the_bars_sampling_limit() {
 ///   `allocate_space` — reserving nothing is what would collapse the scrollbar.
 ///   So the one test covering this code asserted the exact property the bug
 ///   preserved. A `min_rect` assertion cannot catch a missing row, ever.
-/// - **The gate was only reachable in a real `ScrollArea`.** A harness using
-///   `allocate_new_ui` gives a finite cursor, so a test written that way passes
-///   with the bug present. Hence the `DockArea` below: the panes are driven
-///   through the same nesting the app uses, tab bodies and all.
+/// - **The gate was only reachable in a real `ScrollArea`.** A harness that
+///   hands the pane a child `Ui` of a known rect (as the pane test above does,
+///   via `new_child`) gives it a finite cursor, so a test written that way
+///   passes with the bug present. Hence the `DockArea` below: the panes are
+///   driven through the same nesting the app uses, tab bodies and all.
 ///
 /// The `Draw` count is checked against the rows that physically fit rather than
 /// against the total, so this also pins the other half of the contract: the
@@ -823,6 +816,11 @@ fn both_lists_emit_the_rows_that_fit() {
     }
     impl egui_dock::TabViewer for Viewer<'_> {
         type Tab = Pane;
+        // Mandatory since egui_dock 0.21; the app's own viewer keys a pane the
+        // same way, so a tab's identity here matches what the panes will see.
+        fn id(&mut self, tab: &mut Pane) -> egui::Id {
+            egui::Id::new("tplay.pane").with(tab)
+        }
         fn title(&mut self, tab: &mut Pane) -> egui::WidgetText {
             format!("{tab:?}").into()
         }
@@ -867,18 +865,21 @@ fn both_lists_emit_the_rows_that_fit() {
     // that the next repaint silently undoes.
     let mut drawn = 0;
     for _ in 0..2 {
-        let out = ctx.run(raw.clone(), |ctx| {
-            let themes = ThemeState::load(ctx, tplay::gui::theme::Themes::load(), "dark");
+        let out = ctx.run_ui(raw.clone(), |ui| {
+            let themes = ThemeState::load(ui.ctx(), tplay::gui::theme::Themes::load(), "dark");
             let mut viewer = Viewer {
                 app: &mut t.app,
                 themes: &themes,
             };
-            egui::CentralPanel::default().show(ctx, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 egui_dock::DockArea::new(&mut tree).show_inside(ui, &mut viewer);
             });
         });
         let themes = ThemeState::load(&ctx, tplay::gui::theme::Themes::load(), "dark");
         drawn = drawn_rows(&out, &themes.current().palette);
+        // The emitted shapes are the measurement; the atlas deltas are not.
+        // See `headless`.
+        out.drop_without_applying_deltas();
     }
 
     // The Library's 40 rows and the Playlist's 40 rows, in two half-height panes:
@@ -1070,8 +1071,10 @@ mod breadcrumb {
 /// separate gates for the same reason.
 mod shader_views {
     use super::*;
-    use tplay::gui::panes::visualizer::gpu;
-    use tplay::gui::theme::Palette;
+    use eframe::egui;
+    use eframe::egui_wgpu::{CallbackTrait, ScreenDescriptor};
+    use tplay::gui::panes::visualizer::{gpu, views};
+    use tplay::gui::theme::{Palette, Themes};
 
     fn src(relative: &str) -> String {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
@@ -1112,14 +1115,16 @@ mod shader_views {
             .get(DEFAULT_THEME_ID)
             .expect("the default theme is always present")
             .palette;
-        ctx.run(egui::RawInput::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 if let Some(draw) = draw {
                     draw(ui.painter(), rect, viz, &palette);
                 }
             });
-        })
-        .shapes
+        });
+        let shapes = out.shapes.clone();
+        out.drop_without_applying_deltas();
+        shapes
     }
 
     fn callbacks(shapes: &[egui::epaint::ClippedShape]) -> Vec<&egui::PaintCallback> {
@@ -1146,25 +1151,38 @@ mod shader_views {
             "the table is empty, so this sweep would pass vacuously"
         );
         let (rect, viz) = pane();
-        for view in SHADER_VIEWS {
-            let shapes = primitives(Some(view.draw), &viz, rect);
-            let cbs = callbacks(&shapes);
-            assert_eq!(
-                cbs.len(),
-                1,
-                "{}: a shader view must queue exactly one callback — the callback body \
-                 runs inside the paint, so more than one is more than one fullscreen \
-                 draw (got {} callbacks in {} primitives)",
-                view.name,
-                cbs.len(),
-                shapes.len()
-            );
-            assert_eq!(
-                cbs[0].rect, rect,
-                "{}: the callback must cover the pane rect it was handed, or it paints \
-                 over the header or nothing at all",
-                view.name
-            );
+        // **Both arms, because a held frame is a different code path and it is the
+        // one that was once wrong.** `take_arrival` *consumes*, so `pane`'s 4096
+        // pushes are one arrival: the first view in the loop below would record
+        // audio and the other eight would hold, which makes the arms depend on
+        // iteration order rather than being covered. A feedback view that skips
+        // queueing its callback while holding does not look paused — it looks
+        // gone, since the pane falls back to its own background. That is the exact
+        // failure the hold was built to avoid.
+        for (arm, arriving) in [("advancing", true), ("held", false)] {
+            if arriving {
+                viz.push(0.5);
+            }
+            for view in SHADER_VIEWS {
+                let shapes = primitives(Some(view.draw), &viz, rect);
+                let cbs = callbacks(&shapes);
+                assert_eq!(
+                    cbs.len(),
+                    1,
+                    "{} ({arm}): a shader view must queue exactly one callback — the callback \
+                     body runs inside the paint, so more than one is more than one fullscreen \
+                     draw (got {} callbacks in {} primitives)",
+                    view.name,
+                    cbs.len(),
+                    shapes.len()
+                );
+                assert_eq!(
+                    cbs[0].rect, rect,
+                    "{} ({arm}): the callback must cover the pane rect it was handed, or it \
+                     paints over the header or nothing at all",
+                    view.name
+                );
+            }
         }
     }
 
@@ -1203,7 +1221,7 @@ mod shader_views {
         const EXEMPT: &[&str] = &["Bars", "Spectrogram"];
         /// The property that makes a view "round": it measures a distance, turns
         /// an angle, or takes a cross-section.
-        const ROUND_SHAPES: &[&str] = &["length(", "atan(", "exp(-", "tongue("];
+        const ROUND_SHAPES: &[&str] = &["length(", "atan2(", "exp(-", "tongue("];
         /// Code lines only, so a mention *inside a comment* does not count as the
         /// view reading it. A whole-file `contains` is the version of this test
         /// that a mutation walked straight through: reverting a view's aspect
@@ -1243,10 +1261,10 @@ mod shader_views {
             // level in.
             const CORRECTED: &[&str] = &[
                 // A two-axis centred coordinate, with the ratio bound or inline.
-                "centred = (uv - 0.5) * vec2(aspect, 1.0)",
-                "centred = (uv - 0.5) * vec2(u_resolution.x / max(u_resolution.y, 1.0), 1.0)",
+                "centred = (uv - 0.5) * vec2<f32>(aspect, 1.0)",
+                "centred = (uv - 0.5) * vec2(u_resolution().x / max(u_resolution().y, 1.0), 1.0)",
                 // A one-axis cross-section coordinate: `flame`'s `x`.
-                "x = (uv.x - 0.5) * (u_resolution.x / max(u_resolution.y, 1.0))",
+                "x = (uv.x - 0.5) * (u_resolution().x / max(u_resolution().y, 1.0))",
                 "x = (uv.x - 0.5) * aspect",
             ];
             assert!(
@@ -1255,7 +1273,7 @@ mod shader_views {
                  corrected, so on a non-square pane the round shape is drawn \
                  distorted in proportion to how far from square the pane is. Correct \
                  the coordinate the shape is measured in, as \
-                 `centred = (uv - 0.5) * vec2(aspect, 1.0)`."
+                 `centred = (uv - 0.5) * vec2<f32>(aspect, 1.0)`."
             );
         }
     }
@@ -1270,13 +1288,19 @@ mod shader_views {
     /// an arithmetic slip. The division back is what makes it the same point.
     #[test]
     fn a_feedback_view_uncorrects_the_aspect_before_sampling() {
+        let mut checked = 0usize;
         for (name, body) in bodies() {
             // Only a view that *transforms* into the corrected space can get this
-            // wrong, and only one that samples by `texture` afterwards. The
-            // spectrogram's accumulate pass is `texelFetch` in whole texels and
-            // its present pass samples with `v_uv` directly, so it has no
-            // corrected coordinate to divide back — asking it to would be asking
-            // for a property it deliberately does not have.
+            // wrong, and only one that samples the feedback target afterwards. The
+            // spectrogram's accumulate pass is `textureLoad` in whole texels and
+            // its present pass samples with `v_uv` directly, so it has no corrected
+            // coordinate to divide back — asking it to would be asking for a
+            // property it deliberately does not have.
+            //
+            // Both halves are properties rather than a list of view names, because
+            // a name list is a thing that rots: `radial` builds exactly this
+            // coordinate and samples nothing, and when this sweep did run it failed
+            // on `radial` for exactly that reason.
             let code: String = body
                 .lines()
                 .map(|l| match l.find("//") {
@@ -1285,9 +1309,12 @@ mod shader_views {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            if !code.contains("centred = (uv - 0.5) * vec2(aspect, 1.0)") {
+            if !code.contains("centred = (uv - 0.5) * vec2<f32>(aspect, 1.0)")
+                || !code.contains("u_prev")
+            {
                 continue;
             }
+            checked += 1;
             // **The invariant is a round trip, and that is what is asserted.** A
             // corrected coordinate that is sampled without being divided back
             // reads a mirrored point and shears the whole trail; one that is
@@ -1297,16 +1324,29 @@ mod shader_views {
             // intermediate is a *variable* — the dataflow is one statement
             // removed, not a name changed.
             assert!(
-                code.contains("/ vec2(aspect, 1.0)) + 0.5")
-                    || code.contains("/ vec2(aspect, 1.0)) + 0.5;")
-                    || code.contains("/ vec2(aspect, 1.0))"),
+                code.contains("/ vec2<f32>(aspect, 1.0)) + 0.5")
+                    || code.contains("/ vec2<f32>(aspect, 1.0)) + 0.5;")
+                    || code.contains("/ vec2<f32>(aspect, 1.0))"),
                 "{name} builds a corrected coordinate and samples `u_prev` with it \
                  undivided: `texture(u_prev, ...)` takes the target's own 0..1 \
                  space, so the sample is a mirrored point and the trail shears \
-                 across the pane. Divide the coordinate back by `vec2(aspect, 1.0)` \
+                 across the pane. Divide the coordinate back by `vec2<f32>(aspect, 1.0)` \
                  before it reaches the sample."
             );
         }
+        // **The same vacuity guard, and for the same reason.** This test's
+        // identifying pattern was a GLSL spelling, so every WGSL view skipped it
+        // and the assertions above never ran — a green test that could not fail. A
+        // feedback view that does not transform into the corrected space has
+        // nothing to divide back, so zero is a legitimate answer from the loop;
+        // what is not legitimate is zero from a pattern that no longer matches
+        // anything.
+        assert!(
+            checked > 0,
+            "no view matched the aspect-corrected-coordinate pattern, so the round \
+             trip was never checked. Either the views stopped transforming into the \
+             corrected space, or the identifying pattern is stale again."
+        );
     }
 
     /// A view that draws a *cell* says what happens when the cell is sub-pixel.
@@ -1347,6 +1387,244 @@ mod shader_views {
                  row shimmers as the splitter moves. Read the cell width with \
                  `fwidth` and either size the feature in pixels or dim the view out \
                  below the sampling limit."
+            );
+        }
+    }
+
+    /// **Every view must move the read cursor itself, and this reads the sources
+    /// because nothing at runtime can see it.**
+    ///
+    /// Nine views advance the cursor as a side effect of `compute_bands`, which
+    /// they call anyway because they read the spectrum. `wave` reads time, not
+    /// frequency, so it calls neither — and its envelope then sat on one 1024-
+    /// sample window for a whole ring's worth of audio, a frozen picture that
+    /// looks exactly like a paused one. The shader is correct for whatever window
+    /// it is handed, so no behavioural test of the *output* can fail: the bug is
+    /// in what was handed.
+    ///
+    /// Both halves are read, and the pairing is the point. Asserting that `wave`
+    /// advances would not catch a new time-domain view forgetting to, and
+    /// asserting that every view advances would fail `wave` twice over; the rule
+    /// is *either* you compute bands *or* you advance.
+    #[test]
+    fn a_view_that_computes_no_bands_advances_the_read_cursor() {
+        for view in SHADER_VIEWS {
+            let code = view_source(view.file);
+            // Comments are stripped: a view's doc comment may well mention the
+            // call it should be making, and that is not a call.
+            let code: String = code
+                .lines()
+                .map(|l| match l.find("//") {
+                    Some(at) => &l[..at],
+                    None => l,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let reads_bands = code.contains("compute_bands(");
+            let advances = code.contains(".advance(");
+            assert!(
+                reads_bands || advances,
+                "{} reads neither the spectrum nor the read cursor: `compute_bands` advances \
+                 the cursor as a side effect, so a view that does not call it must call \
+                 `VizBuf::advance` itself or its picture freezes",
+                view.name
+            );
+            if !reads_bands {
+                assert!(
+                    advances,
+                    "{} calls no `compute_bands`, so `advance` is its only advancing read and \
+                     it must make it",
+                    view.name
+                );
+            }
+        }
+    }
+
+    /// **A resized pane must rebuild the render-target pair, or the feedback view
+    /// never draws again.**
+    ///
+    /// The pair is created in `prepare`, on the frame the pane queues because the
+    /// pair is unusable, and the condition it tested was "is the slot empty". That
+    /// is right the first time and wrong after a resize: the slot holds a pair at
+    /// the **old** size, so it is not empty, nothing is rebuilt, and `Feedback::draw`
+    /// goes on queueing `pass: None` on every frame for ever. The view then renders
+    /// nothing at all — no error, no log line, and a background-coloured pane that
+    /// is pixel-identical to the documented "no GPU here" fallback. It is the
+    /// worst kind of failure to have, because it reads as a rendering fault while
+    /// the fault is a lifetime one, and because the pane works perfectly until the
+    /// moment the user drags a splitter.
+    ///
+    /// `pair_is_unusable` is the question itself, extracted so a test can ask it —
+    /// which it could not while the compare sat inline in a `Device`-locked method.
+    /// Both halves are asserted: absent means create, and **wrong size means
+    /// create**, which is the half that was missing.
+    #[test]
+    fn a_resized_pane_rebuilds_the_render_target_pair() {
+        /// A pair's two targets, each named by its pixel size.
+        type Sizes = ((i32, i32), (i32, i32));
+        let pair = |w: i32, h: i32| -> Sizes { ((w, h), (w, h)) };
+
+        assert!(
+            gpu::pair_is_unusable(None, (128, 128)),
+            "an absent pair must be built, or the view never draws at all"
+        );
+        assert!(
+            !gpu::pair_is_unusable(Some(pair(128, 128)), (128, 128)),
+            "a pair of exactly the wanted size is usable; rebuilding it every frame would \
+             leak a render target per frame and reset the history for ever"
+        );
+
+        // The regression: a pair that exists at the old size. This is what a resize
+        // leaves behind, and treating it as usable is what blanked the pane.
+        assert!(
+            gpu::pair_is_unusable(Some(pair(128, 128)), (192, 128)),
+            "a pane widened from 128 to 192 keeps the pair it had; it must be rebuilt or the \
+             callback is queued with no pass for ever and the view renders nothing"
+        );
+        assert!(
+            gpu::pair_is_unusable(Some(pair(128, 128)), (128, 192)),
+            "the same for a height change, which is what dragging a splitter down does"
+        );
+        assert!(
+            gpu::pair_is_unusable(Some(pair(128, 128)), (192, 64)),
+            "and for a change in both axes at once"
+        );
+    }
+
+    /// **The flame must span the pane, not sit in the middle of it.**
+    ///
+    /// The aspect correction is what keeps a tongue's Gaussian round, and it also
+    /// makes `x` measure the pane's **height** — so the drawing space is ±half the
+    /// aspect ratio, which on a wide pane is very much wider than it is tall.
+    /// Positions written as plain numbers are therefore fractions of the height,
+    /// and at −0.11 / 0.06 / 0.26 the three tongues filled the middle tenth of a
+    /// 6:1 pane with empty background either side.
+    ///
+    /// **The existing aspect test cannot catch this.** It asks whether the
+    /// *correction* is applied, and the correction was correct — it is what left the
+    /// figure small. Nothing measured where the figure landed, so a view could
+    /// satisfy every shader test and still draw a postage stamp.
+    ///
+    /// So this reads the source and evaluates the arithmetic: the figure's extent
+    /// is converted back into pane fractions (`uv.x = 0.5 + x / aspect`) and
+    /// checked against the pane. Two aspect ratios, because the failure only shows
+    /// on a wide one — at 1:1 the old numbers filled the pane perfectly, which is
+    /// why it looked right until someone made the window wide.
+    #[test]
+    fn the_flame_spans_the_pane_at_any_aspect_ratio() {
+        let body = SHADER_VIEWS
+            .iter()
+            .find(|v| v.file == "flame")
+            .and_then(|v| v.frags.first().copied())
+            .expect("the flame's body is in the table");
+
+        // Comments stripped: a comment may well mention `span`, and the numbers
+        // this reads have to be the ones the driver compiles.
+        let code: String = body
+            .lines()
+            .map(|l| match l.find("//") {
+                Some(at) => &l[..at],
+                None => l,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // `let span = max(<expr>, <floor>);` — the figure's spread, and the floor
+        // that stops a very tall pane from collapsing the tongues together.
+        let floor: f64 = code
+            .lines()
+            .find_map(|l| {
+                let rest = l.split_once("let span = max(")?.1;
+                // The *last* comma: the first one belongs to the inner `max(…)`
+                // of the aspect expression, not to the outer call.
+                let tail = rest.rsplit_once(',')?.1;
+                tail.trim().trim_end_matches([')', ';']).trim().parse().ok()
+            })
+            .unwrap_or_else(|| {
+                panic!("the flame must bound its figure's spread with a floor:\n{body}")
+            });
+
+        // Every tongue's centre and width, as factors of `span`.
+        let mut centres = Vec::new();
+        let mut widths = Vec::new();
+        for line in code.lines().filter(|l| l.contains("tongue(lick,")) {
+            let args: Vec<&str> = line
+                .split("tongue(lick,")
+                .nth(1)
+                .expect("a tongue call on this line")
+                .split(',')
+                .map(|a| a.trim().trim_end_matches([')', ';']).trim())
+                .filter(|a| !a.is_empty())
+                .collect();
+            assert_eq!(
+                args.len(),
+                2,
+                "a tongue is `tongue(x, centre, width)`, so two arguments follow the \
+                 coordinate. Found `{args:?}` in:\n{line}"
+            );
+            let factor = |arg: &str, line: &str| -> f64 {
+                arg.strip_prefix("span * ")
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "tongue argument `{arg}` is not a factor of the figure's spread, \
+                             so the flame's extent is in units of the pane's height and a wide \
+                             pane is mostly empty. Write it `span * <factor>`. Line:\n{line}"
+                        )
+                    })
+                    .trim()
+                    .parse()
+                    .unwrap_or_else(|e| panic!("the spread factor `{arg}` does not parse: {e}"))
+            };
+            centres.push(factor(args[0], line));
+            widths.push(factor(args[1], line));
+        }
+        assert_eq!(
+            centres.len(),
+            3,
+            "three tongues means three centres and three widths, all as factors of the \
+             spread. Found {}.",
+            centres.len()
+        );
+
+        // How much of the pane the figure covers, for one aspect ratio. A Gaussian
+        // `exp(-3.2 d²)` is under 0.1% past about 1.7 of its width, so that is
+        // where a tongue stops being visible.
+        const VISIBLE_WIDTHS: f64 = 1.7;
+        let coverage = |aspect: f64| -> f64 {
+            let span = aspect.max(floor);
+            let cs: Vec<f64> = centres.iter().map(|c| c * span).collect();
+            let ws: Vec<f64> = widths.iter().map(|w| w * span).collect();
+            let lo = cs
+                .iter()
+                .zip(&ws)
+                .map(|(c, w)| c - VISIBLE_WIDTHS * w)
+                .fold(f64::MAX, f64::min);
+            let hi = cs
+                .iter()
+                .zip(&ws)
+                .map(|(c, w)| c + VISIBLE_WIDTHS * w)
+                .fold(f64::MIN, f64::max);
+            // Back into pane fractions, then clipped: a figure running off the
+            // edge is not using the space either.
+            let a = (0.5 + lo / aspect).clamp(0.0, 1.0);
+            let b = (0.5 + hi / aspect).clamp(0.0, 1.0);
+            (b - a).max(0.0)
+        };
+
+        for (aspect, why) in [
+            (6.33f64, "a 6:1 pane — the visualizer in a wide dock"),
+            (2.0, "a 2:1 pane"),
+            (1.0, "a square pane"),
+        ] {
+            let used = coverage(aspect);
+            assert!(
+                used > 0.7,
+                "the flame covers only {pct:.0}% of a {aspect}:1 pane's width ({why}). The \
+                 tongues' centres and widths are factors of the figure's spread, so the \
+                 figure should reach most of the pane at any shape. The empty margin either \
+                 side is what this test exists to catch — and at 1:1 the old numbers passed, \
+                 which is why the defect only showed on a wide window.",
+                pct = used * 100.0
             );
         }
     }
@@ -1461,18 +1739,18 @@ mod shader_views {
             .expect("the spectrogram is in the table");
         let accumulate = view.frags[0];
         assert!(
-            accumulate.contains("texelFetch(u_prev"),
-            "the spectrogram's accumulate pass must read its history with `texelFetch`, \
-             which addresses whole texels. A `texture()` read at a fractional texel \
-             offset interpolates between two neighbours, and doing that to the whole \
-             history once a frame is a low-pass filter applied once per column — the \
-             waterfall arrives blurred, and only on the pane widths whose target size \
-             does not divide by the column count, so it reads as the window's fault."
+            accumulate.contains("textureLoad(u_prev"),
+            "the spectrogram's accumulate pass must read its history with `textureLoad`, \
+             the WGSL `texelFetch`, which addresses whole texels. An interpolated read \
+             at a fractional texel offset blends two neighbours, and doing that to the \
+             whole history once a frame is a low-pass filter applied once per column — \
+             the waterfall arrives blurred, and only on the pane widths whose target \
+             size does not divide by the column count, so it reads as the window's fault."
         );
         assert!(
-            !accumulate.contains("texture(u_prev"),
-            "the spectrogram's accumulate pass must not sample its history through \
-             `texture()` — see above. Every read of the feedback target there is a \
+            !accumulate.contains("textureSample"),
+            "the spectrogram's accumulate pass must not sample its history through a \
+             sampler at all — see above. Every read of the feedback target there is a \
              texel copy, not an interpolation."
         );
         // The column count is derived from the target's own width, so it needs the
@@ -1480,7 +1758,7 @@ mod shader_views {
         // because `target_size` quantises it to a 64px grid. Guessing it from a
         // uniform is the mistake this replaced.
         assert!(
-            accumulate.contains("textureSize(u_prev"),
+            accumulate.contains("textureDimensions(u_prev"),
             "the spectrogram's column width must come from the feedback target's own \
              size. `u_resolution` is the *pane* in physical pixels and the target is \
              quantised to a 64px grid, so a shift computed from `u_resolution` is \
@@ -1516,15 +1794,15 @@ mod shader_views {
             .and_then(|v| v.frags.first().copied())
             .expect("the spectrogram's accumulate pass is in the table");
 
-        // The fresh column's guard, verbatim: `p.x >= sz.x - colw`. What matters
+        // The fresh column's guard, verbatim: `p.x >= i32(sz.x) - colw`. What matters
         // is that it names the **high** end of `p.x` and the same `colw` the shift
         // moves by — the two agreeing on one edge is the whole invariant.
         let fresh = body
             .lines()
-            .find(|l| l.contains("? fresh : old"))
+            .find(|l| l.contains("p.x >= i32(sz.x) - colw"))
             .unwrap_or_else(|| panic!("the spectrogram no longer has a fresh/old choice:\n{body}"));
         assert!(
-            fresh.contains("p.x >= sz.x - colw"),
+            fresh.contains("p.x >= i32(sz.x) - colw"),
             "the spectrogram's new column must land on the rightmost columns — the ones \
              its shift moves its neighbours out of. This guard is `{fresh}`. On any other \
              edge the new column is overwritten on the next frame and never scrolls, \
@@ -1532,15 +1810,15 @@ mod shader_views {
         );
 
         // The shift reads its neighbour from the *low* side, which is the same
-        // statement: `p + colw` steps towards the edge the new column takes, so a
+        // statement: `p.x + colw` steps towards the edge the new column takes, so a
         // column moves left and vacates the right. A `- colw` here with the guard
         // above would be a scroll that feeds from the column it is writing.
         let shift = body
             .lines()
-            .find(|l| l.contains("texelFetch(u_prev"))
+            .find(|l| l.contains("textureLoad(u_prev"))
             .unwrap_or_else(|| panic!("the spectrogram no longer reads its history:\n{body}"));
         assert!(
-            shift.contains("(p.x + colw) % sz.x"),
+            shift.contains("(p.x + colw) % i32(sz.x)"),
             "the spectrogram's scroll must read the column to the right — `p.x + colw` — so \
              that the picture moves left and vacates the rightmost columns, which is where \
              the new column goes. This line is `{shift}`."
@@ -1595,8 +1873,8 @@ mod shader_views {
     ///    literal — so there is exactly one place the number can be.
     #[test]
     fn the_db_floor_is_one_number_across_the_dsp_and_every_shader() {
-        let assembled = gpu::fragment_source("float x = level(u_bands[0]);");
-        let floor = format!("const float DB_FLOOR = {};", audio::viz::DB_FLOOR);
+        let assembled = gpu::wgsl_module("", "    frag_color = vec4<f32>(level(band_at(0u)));");
+        let floor = format!("const DB_FLOOR : f32 = {};", audio::viz::DB_FLOOR);
         assert!(
             assembled.contains(&floor),
             "the assembled prelude must carry the dB floor the DSP reports, spelled \
@@ -1607,7 +1885,7 @@ mod shader_views {
         // The span has to be derived, not typed: `(d + 60.0) / 60.0` assumes a
         // symmetric range, and a floor of -48 would silently be wrong.
         assert!(
-            assembled.contains(&format!("const float DB_SPAN = {};", -audio::viz::DB_FLOOR)),
+            assembled.contains(&format!("const DB_SPAN : f32 = {};", -audio::viz::DB_FLOOR)),
             "the prelude's DB_SPAN must be the width of the DSP's range, derived from \
              DB_FLOOR rather than typed — a literal assumes a symmetric range and is \
              wrong the moment the floor is not half of the ceiling."
@@ -1627,7 +1905,7 @@ mod shader_views {
                     .collect::<Vec<_>>()
                     .join("\n");
                 assert!(
-                    !code.contains("float level("),
+                    !code.contains("fn level("),
                     "{}: defines its own `level`, and the prelude owns that function. \
                      A second copy is a second dB mapping, which is the thing this \
                      exists to prevent — and the prelude's is the one built from the \
@@ -1669,36 +1947,46 @@ mod shader_views {
         }
     }
 
-    /// The waterfall's two passes must flip the target's `y` **the same way**.
+    /// **No shader flips `y` between a feedback target and the pane.** Neither of
+    /// the waterfall's two passes may, and the reason is a convention that is the
+    /// opposite of the OpenGL one this code was written under.
     ///
-    /// A feedback round trip is two conversions of one coordinate, and they have to
-    /// cancel: the accumulate pass writes the target's rows and the present pass
-    /// reads them back. A framebuffer's rows run **bottom-up** (row 0 is at NDC
-    /// y = −1) while `v_uv.y` is 0 at the pane's **top**, so getting the pair
-    /// wrong does not merely turn the picture upside down — it mirrors the target
-    /// on the way in and reads it back the same way round, and since the present
-    /// pass *interpolates*, the low-pass of an image and its mirror **is**
-    /// mirror-symmetric. So the pane looks like it is reflecting itself about the
-    /// horizontal centre line, and the beat between consecutive mirrored frames is
-    /// a regular pattern of vertical bars. Both symptoms, one cause.
+    /// **In wgpu, row 0 of a framebuffer is at NDC `y = +1`** — the top of the
+    /// image — and `textureSample`'s `uv.y = 0` is that same row. `v_uv.y = 0` is
+    /// the pane's top. All three agree, so the texel a fragment lands in is
+    /// `v_uv * sz` and the coordinate it wrote with is the coordinate it reads
+    /// back: the round trip is the **identity**, with no flip anywhere. In OpenGL
+    /// row 0 is at NDC `-1`, which is where the flip these passes used to carry
+    /// came from, and it is simply wrong here.
     ///
-    /// Nothing else in the repo can see this. The shaders compile, the callback
-    /// count and rect are right, the program links, the column count is right, and
-    /// the scroll genuinely happens — it is a picture that is *nearly* right and
-    /// reflected, which is the worst shape of bug to diagnose from inside the code.
+    /// **The symptom was not a mirror, and that is why this needed measuring.**
+    /// A read and a write on *different* rows looks like a whole-image flip, and a
+    /// whole-image flip is easy to reason about and easy to spot. It is not what
+    /// happens: the write is where the rasteriser put the fragment, and only the
+    /// *read* is mirrored, so each row reads the row its mirror image reads. A
+    /// mirror is an involution, so the history never smears — it settles into
+    /// holding `fresh(M^k(row))` for a column `k` frames old, which with `M^2 = id`
+    /// means **alternate columns are the mirror of their neighbours**. Two pixels
+    /// to the column, that is a stripe, and the stripes are vertical because the
+    /// columns are.
     ///
-    /// `Trails` is immune, and the reason is worth having: its accumulate transform
-    /// is a spin and a zoom about the pane's centre, so a whole-image `y` flip is
-    /// one of that transform's own symmetries and cancels on its own. Only the
-    /// waterfall carries **per-column** data, where a flip is visible.
+    /// Nothing else in the repo can see it. The shaders compile, the callback count
+    /// and rect are right, the programs link, the column count is right, the scroll
+    /// genuinely happens, and with a **constant** spectrum the row means come out
+    /// symmetric — a picture that is nearly right and striped, which is the worst
+    /// shape of bug to diagnose from inside the code. `Trails` is immune, and the
+    /// reason generalises: its accumulate transform is a spin and a zoom about the
+    /// pane's centre, so a whole-image `y` flip is one of that transform's own
+    /// symmetries and commutes. Only the waterfall carries **per-column** data,
+    /// where a per-row flip is visible.
     ///
-    /// Asserted by reading the flip out of **both shipped strings** and requiring
-    /// them to match. The simulation underneath is the premise that makes those two
-    /// string checks mean something — it is the round trip, over a small target —
-    /// and it is written so that flipping one pass alone breaks it, which is what
-    /// makes "they must agree" a fact rather than a coincidence of two greps.
+    /// The simulation underneath is the premise that makes the string checks mean
+    /// something: a `ROWS`-row target whose rows hold their own index, through one
+    /// accumulate write and one present read, under both conventions. It is
+    /// written so that *either* pass flipping alone produces the striped result —
+    /// which is the finding, and what "they must agree" could not have told us.
     #[test]
-    fn the_waterfalls_two_passes_flip_y_together() {
+    fn no_view_mirrors_the_pane_in_y() {
         let view = SHADER_VIEWS
             .iter()
             .find(|v| v.file == "spectrogram")
@@ -1712,59 +2000,80 @@ mod shader_views {
         );
         let (accumulate, present) = (view.frags[0], view.frags[1]);
 
-        // The accumulate's flip is a framebuffer-space row index; the present's is a
-        // flipped sample. Read as "is this row mirrored", not as a spelling, so that
-        // either form of the flip satisfies the rule and only a *missing* one — which
-        // is the bug — fails it.
-        let accumulate_flips = accumulate.contains("sz.y - 1 - int(");
+        // Read as "is this row mirrored", not as a spelling, so that either form
+        // of the flip trips the rule and only a missing one does not.
+        let accumulate_flips = accumulate.contains("i32(sz.y) - 1 -");
         let present_flips = present.contains("1.0 - v_uv.y");
         assert!(
-            accumulate_flips,
-            "the waterfall's accumulate pass must address the target in *framebuffer* space: \
-             a framebuffer's rows run bottom-up and `v_uv.y` is 0 at the pane's top, so a \
-             read at `int(v_uv.y * sz.y)` and a write at the rasterised row land on \
-             different rows. That mirrors the whole history on every frame."
+            !accumulate_flips,
+            "the waterfall's accumulate pass flips y before addressing the target. In wgpu \
+             framebuffer row 0 is at NDC +1 — the pane's top, which is where `v_uv.y = 0` \
+             is — so the texel a fragment lands in is `v_uv * sz` and the target needs no \
+             conversion. This is the OpenGL convention (row 0 at NDC -1), and it makes the \
+             pass *read* the row its mirror image reads while still writing its own, which \
+             stripes the history column by column."
         );
-        assert_eq!(
-            accumulate_flips, present_flips,
-            "the waterfall's accumulate pass flips y ({accumulate_flips}) and its present \
-             pass flips y ({present_flips}). They are two conversions of one coordinate and \
-             must cancel: a target mirrored on the way in and read back the same way is not \
-             upside down, it is *its own mirror image* softened by the present pass's \
-             interpolation, with a vertical beat from the frames alternating. `Trails` does \
-             not need the pair because its accumulate transform is symmetric under a \
-             whole-image y flip — only the waterfall carries per-column data, where a flip \
-             is visible."
+        assert!(
+            !present_flips,
+            "the waterfall's present pass flips y before sampling the target. `uv.y = 0` is \
+             texture row 0, which is the pane's top, so a straight `v_uv` read is the row \
+             the accumulate pass wrote. A flip here presents the history mirrored without \
+             the accumulate pass agreeing."
         );
 
-        // The premise: a `ROWS`-row target, each row holding its own index, through one
-        // accumulate write and one present read. The write lands on the rasterised row
-        // `w`; the read asks for row `w` back, unless the present's uv is top-down over
-        // a bottom-up texture, in which case it asks for `ROWS - 1 - w`. So the round
-        // trip is the identity exactly when the two flips agree — and this loop is
-        // what the two string assertions above are standing on.
+        // The premise, and it models *columns* rather than a single row vector,
+        // because columns are where the striping lives: a column is `k` frames old,
+        // so it carries `fresh(M^k(row))`, and with `M^2 = id` that is `fresh(row)` on
+        // one column and `fresh(mirror(row))` on the next.
         const ROWS: usize = 9;
-        let target: Vec<u8> = (0..ROWS).map(|r| r as u8).collect();
-        for (label, p_flip) in [
-            ("the present samples top-down", false),
-            ("and the present samples bottom-up", true),
+        const COLS: usize = 4;
+        let fresh = |row: usize| row as u8;
+        for (label, p_flip, a_flip, identity) in [
+            ("neither pass flips", false, false, true),
+            ("the present flips alone", true, false, false),
+            ("the accumulate flips alone", false, true, false),
+            ("both flip", true, true, true),
         ] {
-            let shown: Vec<u8> = (0..ROWS)
-                .map(|w| {
-                    if p_flip {
-                        target[w]
-                    } else {
-                        target[ROWS - 1 - w]
+            // `h[row][col]`; the accumulate writes the rasterised column and reads
+            // `col + 1` of its own (possibly mirrored) row, except in the fresh column.
+            let mut h = vec![vec![0u8; COLS]; ROWS];
+            for _frame in 0..COLS {
+                let old = h.clone();
+                for (row, line) in h.iter_mut().enumerate() {
+                    let src = if a_flip { ROWS - 1 - row } else { row };
+                    for (col, texel) in line.iter_mut().enumerate() {
+                        *texel = if col == COLS - 1 {
+                            fresh(row)
+                        } else {
+                            old[src][(col + 1) % COLS]
+                        };
                     }
-                })
+                }
+            }
+            // The present samples the settled history once per pane row.
+            let shown: Vec<u8> = (0..ROWS)
+                .map(|w| h[if p_flip { ROWS - 1 - w } else { w }][0])
                 .collect();
-            let identity = shown.iter().enumerate().all(|(r, v)| *v == r as u8);
             assert_eq!(
-                identity, p_flip,
-                "{label}: the row the accumulate wrote must come back as the row that was \
-                 written, and this case says otherwise (rows {shown:?} over a {ROWS}-row \
-                 target whose rows hold their own index). The accumulate pass always writes \
-                 bottom-up, so the present pass has to read bottom-up too."
+                shown.iter().copied().eq((0..ROWS).map(fresh)),
+                identity,
+                "{label}: after the target has filled, the row the pane shows must be the \
+                 row that was written. It shows {shown:?} over a {ROWS}-row target whose \
+                 rows hold their own index."
+            );
+            // Striping is the other half, and the two are separate claims: a mirrored
+            // *read* and a positional *write* leave the round trip looking right in
+            // aggregate and wrong in every other column.
+            let mirrored: Vec<bool> = (0..COLS - 1)
+                .map(|col| (0..ROWS).any(|r| h[r][col] != fresh(r)))
+                .collect();
+            assert_eq!(
+                mirrored.iter().any(|m| *m) && mirrored.iter().any(|m| !*m),
+                a_flip,
+                "{label}: the settled target's stale columns must be all-or-nothing mirrored \
+                 (columns read {mirrored:?}). Alternate columns being each other's mirror \
+                 image is the stripe, and it is invisible in the row means — those come out \
+                 symmetric — which is why it took a readback rather than a code review.",
             );
         }
     }
@@ -1814,8 +2123,8 @@ mod shader_views {
                 .collect::<Vec<_>>()
                 .join("\n");
             assert!(
-                !code.contains("atan("),
-                "{name}: reads the spectrum through `atan`, whose branch cut along \
+                !code.contains("atan2("),
+                "{name}: reads the spectrum through `atan2`, whose branch cut along \
                  `x < 0` at `y == 0` steps the band index down the pane's left edge. \
                  The value either side of a cut is two different colours, so this \
                  cannot be faded out. Use `spectrum_at_bearing(p)` from the harness \
@@ -1828,10 +2137,10 @@ mod shader_views {
         // The replacement has to exist and be reachable, or "use the helper" is an
         // instruction to write a new one.
         assert!(
-            gpu::fragment_source("float b = spectrum_at_bearing(p);")
-                .contains("float spectrum_at_bearing(vec2 p)"),
+            gpu::wgsl_module("", "    frag_color = vec4<f32>(spectrum_at_bearing(p));")
+                .contains("fn spectrum_at_bearing(p : vec2<f32>)"),
             "a shader that asks for `spectrum_at_bearing` must get it, and get the \
-             `u_bands` and `VIZ_BANDS` declarations it needs with it."
+             `band_at` accessor and `VIZ_BANDS` it needs with it."
         );
     }
 
@@ -1900,7 +2209,26 @@ mod shader_views {
             .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
     }
 
-    /// Every GLSL body the app ships, as `(view name, source)`.
+    /// Every module the app ships, as `(view name, assembled source)`.
+    ///
+    /// Read out of [`gpu::wgsl_module`], so a check against this is a check
+    /// against the string the driver compiles — the uniform block, the shared
+    /// functions, the view's own functions and the entry point included.
+    /// [`bodies`] is the other half of the pair: the view's *own* text, which is
+    /// what an **absence** check wants. Assembling first would put the prelude's
+    /// own `fn level` inside the very string a test is asserting the view does not
+    /// define.
+    fn modules() -> Vec<(&'static str, String)> {
+        let mut out = Vec::new();
+        for view in SHADER_VIEWS {
+            for body in view.frags {
+                out.push((view.name, gpu::wgsl_module(view.helpers, body)));
+            }
+        }
+        out
+    }
+
+    /// Every body the app ships, as `(view name, the view's own source)`.
     ///
     /// Flattened from the table's `frags` rather than reading one `frag` per view:
     /// `Trails` runs two programs, and a sweep that only saw the first would leave
@@ -1940,7 +2268,7 @@ mod shader_views {
     /// harness is *supposed* to know what a shader view is. What it may not do
     /// is name one.
     #[test]
-    fn the_gl_harness_never_names_a_view() {
+    fn the_wgpu_harness_never_names_a_view() {
         let text = src("src/gui/panes/visualizer/gpu.rs");
         // Strip comment lines, so the module docs may discuss views by name.
         let code: String = text
@@ -2328,32 +2656,40 @@ mod shader_views {
     /// which is the instrument this project does not have.
     ///
     /// So the property is pinned in the source, the same shape as
-    /// `the_gl_harness_never_names_a_view`: the uv comes from the vertex shader's
+    /// `the_wgpu_harness_never_names_a_view`: the uv comes from the vertex shader's
     /// `v_uv` varying, which the *viewport* maps onto the pane, so a view cannot
     /// get this wrong by accident and never needs to know where the pane is.
     #[test]
-    fn no_shader_reads_gl_fragcoord() {
-        // The vertex shader's half of the contract, read from the same string the
-        // driver compiles. A `const` would be nicer but `vertex_source` allocates.
-        let vert = gpu::vertex_source();
+    fn no_shader_reads_a_window_relative_pixel_coordinate() {
+        // The vertex stage's half of the contract, read from an assembled module —
+        // the same string the driver compiles. `wgsl_module` allocates, so it is
+        // built once here rather than per sweep.
+        let module = gpu::wgsl_module("", "");
         assert!(
-            vert.contains("out vec2 v_uv;")
-                && vert.contains("v_uv = vec2(corner.x, 1.0 - corner.y);"),
-            "the shared vertex shader stopped handing the fragment stage a \
-             pane-relative `v_uv` (top-down). Every view gets its uv from it, so \
-             this is the one thing that has to be true. Got: {vert}"
+            module.contains("@location(0) uv : vec2<f32>")
+                && module.contains("out.uv = vec2<f32>(corner.x, 1.0 - corner.y);"),
+            "the shared vertex stage stopped handing the fragment stage a pane-relative \
+             uv that is top-down. Every view gets its coordinate from it, so this is \
+             the one thing that has to be true. Got: {module}"
         );
         for (name, body) in bodies() {
             for (n, line) in body.lines().enumerate() {
                 let code = line.trim_start().trim_start_matches("//");
-                assert!(
-                    !code.contains("gl_FragCoord"),
-                    "{}:{} reads `gl_FragCoord`\n  {line}\nIt is window-relative and \
-                     bottom-left origin; every view here is pane-relative and top-down. \
-                     Use the `v_uv` varying, which the viewport maps onto the pane.",
-                    name,
-                    n + 1
-                );
+                for (what, hit) in [
+                    ("the built-in position", code.contains("in.pos")),
+                    (
+                        "a vertex index",
+                        code.contains("vi") && code.contains("vertex_index"),
+                    ),
+                ] {
+                    assert!(
+                        !hit,
+                        "{}:{n} reads {what}\n  {line}\nIt is window-relative and bottom-left \
+                         origin; every view here is pane-relative and top-down. Use `v_uv`, \
+                         which the viewport maps onto the pane.",
+                        name
+                    );
+                }
             }
         }
     }
@@ -2378,7 +2714,7 @@ mod shader_views {
             // `acc += smoothstep(A, B, d) * ...` — the march's accumulation.
             for (n, line) in body.lines().enumerate() {
                 let code = line.trim_start();
-                if !code.contains("acc +=") {
+                if !code.contains("acc = acc +") {
                     continue;
                 }
                 let lo = code
@@ -2403,141 +2739,440 @@ mod shader_views {
         }
     }
 
-    /// Every GLSL function is declared before the first use of it.
+    /// The callback **paints pixels** — and only inside the pane.
     ///
-    /// **This is the one shader defect a compiler catches and CI never will**, and
-    /// it shipped in two of the four views on the day they were written: `noise3`
-    /// called `hash13` from below it, and `fbm` called `noise2` from below it.
-    /// GLSL has no forward declarations, so both are hard compile errors — on
-    /// every driver, every machine, every run — and the headless tests cannot see
-    /// either. This is the same gap as everything else about shader compilation,
-    /// except that this one has a *cheap deterministic answer* and needs no
-    /// context to get it.
+    /// This is the one test here that needs a real GPU, and it is here because
+    /// every other instrument in the repo is blind to the failure it catches. A
+    /// view that compiles, links, has the right callback shape and the right rect
+    /// and then writes nothing renders **the pane's background colour** — which is
+    /// byte-for-byte what the documented "no GPU on this machine" path renders, so
+    /// a broken view and a working one are indistinguishable from outside. That is
+    /// not hypothetical: it is how this pane spent a whole session, and how the
+    /// viewport bug below looked for a day.
     ///
-    /// The rule is that a function's name must appear as a definition before any
-    /// use, so each definition's first mention in the whole source must be itself.
-    /// Comment lines are skipped, so a comment may legitimately mention a
-    /// function before it exists.
+    /// So the harness is driven for real against an offscreen texture standing in
+    /// for the surface, cleared to a colour no palette uses, and the result is read
+    /// back. Two claims, and the second is what makes the first mean something:
+    ///
+    /// 1. **something was drawn** — not every pixel is still the clear colour;
+    /// 2. **nothing outside the pane was** — a view that painted the window
+    ///    instead of its own rect fails here even though claim 1 passes.
+    ///
+    /// **Skipped, not failed, where there is no adapter.** A machine with no GPU
+    /// and no software Vulkan driver has nothing to run it on, and a hard failure
+    /// on a missing device would just get the test deleted. CI installs
+    /// `mesa-vulkan-drivers`, so a software adapter *is* present there and this
+    /// runs on every tagged build.
     #[test]
-    fn every_glsl_function_is_declared_before_use() {
-        for (view, body) in bodies() {
-            for (line, name, at) in glsl_definitions(body) {
-                assert_eq!(
-                    body.find(&format!("{name}(")),
-                    Some(at),
-                    "{}:{} defines `{name}`, which GLSL requires to appear before its first \
-                     use. GLSL has no forward declarations, so this is a hard compile error on \
-                     every driver, and the headless tests cannot see it.",
-                    view,
-                    line
-                );
-            }
-        }
-    }
+    fn the_callback_paints_the_pane_and_nothing_outside_it() {
+        use eframe::egui::{pos2, Rect};
 
-    /// Every GLSL function definition in `src`, as `(line number, name, byte offset)`.
-    ///
-    /// Recognised by a **return type**, not by a `(` and a `{`: `for (int i = 0;
-    /// i < 4; i++) {` matches that shape and is not a definition. The offset is
-    /// returned rather than recomputed by a second helper, because two parsers of
-    /// the same source are two answers and this test compares them.
-    fn glsl_definitions(src: &str) -> Vec<(usize, String, usize)> {
-        const TYPES: [&str; 10] = [
-            "float", "int", "uint", "bool", "void", "vec2", "vec3", "vec4", "mat3", "mat4",
-        ];
-        let mut out = Vec::new();
-        let mut at = 0usize;
-        for (n, line) in src.lines().enumerate() {
-            let trimmed = line.trim_start();
-            let code = trimmed.trim_start_matches("//");
-            let mut words = code.split_whitespace();
-            if TYPES.contains(&words.next().unwrap_or_default()) {
-                if let Some(head) = words.next() {
-                    let name = head.split('(').next().unwrap_or_default();
-                    let is_name = !name.is_empty()
-                        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-                    if is_name
-                        && head.contains('(')
-                        && code[code.find('(').unwrap_or(0)..].contains(") {")
-                    {
-                        // The offset of the *name*, not of the line: that is what
-                        // `find("name(")` reports, and the two have to be the same
-                        // number for the comparison to mean anything.
-                        let within = code.find(name).unwrap_or(0);
-                        out.push((
-                            n + 1,
-                            name.to_owned(),
-                            at + (line.len() - trimmed.len()) + within,
-                        ));
-                    }
-                }
-            }
-            at += line.len() + 1;
-        }
-        out
-    }
+        /// The surface the callback draws onto, and a colour no palette produces.
+        /// 256 x 64 keeps `bytes_per_row` a multiple of 256, which is what
+        /// `copy_texture_to_buffer` requires and the only reason it is not 100 x 50.
+        const SURFACE: (u32, u32) = (256, 64);
+        const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+        const CLEAR: [u8; 4] = [1, 2, 3, 255];
 
-    /// Every shipped shader compiles **and links** against the shared vertex shader.
-    ///
-    /// This is the test that had to exist. Two real defects shipped in the first
-    /// version of these views and *nothing* in the suite could see either:
-    ///
-    /// 1. A function named `noise3`, which is a **GLSL built-in** (`vec3
-    ///    noise3(vec3)`). Overloading it with a `float` return is a hard error —
-    ///    glslang words it as "overloaded functions must have the same return
-    ///    type", which reads like a duplicate definition and is not one.
-    /// 2. `p *= 17.0;` on a function **parameter**, which is `in` and read-only.
-    ///
-    /// Both are invisible to every other check: the shaders are strings, the app
-    /// is headless, and the pane's only symptom is a blank background — which is
-    /// exactly what the documented failure path renders, so a broken shader and
-    /// a working one look the same to every other instrument in the repo. So the
-    /// claim that "shader compilation cannot be tested" was only half true: it
-    /// cannot be tested *in CI*, which has no `glslang`, but it can be tested
-    /// **wherever a validator exists**, and that is every developer machine.
-    ///
-    /// Skipped, not failed, when `glslangValidator` is absent — CI must stay green
-    /// and has no GPU toolchain. A test that hard-failed on a missing external
-    /// tool would be deleted the first time somebody's machine lacked it.
-    ///
-    /// It validates `gpu::fragment_source`'s own output rather than a
-    /// hand-assembled copy, so what is checked is what ships.
-    #[test]
-    fn every_shader_compiles_and_links() {
-        let Ok(validator) = which("glslangValidator") else {
-            eprintln!("skipping: glslangValidator is not installed");
+        let Some((device, queue)) = software_device() else {
+            eprintln!("skipping: no wGPU adapter on this machine (install mesa-vulkan-drivers)");
             return;
         };
-        let dir = common::test_dir("shader-glsl");
-        let vert = dir.join("vert.vert");
-        std::fs::write(&vert, gpu::vertex_source()).unwrap();
+        gpu::init(&device, &queue, FORMAT);
 
-        for (name, body) in bodies() {
-            let path = dir.join(format!("{}.frag", name.replace(' ', "_")));
-            std::fs::write(&path, gpu::fragment_source(body)).unwrap();
-            let out = std::process::Command::new(&validator)
-                .arg("-l")
-                .arg(&vert)
-                .arg(&path)
-                .output()
-                .expect("glslangValidator runs");
-            assert!(
-                out.status.success(),
-                "{name}: the shader does not compile or does not link against the shared \
-                 vertex shader.\n{}\nThe assembled source is at {}",
-                String::from_utf8_lossy(&out.stdout),
-                path.display()
+        let surface = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("test.surface"),
+            size: wgpu::Extent3d {
+                width: SURFACE.0,
+                height: SURFACE.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = surface.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // The pane: a 128 x 32 box at (64, 16), so there is a ring of surface left
+        // over on all four sides for claim 2 to inspect.
+        let pane_rect = Rect::from_min_max(pos2(64.0, 16.0), pos2(192.0, 48.0));
+        let screen = ScreenDescriptor {
+            size_in_pixels: SURFACE.into(),
+            pixels_per_point: 1.0,
+        };
+        let info = callback_info(pane_rect, SURFACE);
+
+        let (_, viz) = pane();
+        let theme = Themes::load().get("dark").expect("a bundled theme").clone();
+        // The pane rect, not `pane()`'s 400 x 300, so `u_resolution` agrees with
+        // the viewport a view is actually drawing into — otherwise this run would
+        // be the one place in the app where the two disagree.
+        let uniforms = gpu::Uniforms::pack(
+            &viz,
+            [audio::viz::DB_FLOOR; VIZ_BANDS],
+            &theme.palette,
+            pane_rect,
+            &egui::Context::default(),
+        );
+
+        let cb = gpu::callback("", views::bars::FRAG, uniforms);
+        let mut resources = eframe::egui_wgpu::CallbackResources::default();
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("test"),
+        });
+        cb.prepare(&device, &queue, &screen, &mut encoder, &mut resources);
+        let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("test.surface"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: CLEAR[0] as f64 / 255.0,
+                        g: CLEAR[1] as f64 / 255.0,
+                        b: CLEAR[2] as f64 / 255.0,
+                        a: 1.0,
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        // `CallbackTrait::paint` takes `&mut RenderPass<'static>`, which is
+        // wgpu's own documented escape hatch for this — see its note on
+        // `forget_lifetime`. The encoder is finished and submitted immediately
+        // after, so the parent is never touched again.
+        cb.paint(info, &mut pass.forget_lifetime(), &resources);
+        queue.submit([encoder.finish()]);
+        let pixels = read_back(&device, &queue, &surface, SURFACE);
+
+        // Premise: the clear reached the texture and the readback saw it. Without
+        // this, "some pixel is not the clear colour" could be satisfied by a
+        // readback that returned noise.
+        let at = |x: u32, y: u32| -> [u8; 4] {
+            let stride = SURFACE.0 as usize * 4;
+            let o = (y as usize * stride) + (x as usize * 4);
+            [pixels[o], pixels[o + 1], pixels[o + 2], pixels[o + 3]]
+        };
+        assert_eq!(
+            at(2, 2),
+            CLEAR,
+            "the premise: the top-left corner is outside the pane and must still carry \
+             the clear colour. A readback that does not show the clear means the \
+             assertions below are reading noise."
+        );
+
+        let drawn: Vec<(u32, u32)> = (0..SURFACE.1)
+            .flat_map(|y| (0..SURFACE.0).map(move |x| (x, y)))
+            .filter(|(x, y)| at(*x, *y) != CLEAR)
+            .collect();
+        assert!(
+            !drawn.is_empty(),
+            "the callback ran, built a pipeline and issued a draw, and the surface came \
+             back entirely the clear colour — so the shader wrote nothing a user could \
+             see. The symptom in the app is a blank pane that is pixel-identical to the \
+             'no GPU here' path, which is why nothing else catches it."
+        );
+        let outside: Vec<(u32, u32)> = drawn
+            .iter()
+            .copied()
+            .filter(|(x, y)| {
+                let fx = *x as f32 + 0.5;
+                let fy = *y as f32 + 0.5;
+                !pane_rect.contains(pos2(fx, fy))
+            })
+            .collect();
+        assert!(
+            outside.is_empty(),
+            "the view painted outside its own pane: {outside:?}. A fullscreen triangle \
+             has no vertices, so the viewport is the only thing bounding it — left at \
+             egui_wgpu's whole-surface viewport, every view paints over the window."
+        );
+    }
+
+    /// A headless wGPU device, or `None` if this machine has no adapter.
+    ///
+    /// `new_without_display_handle_from_env` because there is no window: a display
+    /// handle is what a surface needs, and this test renders into a texture.
+    /// `request_adapter` and `request_device` are futures in wgpu 30 and a test is
+    /// not, so this borrows the runtime the crate already depends on rather than
+    /// adding an executor for two `.await`s.
+    fn software_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let rt = tokio::runtime::Builder::new_current_thread().build().ok()?;
+        rt.block_on(async {
+            let instance = wgpu::Instance::new(
+                wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
             );
+            instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::LowPower,
+                    force_fallback_adapter: false,
+                    compatible_surface: None,
+                    apply_limit_buckets: false,
+                })
+                .await
+                .ok()?
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("test.device"),
+                    required_features: wgpu::Features::empty(),
+                    // `downlevel_defaults` rather than the adapter's own limits, so
+                    // the test does not depend on *which* adapter it found: the
+                    // uniform block is two arrays of `vec4`, and that is the floor
+                    // this pane actually needs.
+                    required_limits: wgpu::Limits::downlevel_defaults(),
+                    memory_hints: wgpu::MemoryHints::Performance,
+                    trace: wgpu::Trace::Off,
+                    experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                })
+                .await
+                .ok()
+        })
+    }
+
+    /// A `PaintCallbackInfo` for a pane, built the way a renderer builds one.
+    fn callback_info(
+        viewport: egui::Rect,
+        screen: (u32, u32),
+    ) -> eframe::epaint::PaintCallbackInfo {
+        eframe::epaint::PaintCallbackInfo {
+            viewport,
+            // The whole surface, so the scissor never limits what is drawn and the
+            // "nothing outside the pane" claim is about the viewport alone.
+            clip_rect: egui::Rect::from_min_max(
+                egui::pos2(0.0, 0.0),
+                egui::pos2(screen.0 as f32, screen.1 as f32),
+            ),
+            pixels_per_point: 1.0,
+            screen_size_px: [screen.0, screen.1],
         }
     }
 
-    /// The first `glslangValidator` on `PATH`, or `None`.
-    fn which(tool: &str) -> Result<std::path::PathBuf, ()> {
-        let path = std::env::var_os("PATH").ok_or(())?;
-        std::env::split_paths(&path)
-            .map(|dir| dir.join(tool))
-            .find(|p| p.is_file())
-            .ok_or(())
+    /// The texture's pixels, after everything already submitted on `queue` has run.
+    ///
+    /// `bytes_per_row` is the width times four with no padding, which is why the
+    /// surface is 256 wide: `copy_texture_to_buffer` requires a row to be a
+    /// multiple of 256 bytes, and a width that makes that true by construction is
+    /// better than the 256-byte alignment padding this would otherwise need.
+    fn read_back(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        texture: &wgpu::Texture,
+        size: (u32, u32),
+    ) -> Vec<u8> {
+        let bytes_per_row = size.0 as usize * 4;
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("test.readback"),
+            size: (bytes_per_row * size.1 as usize) as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("test.copy"),
+        });
+        encoder.copy_texture_to_buffer(
+            texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes_per_row as u32),
+                    rows_per_image: Some(size.1),
+                },
+            },
+            wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit([encoder.finish()]);
+        let slice = buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .expect("the submitted copy completes");
+        rx.recv()
+            .expect("the map callback ran")
+            .expect("the readback mapped");
+        slice.get_mapped_range().expect("already mapped").to_vec()
+    }
+
+    /// The pane viewport is **top-left pixels**, and specifically not GL's
+    /// bottom-left.
+    ///
+    /// The vertex stage synthesises three corners and has no vertex buffer, so the
+    /// *viewport* is the only thing deciding which fragments a view reaches. Every
+    /// view therefore draws over whatever else is on screen unless this is right.
+    ///
+    /// This is the whole of the conversion, which is why it is a function rather
+    /// than three lines at each of its two call sites — **it is the one piece of
+    /// the wgpu port that no headless test can reach**, since it needs a driver to
+    /// be wrong in a way anything can see. And it was wrong twice: first because
+    /// the harness drew at the window's size rather than the pane's, then because
+    /// `PaintCallbackInfo::viewport_in_pixels()` — a method that is *correct* —
+    /// reports `from_bottom_px`, and wgpu's viewport origin is the top left. That
+    /// put the pane a window-height off and mirrored, which is a render somewhere
+    /// plausible and no error anywhere.
+    ///
+    /// The second half of the assertion is the one worth having: the result must
+    /// **differ** from the bottom-left form on a pane that is not at the top of the
+    /// window. A pane at `y == 0` makes the two agree, so a test that only checked
+    /// the first view's geometry would pass with the bug in place.
+    #[test]
+    fn the_pane_viewport_is_top_left_pixels_not_gl_bottom_left() {
+        use eframe::egui::{pos2, Rect};
+
+        // A pane low and to the right, on a 2x display — the shape of a real dock
+        // tab, and the case where the two conventions disagree most.
+        let rect = Rect::from_min_max(pos2(120.0, 480.0), pos2(608.0, 697.0));
+        let ppp = 2.0;
+        let [x, y, w, h] = gpu::pane_viewport(rect, ppp);
+        assert_eq!(
+            [x, y, w, h],
+            [240.0, 960.0, 976.0, 434.0],
+            "the viewport must be the pane's rect scaled into physical pixels, with \
+             the y origin at the TOP — the same convention egui's point space uses."
+        );
+        assert_eq!(
+            w,
+            rect.width() * ppp,
+            "the width is the pane's, so the picture fits it"
+        );
+        assert_eq!(
+            h,
+            rect.height() * ppp,
+            "the height is the pane's, so the picture fits it"
+        );
+
+        // The trap, spelled out. `viewport_in_pixels` is a real method on
+        // `PaintCallbackInfo` and reports the bottom-left origin GL wants; used as a
+        // wgpu viewport it is off by exactly the distance from the pane's bottom to
+        // the window's bottom, and mirrored.
+        const WINDOW_H: f32 = 1400.0;
+        let bottom_left = WINDOW_H - (rect.max.y * ppp);
+        assert_ne!(
+            y, bottom_left,
+            "the result equals the bottom-left y. `PaintCallbackInfo::viewport_in_pixels()` \
+             reports `from_bottom_px`, which is correct for OpenGL and wrong for wgpu — \
+             feeding it to `set_viewport` renders the pane a window-height off, mirrored, \
+             with nothing in any log."
+        );
+
+        // The premise: a pane at the *top* of the window cannot tell the two apart,
+        // so this rect has to sit low down for the assertion above to mean anything
+        // — and it does, so `y` is the larger of the two numbers.
+        assert!(
+            y - bottom_left > 100.0,
+            "the premise: this rect barely differs between the two conventions, so the \
+             assertion above is reading a coincidence rather than a difference. Got \
+             top-left y {y} against bottom-left y {bottom_left}."
+        );
+    }
+
+    /// Every shipped WGSL module **parses and validates**, in process.
+    ///
+    /// This is the test that had to exist, and it is now stronger than the
+    /// `glslangValidator` version it replaces: naga is the same front end and
+    /// validator the driver itself runs, it is linked into this test binary, so
+    /// **CI exercises it too**, and it needs no external tool that half the
+    /// machines would not have.
+    ///
+    /// It exists because a broken shader and a working one look identical from
+    /// everywhere else in the repo. Both render as the pane's background — exactly
+    /// the documented failure path for "no GPU here" — and the pane's only symptom
+    /// is a blank rectangle. Three real defects shipped this way on the day these
+    /// views were written (a function named `noise3`, which is a GLSL **built-in**;
+    /// a write to a read-only function parameter, `in` in GLSL and also read-only
+    /// in WGSL; and a call before the declaration, which both languages make a hard
+    /// error), plus two more during the WGSL port itself: a body that nested a
+    /// `fn` inside the entry point, and a `clamp` whose bounds were bare abstract
+    /// floats where a `vec2<f32>` was required.
+    ///
+    /// The premise guard below is what keeps the assertion honest: it asserts that
+    /// this validator *rejects* a module carrying a known error, because a sweep
+    /// that silently accepted everything would look identical to a clean one.
+    #[test]
+    fn every_shader_validates() {
+        assert!(
+            !SHADER_VIEWS.is_empty(),
+            "the table is empty, so this sweep would pass vacuously"
+        );
+        for (name, module) in modules() {
+            let src = gpu::wgsl_module("", "");
+            let parsed = match wgpu::naga::front::wgsl::parse_str(&module) {
+                Ok(m) => m,
+                Err(e) => panic!(
+                    "{name}: the assembled module does not parse.\n{}\n{}",
+                    e.emit_to_string(&module),
+                    module
+                ),
+            };
+            let mut v = validator();
+            if let Err(e) = v.validate(&parsed) {
+                panic!(
+                    "{name}: the assembled module does not validate.\n{}\n{}",
+                    e.emit_to_string(&module),
+                    module
+                );
+            }
+            // Parsed and validated is not the same as linked against the real
+            // pipeline: a fragment stage whose output does not match the surface
+            // format is caught by wgpu at draw time and not here. The module has
+            // to at least *get* that far, which is all a text test can say.
+            assert!(
+                src.contains("@fragment"),
+                "the premise: a module assembled by the harness has no fragment stage, so \
+                 a sweep over these could not be validating anything. Got: {src}"
+            );
+        }
+
+        // The premise, in the other direction: this validator must reject a known
+        // error, or "every module validates" is a claim about nothing.
+        // The error chosen is `array<f32, 4>` in the **uniform** address space —
+        // the same 16-byte stride rule `the_wgsl_uniform_layout_is_the_block_this_
+        // code_writes` is about. It parses and fails *validation* rather than
+        // failing the parse, which is what makes this a premise about the
+        // validator rather than about the front end, and it means a sweep over
+        // these modules checks the one property that would otherwise be silent.
+        let broken = concat!(
+            "struct S { a : array<f32, 4> }",
+            "@group(0) @binding(0) var<uniform> U : S;",
+            "@fragment fn fs_main() -> @location(0) vec4<f32> { return vec4<f32>(U.a[0]); }"
+        );
+        let parsed = wgpu::naga::front::wgsl::parse_str(broken).expect(
+            "an f32 array in the uniform address space is a validation error, not a parse one",
+        );
+        assert!(
+            validator().validate(&parsed).is_err(),
+            "the premise: naga accepted an `f32` array in the uniform address space. \
+             A validator that accepts everything would make this suite a green \
+             light wired to nothing."
+        );
+    }
+
+    /// A fresh naga validator with every check on and no capability allowances.
+    ///
+    /// `Capabilities::empty()` is the strict half: the shaders here use nothing
+    /// exotic, so a validator that had to be told "you may have `f16`" would be
+    /// hiding the very thing it is meant to catch.
+    fn validator() -> wgpu::naga::valid::Validator {
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::empty(),
+        )
     }
 
     /// No shader's march is expensive enough to stop the window presenting.
@@ -2595,15 +3230,30 @@ mod shader_views {
     /// `(fbm call sites, largest step count)` for a shader, by counting
     /// substrings. Crude on purpose — see the test's doc comment.
     fn march_cost(src: &str) -> (u64, u64) {
-        let sites = src.matches("fbm(").count() as u64;
-        // `const int NAME = N;` in this shader, so a loop bounded by `i < STEPS`
+        // Call sites, not every mention: a view's *helpers* now hold the
+        // definition, so counting mentions would charge the definition to the
+        // march and make the number mean nothing. `fn fbm(` is the definition;
+        // everything else that reaches for it is a call.
+        //
+        // **The sweep feeds this the view's helpers and body together**, which is
+        // the whole reason: WGSL has no nested functions, so a view's field
+        // function lives beside the march rather than inside it, and sweeping the
+        // body alone reported zero `fbm` calls for the one view that has a march.
+        // That is the failure this test's own history warns about — the guard
+        // passing because it measured nothing.
+        let sites = src
+            .match_indices("fbm(")
+            .filter(|(at, _)| !src[..*at].trim_end().ends_with("fn"))
+            .count() as u64;
+        // `const NAME : i32 = N;` in this shader, so a loop bounded by `i < STEPS`
         // resolves. A bound the harness injects (`VIZ_BANDS`) is not in the
         // source to read, so it is skipped rather than guessed at.
         let consts: std::collections::HashMap<&str, u64> = src
             .lines()
             .filter_map(|l| {
-                let rest = l.trim().strip_prefix("const int ")?;
-                let (name, value) = rest.split_once(" = ")?;
+                let rest = l.trim().strip_prefix("const ")?;
+                let (name, tail) = rest.split_once(" : ")?;
+                let (_, value) = tail.split_once("= ")?;
                 Some((
                     name.trim(),
                     value.trim().trim_end_matches(';').parse::<u64>().ok()?,
@@ -2626,45 +3276,105 @@ mod shader_views {
         (sites, steps)
     }
 
-    /// The uniform block fits inside the fragment uniform limit GL 3.3 promises.
+    /// The WGSL uniform layout **is** the block this code writes.
     ///
-    /// A `float` array's elements may be given a whole `vec4` slot each rather
-    /// than packed four to one, so the block's cost is bounded by counting *one
-    /// vector per array element* — the pessimistic reading, and the one that
-    /// matters because which packing a driver picks is not observable before you
-    /// run on it. GL 3.3 core's guaranteed floor for
-    /// `MAX_FRAGMENT_UNIFORM_VECTORS` is 224.
+    /// This replaces a `MAX_FRAGMENT_UNIFORM_VECTORS` budget, which was a
+    /// property of a GL spec nothing here targets any more. What replaced it is
+    /// stronger and mechanical: **WGSL gives an array in the uniform address
+    /// space a 16-byte element stride**, so `array<f32, 32>` is 512 bytes, not
+    /// 128, and a block written packed four-to-one is read back as garbage with
+    /// no validation error anywhere — the shader compiles, the pipeline builds,
+    /// the draw is issued, and the picture is noise.
     ///
-    /// **This is not a compiler-checked property**, which is the whole reason it
-    /// needs a test. glslang links a 256-element float array without complaint —
-    /// the limit is a driver limit — and a driver that cannot place the block
-    /// fails at *its* link time, on one machine, as a blank pane with a log line.
-    /// The wave envelope was written at 256 buckets, which is 288 vectors with
-    /// the bands, comfortably over the floor and well under what every real GPU
-    /// since 2012 reports. That is exactly the reasoning that ships a shader that
-    /// renders on the developer's machine and nowhere else.
+    /// The way out is that **every member is a `vec4`**, so a member's offset is
+    /// 16 bytes times its index and the Rust side can stay a flat run of `f32`.
+    /// That is a rule about the *declaration*, so it is asserted against the
+    /// declaration, read out of the module naga actually parsed rather than out of
+    /// the text it was given.
+    ///
+    /// Three claims, and the third is the one the other two cannot make:
+    ///
+    /// 1. **every member is a `vec4` or an array of them** — the stride rule
+    ///    itself. An `f32` member is exactly the bug, and it is silent;
+    /// 2. **both array lengths are multiples of four** — the precondition for
+    ///    packing an `f32` count into `count / 4` `vec4`s, and
+    /// 3. **the laid-out size equals `Uniforms::BLOCK_BYTES`** — which compares the
+    ///    *declaration* against the *writer* from independent code, so the array
+    ///    lengths, the member count and the buffer's size cannot drift apart
+    ///    without one of the two moving first.
+    ///
+    /// What no check here covers is **member order**: `write_block` returns a flat
+    /// `Vec<f32>` with no names in it, so the ordering it assumes is the ordering
+    /// `wgsl_struct` declares, and nothing compares them. That is a review
+    /// obligation, and it is why the accessors in the prelude name members rather
+    /// than indexing by position.
     #[test]
-    fn the_uniform_block_fits_the_gl_33_floor() {
-        /// GL 3.3 core, table 2.11: the guaranteed minimum. A literal, because it
-        /// is a property of the spec and not of this code.
-        const FLOOR: u64 = 224;
-        // The block's arrays, worst case one vector per element. **Read from the
-        // crate, not written out here** — which is the opposite of the usual
-        // "a budget that reads the constants it guards cannot report that they
-        // moved" rule. That rule is about asserting a *value*; this asserts a
-        // *relationship*, and hardcoding the sizes made it unfailable: the sum
-        // was 160 whichever way the constants moved, so a 256-bucket wave envelope
-        // passed a test that exists to catch exactly that.
-        let arrays: [(&str, u64); 2] = [
-            ("u_bands", VIZ_BANDS as u64),
-            ("u_wave", WAVE_BUCKETS as u64),
-        ];
-        let total: u64 = arrays.iter().map(|(_, n)| n).sum();
-        assert!(
-            total <= FLOOR,
-            "the uniform block may need {total} fragment uniform vectors \
-             ({arrays:?}) and GL 3.3 only guarantees {FLOOR}. Shrink the array, or \
-             move it to a texture."
+    fn the_wgsl_uniform_layout_is_the_block_this_code_writes() {
+        for (n, len) in [("VIZ_BANDS", VIZ_BANDS), ("WAVE_BUCKETS", WAVE_BUCKETS)] {
+            assert_eq!(
+                len % 4,
+                0,
+                "{n} is {len}, and the block packs four of them per `vec4`. A count \
+                 that is not a multiple of four would need a partial vector — and a \
+                 half-written one reads back as whatever the next member holds, \
+                 silently."
+            );
+        }
+
+        // A module assembled from the real prelude, so this reads the declaration
+        // the driver gets rather than a hand-copied struct.
+        let module = gpu::wgsl_module("", "");
+        let parsed = wgpu::naga::front::wgsl::parse_str(&module).expect("the prelude parses");
+        validator()
+            .validate(&parsed)
+            .expect("the prelude validates");
+
+        let (handle, ty) = parsed
+            .types
+            .iter()
+            .find(|(_, ty)| ty.name.as_deref() == Some("Uniforms"))
+            .expect("the prelude declares `Uniforms`");
+        let wgpu::naga::TypeInner::Struct { members, span } = &ty.inner else {
+            panic!("`Uniforms` is not a struct: {:?}", ty.inner);
+        };
+        for m in members {
+            // A member's `ty` is a handle back into the same arena, so this reads
+            // the declaration rather than re-deriving it from its own text.
+            let inner = &parsed.types[m.ty].inner;
+            assert!(
+                matches!(
+                    inner,
+                    wgpu::naga::TypeInner::Vector { .. } | wgpu::naga::TypeInner::Array { .. }
+                ),
+                "uniform member `{}` is {inner:?}, which is not a `vec4` or an array of \
+                 them. WGSL's uniform address space rounds every array element up to 16 \
+                 bytes, so a narrower member is read at the wrong offset and the shader \
+                 draws garbage with no validation error anywhere — see this test's docs.",
+                m.name.as_deref().unwrap_or("?"),
+            );
+        }
+
+        let mut layouter = wgpu::naga::proc::Layouter::default();
+        layouter
+            .update(parsed.to_ctx())
+            .expect("the module can be laid out");
+        let layout = layouter[handle];
+        assert_eq!(
+            layout.size as u64,
+            gpu::Uniforms::BLOCK_BYTES,
+            "the WGSL `Uniforms` struct lays out to {} bytes, but `Uniforms::BLOCK_BYTES` \
+             (and so the buffer, and the bind group layout's `min_binding_size`) says \
+             {}. One of the two halves moved: either `wgsl_struct` gained or lost a \
+             member or an array length, or `write_block` writes a different number of \
+             floats. Equal sizes with reordered members would still pass this, which \
+             is why the member *widths* are checked above and the order is a review \
+             obligation rather than a mechanical one.",
+            layout.size,
+            gpu::Uniforms::BLOCK_BYTES
+        );
+        assert_eq!(
+            *span, layout.size,
+            "the struct's declared span differs from its laid-out size"
         );
     }
 

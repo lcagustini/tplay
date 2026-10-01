@@ -79,7 +79,7 @@ where
         // emits the same sample scaled by each gain, stereo scales its first two
         // channels. The two arms are one arm: a source claiming more than two
         // channels is treated as mono, since only the first two are scaled.
-        match self.inner.channels() {
+        match self.inner.channels().get() {
             2 => {
                 // Stereo input: emit L then R.
                 if let Some(sample) = self.half_frame.take() {
@@ -111,11 +111,13 @@ where
         self.inner.current_span_len()
     }
 
-    fn channels(&self) -> u16 {
-        2 // BalanceSource always outputs stereo
+    fn channels(&self) -> rodio::ChannelCount {
+        // BalanceSource always outputs stereo, and rodio 0.22 types a channel
+        // count as `NonZero<u16>` — so the constant has to be wrapped once.
+        rodio::ChannelCount::new(2).expect("2 is not zero")
     }
 
-    fn sample_rate(&self) -> u32 {
+    fn sample_rate(&self) -> rodio::SampleRate {
         self.inner.sample_rate()
     }
 

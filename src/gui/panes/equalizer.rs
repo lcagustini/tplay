@@ -57,7 +57,7 @@ pub fn equalizer_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui
     // always fit. Record the smallest height at which nothing clips — header +
     // gaps + sliders at their floor + a band label — and the coordinator keeps
     // the dock split at least this tall.
-    let label_h = ui.fonts(|f| {
+    let label_h = ui.fonts_mut(|f| {
         f.layout_no_wrap(
             TPlayApp::format_freq(EQ_FREQUENCIES[0]),
             egui::FontId::new(layout.text_meta, theme.metadata_font.clone()),

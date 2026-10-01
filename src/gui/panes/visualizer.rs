@@ -107,6 +107,16 @@ pub fn visualizer_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::U
     // variant had no arm — and that check is now `every_view_has_a_shader_and_the
     // _table_covers_them_all`, which is stronger: it also catches a `VizView` the
     // table names but does not implement, and the reverse.
+    //
+    // **Every view draws every frame, paused or not** — and that is not an
+    // oversight, it is what "paused" looks like. Gating the dispatch on playback
+    // was the obvious fix for a view that kept moving while paused, and it made
+    // the pane go blank, which reads as the feature vanishing rather than as the
+    // picture holding. The two feedback views are the only ones that *can* move,
+    // because they are the only ones with a history, and they hold instead — see
+    // `VizBuf::take_arrival`, which is the whole of "the visualizer pauses with
+    // the song". The other seven are pure functions of a buffer that is not
+    // changing, so they redraw the same frame without being told to stop.
     if let Some(entry) = views::SHADER_VIEWS.iter().find(|v| v.name == view.name()) {
         (entry.draw)(painter, rect, app.viz(), &p);
     }

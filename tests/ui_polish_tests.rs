@@ -38,9 +38,13 @@ fn apply_zeroes_animation_time() {
 
     // egui's default animation_time is ~0.083s; a nonzero value would smear
     // every widget's colors across frames on a mid-session theme switch.
-    assert!(ctx.style().animation_time > 0.0);
+    // `ctx.style()` is gone in 0.36; `style_of(Theme)` returns the two styles it
+    // replaced, and `apply` now zeroes *both*, so both are asserted.
+    let anim = |ctx: &egui::Context| ctx.style_of(egui::Theme::Dark).animation_time;
+    assert!(anim(&ctx) > 0.0);
     apply(&ctx, &theme);
-    assert_eq!(ctx.style().animation_time, 0.0);
+    assert_eq!(anim(&ctx), 0.0);
+    assert_eq!(ctx.style_of(egui::Theme::Light).animation_time, 0.0);
 }
 
 #[test]
@@ -49,7 +53,7 @@ fn apply_maps_palette_tokens_to_visuals() {
     let theme = fixture_theme();
     apply(&ctx, &theme);
 
-    let v = &ctx.style().visuals;
+    let v = &ctx.style_of(ctx.theme()).visuals;
     assert_eq!(v.panel_fill, theme.palette.bg);
     assert_eq!(v.window_fill, theme.palette.bg);
     assert_eq!(v.hyperlink_color, theme.palette.accent);

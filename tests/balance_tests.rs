@@ -32,11 +32,11 @@ impl Source for TestSrc {
     fn current_span_len(&self) -> Option<usize> {
         Some(self.samples.len() - self.pos)
     }
-    fn channels(&self) -> u16 {
-        self.channels
+    fn channels(&self) -> rodio::ChannelCount {
+        rodio::ChannelCount::new(self.channels).expect("channel count is never zero")
     }
-    fn sample_rate(&self) -> u32 {
-        self.sr
+    fn sample_rate(&self) -> rodio::SampleRate {
+        rodio::SampleRate::new(self.sr).expect("sample rate is never zero")
     }
     fn total_duration(&self) -> Option<Duration> {
         None
@@ -135,7 +135,11 @@ fn stereo_balance_zero_is_bit_identical_passthrough() {
         .flat_map(|(&l, &r)| [l, r])
         .collect();
 
-    let buf = SamplesBuffer::new(2, 44100, interleaved.clone());
+    let buf = SamplesBuffer::new(
+        rodio::ChannelCount::new(2).expect("channel count is not zero"),
+        rodio::SampleRate::new(44_100).expect("sample rate is not zero"),
+        interleaved.clone(),
+    );
     let out: Vec<f32> = BalanceSource::new(buf, Arc::clone(&shared)).collect();
 
     // Output must be bit-identical to input (interleaved L,R)
@@ -159,7 +163,11 @@ fn stereo_balance_scales_channels_independently() {
         .flat_map(|(&l, &r)| [l, r])
         .collect();
 
-    let buf = SamplesBuffer::new(2, 44100, interleaved);
+    let buf = SamplesBuffer::new(
+        rodio::ChannelCount::new(2).expect("channel count is not zero"),
+        rodio::SampleRate::new(44_100).expect("sample rate is not zero"),
+        interleaved,
+    );
     let out: Vec<f32> = BalanceSource::new(buf, Arc::clone(&shared)).collect();
 
     assert_eq!(out.len(), 200);
@@ -220,7 +228,11 @@ fn try_seek_forwards_and_clears_half_frame() {
     let interleaved: Vec<f32> = (0..44100 * 2 * 2) // 2 seconds stereo
         .map(|i| i as f32)
         .collect();
-    let buf = SamplesBuffer::new(2, 44100, interleaved);
+    let buf = SamplesBuffer::new(
+        rodio::ChannelCount::new(2).expect("channel count is not zero"),
+        rodio::SampleRate::new(44_100).expect("sample rate is not zero"),
+        interleaved,
+    );
     let shared = Arc::new(RwLock::new(0.0f32));
     let mut bal = BalanceSource::new(buf, shared);
 

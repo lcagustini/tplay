@@ -8,8 +8,8 @@
 
 use std::f32::consts::PI;
 use tplay::audio::viz::{
-    compute_bands, compute_wave, fft_magnitude, mode_now, VizBuf, DB_FLOOR, FFT_SIZE, MAX_MODE,
-    VIZ_BANDS,
+    compute_bands, compute_wave, fft_magnitude, mode_now, smoothing_for_a_dt, VizBuf, DB_FLOOR,
+    FFT_SIZE, MAX_MODE, VIZ_BANDS, VIZ_BUFFER_CAP,
 };
 
 /// A band array with the given `(index, dB)` entries and silence everywhere
@@ -27,8 +27,328 @@ fn viz_buf_push_and_snapshot() {
     let buf = VizBuf::new();
     buf.push(0.5);
     buf.push(-0.25);
-    let tail = buf.snapshot_tail(10);
+    // With no clock the cursor re-anchors to the newest sample, so the first
+    // read is the whole tail. `n` above the ring's length yields what exists,
+    // which is what the FFT caller reads as "not enough data yet".
+    let tail = buf.read_window(2, 0.0);
     assert_eq!(tail, vec![0.5, -0.25]);
+    assert!(buf.read_window(10, 0.0).len() <= 2);
+}
+
+/// **The read cursor is the stutter fix, and this is the measurement that found
+/// it.** Audio does not reach the tap one sample at a time: `TapSource::next`
+/// runs inside rodio's mixer pull, and cpal asks for a whole `buffer_size` per
+/// output callback — 8192 samples, one call every ~186 ms at the shipped
+/// default. A reader that takes "the newest N samples" therefore sees the same
+/// window for ~22 frames at 120 fps and then a window of unrelated audio.
+/// Measured on the real fixture, that was **0 distinct spectra across 22 idle
+/// frames**: the picture froze and snapped, and no frame rate could fix it,
+/// because the discontinuity was in the data.
+///
+/// The cursor walks the backlog out at real-time rate instead, so every read is a
+/// slightly later slice of the same burst.
+#[test]
+fn the_read_cursor_turns_an_audio_burst_into_many_small_steps() {
+    let buf = VizBuf::new();
+    buf.set_rate(44100);
+    let burst = 8192usize;
+    let frame = 1.0 / 120.0;
+    let per_frame = 44100.0 * frame;
+    // The very first read re-anchors to the newest sample, so establish that
+    // before pushing, or the burst has nothing to walk.
+    for i in 0..1024 {
+        buf.push(i as f32);
+    }
+    buf.read_window(1024, frame);
+    for i in 0..burst {
+        buf.push((burst + i) as f32);
+    }
+
+    let mut first = buf.read_window(1024, frame);
+
+    // Every read while the backlog lasts must move, and must move by about one
+    // frame's worth of samples rather than the whole burst. `frames` is however
+    // many reads the burst can feed, minus one: the last read legitimately finds
+    // an empty backlog, and asserting on it would be asserting that audio
+    // appeared from nothing.
+    let frames = burst / per_frame as usize - 1;
+    let mut moved = 0usize;
+    for _ in 0..frames {
+        let next = buf.read_window(1024, frame);
+        assert_ne!(
+            next, first,
+            "the cursor did not advance on read {moved}, so the window is frozen"
+        );
+        // The window holds a ramp, so its newest sample is the cursor position.
+        let step = next[next.len() - 1] - first[first.len() - 1];
+        assert!(
+            (step - per_frame).abs() < per_frame * 0.5,
+            "the cursor advanced {step} samples on read {moved}; it should advance about \
+             {per_frame}, which is what splits one burst into many small steps"
+        );
+        moved += 1;
+        first = next;
+    }
+    assert_eq!(moved, frames);
+    assert!(
+        frames > 15,
+        "one 8192-sample burst must feed many frames of reads, not two or three — got \
+         {frames}, which is the stutter back"
+    );
+
+    // The backlog drains over many reads rather than being spent in one jump: the
+    // window has not yet reached the newest sample the burst pushed.
+    assert!(
+        first[first.len() - 1] < (burst + 1024 + burst) as f32,
+        "after {frames} reads the cursor is still short of the newest sample, so the burst \
+         was walked out gradually rather than consumed whole"
+    );
+}
+
+/// **Two reads in one frame, and the arrival must survive the second.** This is
+/// the bug that blanked the spectrogram.
+///
+/// Every view calls `compute_bands` *and* `compute_wave` (the latter inside
+/// `Uniforms::pack`), so there are two reads per frame. When the second one
+/// advanced the cursor too, it consumed the arrival flag that
+/// `take_arrival` reports — and the two feedback views are the only ones that
+/// call `take_arrival`. Trails kept its previous frame; the spectrogram, which
+/// has no history to fall back on, showed nothing at all.
+///
+/// So `compute_wave` peeks (`read_window_peek`) and an advancing read only ever
+/// **ORs** into the flag. Both halves are here.
+#[test]
+fn a_second_read_in_a_frame_does_not_consume_the_arrival() {
+    let buf = VizBuf::new();
+    buf.set_rate(44100);
+    let frame = 1.0 / 120.0;
+    buf.read_window(1024, frame); // establish, re-anchors
+
+    for i in 0..2048 {
+        buf.push(i as f32);
+    }
+    // Frame N: the advancing read, then the peeking read, then the take. That is
+    // the exact order `spectrogram::draw` performs.
+    let first = buf.read_window(1024, frame);
+    let second = buf.read_window_peek(1024);
+    assert!(
+        buf.take_arrival(),
+        "the spectrogram reads twice per frame and then asks whether to accumulate; a \
+         peeking read must not leave that question answered 'no', or the view never draws \
+         a column"
+    );
+    // The flag is consumed, so a *second* take with no new audio must be false —
+    // otherwise one burst would be spent once per reader.
+    assert!(
+        !buf.take_arrival(),
+        "the arrival is consumed by the take, so one push cannot advance a history twice"
+    );
+
+    // The peek must also not have moved the cursor, or it spends the backlog twice
+    // as fast as the audio arrives and the next frame jumps.
+    let third = buf.read_window(1024, frame);
+    let step = third[third.len() - 1] - first[first.len() - 1];
+    let per_frame = 44100.0 * frame;
+    assert!(
+        (step - per_frame).abs() < per_frame * 0.5,
+        "one frame advanced the cursor by {step} samples; with a peek in between it must still \
+         be about {per_frame}, because the backlog is walked out at the audio's own rate"
+    );
+    // And the peek returns the window as it stood, which is the same slice the
+    // advancing read just returned — a peek is a read, not a move.
+    assert_eq!(
+        second, first,
+        "a peeking read must return the same window the advancing read just returned"
+    );
+    // **The invariant itself, stated so a peek cannot become an advancing read.**
+    // A peek that took a `dt` would move the cursor and spend the backlog twice
+    // per frame, which is the bug: the second read consumed the arrival, so the
+    // spectrogram drew no column at all. `compute_wave` reads 1024 samples every
+    // frame for the wave view, so this runs 120 times a second.
+    buf.push(999.0);
+    let peeked = buf.read_window_peek(1024);
+    let after_peek = buf.read_window(1024, frame);
+    let step = after_peek[after_peek.len() - 1] - peeked[peeked.len() - 1];
+    assert!(
+        (step - per_frame).abs() < per_frame * 0.5,
+        "one advancing read after a peek moved the cursor {step} samples; the peek must not \
+         have moved it at all, so a frame's two reads spend the backlog once. A peek that \
+         advances spends it twice, which is what blanked the spectrogram."
+    );
+
+    // **The whole frame, twice, over and over** — which is the shape that blanked
+    // it. Audio arrives in bursts, and every frame after a burst draws a column
+    // while the cursor walks the backlog out. Measured on the committed fixture
+    // with the real `spectrogram::draw` order (advancing read, peek, take): 240
+    // columns over 240 frames, one per frame. With the second read advancing as
+    // well, the arrival was consumed by it and the count was 0.
+    let mut columns = 0usize;
+    for f in 0..240 {
+        // A burst, then 21 quiet frames — the cpal callback's period at 120 fps.
+        if f % 22 == 0 {
+            for i in 0..8192 {
+                buf.push((f * 8192 + i) as f32);
+            }
+        }
+        buf.read_window(1024, frame);
+        let _ = buf.read_window_peek(1024);
+        if buf.take_arrival() {
+            columns += 1;
+        }
+    }
+    // **Every frame, not every burst.** A burst is 22 frames of backlog, and the
+    // cursor walks it out one frame at a time, so all 22 must draw. Asserting
+    // "one column per burst" instead would pass with the stutter back.
+    assert_eq!(
+        columns, 240,
+        "the spectrogram must draw a column on every frame it has audio for — all 240, not one \
+         per burst. Got {columns}. Zero means the view shows nothing at all, which is what the \
+         second advancing read caused."
+    );
+}
+
+/// **`wave` is the only view with no advancing read of its own, and that has to
+/// be fixed somewhere or its picture freezes.**
+///
+/// The symptom is a frozen envelope rather than a broken one: the shader reads
+/// whatever window it is handed correctly, so nothing in the WGSL is wrong, and a
+/// still waveform looks like a paused one. The cause is that every other view
+/// advances the cursor as a side effect of `compute_bands` — which `wave`, being
+/// a function of time rather than of frequency, does not call. Its cursor therefore
+/// stood still for a whole ring's worth of audio between reads.
+#[test]
+fn a_standalone_advance_moves_the_cursor_that_a_peek_then_reads() {
+    const FRAME: f32 = 1.0 / 60.0;
+    let buf = VizBuf::new();
+    buf.set_rate(44100);
+
+    // Audio arriving *while* the frames run, which is the arrangement that has a
+    // backlog to walk out. Pushing three rings first and advancing afterwards
+    // would not: the first `advance` re-anchors onto `written`, and a cursor at
+    // the newest sample has nothing left to consume.
+    //
+    // **A burst every 20 frames, and the number is load-bearing.** One burst is
+    // 8192 samples and 20 frames consume about 14 700, so the backlog *drains*
+    // between bursts and stays under the 16 384-sample ring. A burst every tenth
+    // frame outruns the cursor, the trail eventually exceeds the ring, and the
+    // re-anchor fires — a jump of the whole backlog, which is correct behaviour
+    // and would fail the step assertion below for a reason that has nothing to
+    // do with what is being pinned.
+    let mut pushed = 0.0f32;
+    let mut last = None;
+    let mut steps = Vec::new();
+    for frame in 0..60 {
+        let burst = frame % 20 == 0;
+        let n = if burst { 8192 } else { 735 };
+        for _ in 0..n {
+            buf.push(pushed);
+            pushed += 1.0;
+        }
+        buf.advance(FRAME);
+        let window = buf.read_window_peek(1024);
+        assert_eq!(window.len(), 1024, "a peek must serve a full window");
+        if let Some(prev) = last {
+            steps.push(window.last().unwrap() - prev);
+        }
+        last = window.last().copied();
+    }
+
+    assert!(
+        steps.iter().all(|s| *s > 0.0),
+        "the window must end at a newer sample every frame, or the envelope is a frozen burst \
+         rather than a moving waveform. Steps: {steps:?}"
+    );
+    // The point of the cursor: on a burst frame it advances by one frame, not by
+    // the whole burst. A burst is 8192 samples, so a step near that would mean
+    // the walk is a jump.
+    let biggest = steps.iter().cloned().fold(0.0f32, f32::max);
+    assert!(
+        biggest < 1200.0,
+        "no frame may advance the cursor by more than about one frame's worth (735 samples at \
+         44.1 kHz). Biggest step was {biggest}."
+    );
+}
+
+/// The cursor must not walk off the end of the ring, and a `clear` must reset it
+/// — otherwise the window is served from samples that have already been
+/// overwritten, which is the same stutter by another route.
+#[test]
+fn the_read_cursor_stays_inside_the_ring_and_resets() {
+    let buf = VizBuf::new();
+    buf.set_rate(44100);
+    // Far more than the ring holds, so the cursor is forced off the back.
+    for i in 0..(VIZ_BUFFER_CAP * 4) {
+        buf.push(i as f32);
+    }
+    let window = buf.read_window(1024, 1.0 / 60.0);
+    assert_eq!(window.len(), 1024, "the window must always be full");
+    // Every sample must be one we actually pushed, i.e. contiguous ascending
+    // ramp values with no wrap or duplicate.
+    for pair in window.windows(2) {
+        assert_eq!(
+            pair[1] - pair[0],
+            1.0,
+            "the window is not a contiguous slice of the ramp"
+        );
+    }
+
+    buf.clear();
+    assert!(
+        buf.read_window(1024, 1.0 / 60.0).is_empty(),
+        "a clear resets the cursor along with the ring, so a cleared buffer reads as empty \
+         rather than serving samples that were never pushed"
+    );
+}
+
+/// **A peek-only reader is a real reader, and it must not fall off the ring.**
+///
+/// `wave` is the only view with no `compute_bands` call, so it reaches the buffer
+/// through `Uniforms::pack` -> `compute_wave` -> `read_window_peek` and *nothing*
+/// else. Its cursor therefore never advances, so it only ever read the ring if the
+/// re-anchor in `read_locked` were reachable without `advance` — which it was not.
+/// The ring turned over underneath a cursor stuck at wherever `clear` left it, and
+/// after one ring's worth of audio (~372 ms) `cursor < oldest`. Two wrong answers
+/// fell out of that one line, and which one you saw depended on the build:
+///
+/// - `state.cursor - oldest` wrapped to about 2^64, so `.min(len)` capped the
+///   window at the whole ring — an envelope of stale audio rather than a panic;
+/// - with a floor instead, `end` became 0 and the window was **empty**, so the
+///   wave view drew nothing at all.
+///
+/// Neither is the current behaviour, and neither is observable from the outside —
+/// a wave that draws nothing and a wave that draws the wrong thing are the same
+/// picture to a user. So the assertion is on the samples, not the length: the
+/// envelope must end at the newest sample pushed.
+#[test]
+fn a_peek_only_reader_never_falls_off_the_ring() {
+    let buf = VizBuf::new();
+    buf.set_rate(44100);
+    for i in 0..(VIZ_BUFFER_CAP * 3) {
+        buf.push(i as f32);
+    }
+
+    // No advancing read has ever run, so this is the wave view's exact position.
+    let window = buf.read_window_peek(1024);
+    assert_eq!(
+        window.len(),
+        1024,
+        "a peek must serve a full window even when its cursor has been left behind"
+    );
+    // And it must be the newest `n` samples, which is what a peak envelope of the
+    // present moment means — not the oldest thing still in the ring.
+    let last = (VIZ_BUFFER_CAP * 3 - 1) as f32;
+    assert_eq!(
+        *window.last().unwrap(),
+        last,
+        "the peek must end at the newest sample pushed, not at the stale cursor"
+    );
+
+    // A cleared buffer is the state a new song starts from.
+    buf.clear();
+    assert!(
+        buf.read_window_peek(1024).is_empty(),
+        "a cleared buffer reads as empty through the peek path too"
+    );
 }
 
 #[test]
@@ -36,7 +356,144 @@ fn viz_buf_clear() {
     let buf = VizBuf::new();
     buf.push(1.0);
     buf.clear();
-    assert!(buf.snapshot_tail(10).is_empty());
+    assert!(buf.read_window(10, 1.0 / 60.0).is_empty());
+}
+
+/// An arrival is reported **once**, and only once.
+///
+/// This is the whole of "the visualizer pauses with the song". The two feedback
+/// views hold a history, and a history advances by one frame per call — so
+/// without this the spectrogram kept scrolling a picture of silence, and it
+/// paused because nobody was pushing samples rather than because anything asked
+/// it to. Both halves are here: `take` is what makes one arrival one frame rather
+/// than one frame per viewer, and `push` being the only writer is what makes it
+/// true while a sink is paused (the mixer is not calling `TapSource::next`, so
+/// nothing is pushed, so there is nothing to report).
+#[test]
+fn an_arrival_is_reported_once_and_only_while_audio_is_pushed() {
+    // The order matters and mirrors the app: a view **reads** (which folds in
+    // whatever arrived) and then **takes** the flag. A push on its own is not
+    // reported, because the read is what turns pending audio into a position the
+    // view can act on — and that is what keeps a burst from being spent twice.
+    let buf = VizBuf::new();
+    let frame = 1.0 / 120.0;
+    buf.read_window(1024, frame);
+    assert!(
+        !buf.take_arrival(),
+        "a fresh buffer has had no audio, and a view must not record a frame of it"
+    );
+
+    buf.push(0.5);
+    buf.read_window(1024, frame);
+    assert!(buf.take_arrival(), "a pushed sample is an arrival");
+    assert!(
+        !buf.take_arrival(),
+        "one arrival must not be counted twice: the next frame has no new audio, so a view \
+         that reads this twice in a frame would advance its history twice for one push"
+    );
+
+    buf.push(0.25);
+    buf.read_window(1024, frame);
+    assert!(buf.take_arrival(), "a second push is a second arrival");
+
+    // Stopped playback clears the buffer, and a clear is not an arrival either —
+    // `stop()` is the only caller, and the frame after it must hold, not advance.
+    buf.push(1.0);
+    buf.read_window(1024, frame);
+    assert!(buf.take_arrival());
+    buf.clear();
+    assert!(
+        !buf.take_arrival(),
+        "clearing is what a stop does, and a stopped view holds its last frame"
+    );
+}
+
+/// **Exactly one read per frame may advance the cursor, and any read may report an
+/// arrival.** Both rules are about *which branch runs*, and no runtime measurement
+/// can see either: a peeking read is handed `dt = 0.0`, so making it advance
+/// moves nothing and every behavioural test still passes. Three mutations of
+/// `read_window_peek` and `read_locked` survived the behavioural suite — this is
+/// the source-reading pin for them, and it exists for the same reason
+/// `the_wgpu_harness_never_names_a_view` does: a shader string or a hidden branch
+/// is invisible from outside.
+///
+/// The failure it guards is the spectrogram rendering nothing. Two reads per frame
+/// (`compute_bands`, then `compute_wave` inside `Uniforms::pack`) with the second
+/// advancing consumed the arrival, and the two feedback views are the only ones
+/// that call `take_arrival`.
+#[test]
+fn the_read_cursors_advance_and_report_rules_are_stated_in_one_place() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/audio/viz.rs");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let code: String = text
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // A peek passes `advance = false`, and `compute_wave` — the only caller — is
+    // the read that used to consume the arrival.
+    let peek = code
+        .split("pub fn read_window_peek")
+        .nth(1)
+        .and_then(|s| s.split("fn read_locked").next())
+        .expect("read_window_peek must exist");
+    assert!(
+        peek.contains("false"),
+        "read_window_peek must not advance the cursor. It is the second read of every frame \
+         (compute_wave, inside Uniforms::pack), and an advancing read there consumes the \
+         arrival flag that take_arrival reports — so the spectrogram and trails draw no \
+         column and the spectrogram shows nothing at all."
+    );
+    let advancing = code
+        .split("pub fn read_window(")
+        .nth(1)
+        .and_then(|s| s.split("fn read_locked").next())
+        .expect("read_window must exist");
+    assert!(
+        advancing.contains("true"),
+        "read_window is the frame's one advancing read — it is what walks the audio backlog \
+         out at real-time rate, and it is the whole stutter fix."
+    );
+
+    // The flag folds a pending arrival on *any* read, and only ever ORs. Both
+    // halves were bugs: gating the fold on `advance` loses an arrival when a
+    // frame's reads all peek, and assigning instead of OR-ing lets a second read
+    // overwrite a true with a false.
+    let folded = code
+        .split("let oldest = state.written.saturating_sub")
+        .nth(1)
+        .expect("read_locked must exist");
+    let flag_line = folded
+        .lines()
+        .find(|l| l.contains("state.advanced ="))
+        .expect("read_locked must set state.advanced")
+        .trim();
+    assert!(
+        flag_line.contains("state.advanced ||"),
+        "the arrival fold must OR into `advanced`, never assign. Assigning lets the frame's \
+         second read overwrite a true with a false, which is the spectrogram's blank. Got: \
+         `{flag_line}`"
+    );
+    assert!(
+        !folded.contains("if advance {\n            state.advanced")
+            && !folded.contains("if advance && state.advanced")
+            && !flag_line.contains("if advance"),
+        "the arrival fold must not be gated on `advance`. A push is an arrival whether or not \
+         this read moves the cursor, so a frame whose reads all peek must still report one — \
+         and the gate is as easy to write on the line above the fold as around it, so the \
+         whole body is checked."
+    );
+    let clears = folded
+        .lines()
+        .find(|l| l.contains("arrived_since_read = false"))
+        .expect("read_locked must clear arrived_since_read");
+    assert!(
+        !clears.trim_start().starts_with("if"),
+        "arrived_since_read is consumed by the fold above it, not conditionally — got \
+         `{}`",
+        clears.trim()
+    );
 }
 
 /// A source at a chosen rate, so the tap can report one that is not the default.
@@ -60,11 +517,11 @@ impl tplay::rodio::Source for RateSource {
     fn current_span_len(&self) -> Option<usize> {
         None
     }
-    fn channels(&self) -> u16 {
-        1
+    fn channels(&self) -> tplay::rodio::ChannelCount {
+        tplay::rodio::ChannelCount::new(1).expect("1 is not zero")
     }
-    fn sample_rate(&self) -> u32 {
-        self.rate
+    fn sample_rate(&self) -> tplay::rodio::SampleRate {
+        tplay::rodio::SampleRate::new(self.rate).expect("rate is not zero")
     }
     fn total_duration(&self) -> Option<std::time::Duration> {
         None
@@ -149,11 +606,82 @@ fn fft_sine_1khz() {
     );
 }
 
+/// The band smoother's time constants must reproduce the old per-frame fractions
+/// at 60 Hz, and must **halve the strength at 120 Hz** — which is the whole point.
+///
+/// The first half is what makes the change safe to make without being able to look
+/// at it: a 60 Hz display sees exactly the numbers that shipped, so only the
+/// high-refresh case moves. The second half is the defect being fixed, stated as a
+/// number: the same music on the same machine smooths twice as slowly per frame,
+/// because the frame is half as long, and a percussive spectrum moves a band by
+/// ~10 dB between consecutive frames.
+///
+/// `dt = 0` must hold rather than snap, for the reason `feedback_for_a_dt` gives:
+/// egui's predicted `dt` is legitimately zero on a session's first frame, and
+/// `exp(0.0)` being exactly 1.0 is the failure that would freeze a view for good.
+#[test]
+fn the_band_smoother_is_a_time_constant_and_not_a_frame_fraction() {
+    // (per-frame fraction as it shipped, its time constant in ms)
+    for (fraction, tau_ms) in [
+        (0.3_f32, 46.7_f32), // bars / radial / chladni attack
+        (0.92, 6.6),         // bars / radial release — deliberately fast
+        (0.6, 18.2),         // chladni + spectrogram
+        (0.5, 24.1),         // flame + trails attack
+        (0.9, 7.2),          // trails release
+    ] {
+        let at_60 = smoothing_for_a_dt(1.0 / 60.0, tau_ms);
+        assert!(
+            (at_60 - fraction).abs() < 0.005,
+            "at 60 Hz a {tau_ms} ms time constant must reproduce the {fraction} it replaced, \
+             got {at_60} — a 60 Hz display must be unchanged by this"
+        );
+        // **The claim that matters is not the ratio, it is that the time constant
+        // survives.** `a` is nonlinear in `dt`, so halving the frame does not halve
+        // the step (0.92 -> 0.72 for a fast release), and asserting a ratio would
+        // be asserting the shape of `exp`. Inverting it — the time constant a
+        // coefficient *implies* — must come back as the number the view wrote down,
+        // at every frame rate. That is frame-rate independence stated as an
+        // equation, and it is what "the same music, the same smoothing" means.
+        let mut previous = 0.0_f32;
+        for hz in [144.0_f32, 120.0, 60.0, 30.0] {
+            let dt = 1.0 / hz;
+            let a = smoothing_for_a_dt(dt, tau_ms);
+            assert!(
+                a > previous,
+                "a longer frame must take a *bigger* step toward the target: \
+                 {hz} Hz -> {a} after {previous}"
+            );
+            previous = a;
+            let implied_ms = dt / -(1.0 - a).ln() * 1000.0;
+            assert!(
+                (implied_ms - tau_ms).abs() < tau_ms * 0.02,
+                "at {hz} Hz a {tau_ms} ms time constant must still be {tau_ms} ms of \
+                 smoothing; this frame rate implies {implied_ms} ms"
+            );
+        }
+    }
+    // A clock that cannot be trusted must not move anything, and a zero time
+    // constant is no smoothing rather than a division by zero.
+    assert_eq!(smoothing_for_a_dt(0.0, 46.7), 0.0);
+    assert_eq!(smoothing_for_a_dt(-1.0, 46.7), 0.0);
+    assert_eq!(smoothing_for_a_dt(1.0 / 60.0, 0.0), 1.0);
+    // Monotone in the time constant, so a view's number still means what it says.
+    let mut last = f32::INFINITY;
+    for tau in [1.0_f32, 6.6, 18.2, 46.7, 200.0, 1e6] {
+        let a = smoothing_for_a_dt(1.0 / 60.0, tau);
+        assert!(
+            a < last,
+            "a longer time constant must smooth less per frame: {tau} ms -> {a}"
+        );
+        last = a;
+    }
+}
+
 #[test]
 fn compute_bands_decays_when_empty() {
     let buf = VizBuf::new();
     let mut prev = [0.0f32; VIZ_BANDS];
-    compute_bands(&buf, &mut prev, 0.3, 0.95);
+    compute_bands(&buf, &mut prev, 1.0 / 60.0, 46.7, 6.6);
     for v in prev {
         assert!(v < 0.0); // decayed from 0 toward -60
     }
@@ -173,6 +701,10 @@ fn compute_wave_peak_envelope() {
     for &v in &[0.2, -0.8, 0.1, -0.3] {
         buf.push(v);
     }
+    // The first advancing read anchors the cursor at the newest sample, which is
+    // what a standalone test needs — in the app `compute_bands` does it every
+    // frame, and `compute_wave` then peeks at the same place.
+    buf.read_window(1024, 1.0 / 60.0);
     // 4 samples, 2 buckets: bucket0 = max(|0.2|, |-0.8|) = 0.8, bucket1 = 0.3
     let wave = compute_wave(&buf, 2);
     assert_eq!(wave.len(), 2);
@@ -189,6 +721,7 @@ fn compute_wave_reaches_last_bucket() {
     for _ in 0..1024 {
         buf.push(1.0);
     }
+    buf.read_window(1024, 1.0 / 60.0);
     let wave = compute_wave(&buf, 350);
     assert_eq!(wave.len(), 350);
     assert_eq!(wave[349], 1.0);

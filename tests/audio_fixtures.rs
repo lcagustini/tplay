@@ -157,23 +157,36 @@ fn the_untagged_m4a_falls_back_to_the_filename_stem() {
     // also the only stereo fixture in the set.
     assert!(info.duration.is_some(), "duration survives");
     let decoder = Decoder::try_from(std::fs::File::open(&path).unwrap()).expect("decodes");
-    assert_eq!(decoder.channels(), 2, "premise: the only stereo fixture");
+    assert_eq!(
+        decoder.channels().get(),
+        2,
+        "premise: the only stereo fixture"
+    );
 }
 
 /// The one fixture that does not decode at all.
 ///
 /// Opus has no codec crate in symphonia 0.5.5 — not in `all-codecs`, only the
-/// Ogg container — so this is a genuine failure, `Unrecognized format`. The only
-/// true tripwire of the three unlisted files, and the one that will break first
-/// on a dependency bump, because rodio 0.22 / symphonia 0.6 is also the upgrade
-/// that would matter for AIFF.
+/// Ogg container — so this is a genuine failure: rodio cannot even identify the
+/// container. The only true tripwire of the three unlisted files, and the one
+/// that breaks first on a dependency bump.
+///
+/// The message text is rodio's, not ours, and it moved in 0.22 (0.21 said
+/// "Unrecognized format"). Asserted because the *shape* of the error is the
+/// claim — a container symphonia cannot open is what a missing codec looks like
+/// from the outside — and a decode error from a different cause would not read
+/// this way. A renames-only change here is cosmetic; a change to an `IO`/`Seek`
+/// error is a real regression.
 #[test]
 fn symphonia_has_no_opus_codec() {
     let path = fixture("lena.opus");
     let err = Decoder::try_from(std::fs::File::open(&path).unwrap())
         .err()
         .expect("symphonia 0.5.5 cannot decode Opus");
-    assert_eq!(err.to_string(), "Unrecognized format");
+    assert_eq!(
+        err.to_string(),
+        "The format of the data has not been recognized."
+    );
     // The rate is still readable from the container head, which is how the
     // "nothing here may assume 44.1 kHz" note stays honest: this one is 48 kHz.
     let bytes = std::fs::read(&path).unwrap();
@@ -208,8 +221,8 @@ fn raw_aac_decodes_but_its_lofty_duration_is_an_estimate() {
     let path = fixture("lena.aac");
     let decoder = Decoder::try_from(std::fs::File::open(&path).unwrap())
         .expect("symphonia 0.5.5 DOES parse ADTS — the documented claim was wrong");
-    assert_eq!(decoder.sample_rate(), 44_100);
-    assert_eq!(decoder.channels(), 1);
+    assert_eq!(decoder.sample_rate().get(), 44_100);
+    assert_eq!(decoder.channels().get(), 1);
 
     let decoded = decoder
         .total_duration()
@@ -251,7 +264,7 @@ fn a_correctly_encoded_44100_aiff_is_not_rate_mangled() {
     let decoder =
         Decoder::try_from(std::fs::File::open(&path).unwrap()).expect("rodio decodes AIFF");
     assert_eq!(
-        decoder.sample_rate(),
+        decoder.sample_rate().get(),
         44_100,
         "symphonia reads a correct 44.1 kHz AIFF rate correctly. If this ever changes, \
          the extended-float bug widened; re-check the claim in AGENTS.md before assuming \

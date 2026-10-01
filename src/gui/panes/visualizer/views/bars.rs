@@ -11,8 +11,9 @@
 //! frame, and a smooth `fbm`-free shader is ~15 instructions per fragment, so
 //! the whole thing went from geometry to a comparison.
 
+use super::frame_dt;
 use crate::audio::viz::{compute_bands, VizBuf, DB_FLOOR, VIZ_BANDS};
-use crate::gui::panes::visualizer::gpu::{self, Target};
+use crate::gui::panes::visualizer::gpu;
 use crate::gui::theme::Palette;
 use eframe::egui;
 
@@ -20,16 +21,17 @@ fn prev_id() -> egui::Id {
     egui::Id::new("tplay.viz.prev.bars")
 }
 
+pub const HELPERS: &str = "";
+
 pub const FRAG: &str = r#"
-void main() {
-    vec2 uv = v_uv;
+    let uv = v_uv;
 
     // Which column this fragment is in, and where inside it. The cell is
     // VIZ_BANDS wide, so the bar occupies most of its cell — the gap the CPU
     // version left by insetting the rect by a fifth on each side.
-    float x = uv.x * float(VIZ_BANDS);
-    int idx = min(int(floor(x)), VIZ_BANDS - 1);
-    float within = fract(x);
+    let x = uv.x * f32(VIZ_BANDS);
+    let idx = min(i32(floor(x)), i32(VIZ_BANDS) - 1);
+    let within = fract(x);
 
     // **The gap is a pixel quantity, not a fraction of a cell, and that is the
     // whole fix for a small pane.** A fixed 10% gap is 0.6px once a cell is 6px
@@ -38,29 +40,28 @@ void main() {
     // feature is sampling a function faster than the screen can show it. Half a
     // pixel of gap is the smallest a gap can be and still be a gap; below that
     // it stops pretending.
-    float px = fwidth(x);
-    float gap = max(0.1, 0.5 * px);
-    float in_bar = step(gap, within) * step(within, 1.0 - gap);
+    let px = fwidth(x);
+    let gap = max(0.1, 0.5 * px);
+    let in_bar = step(gap, within) * step(within, 1.0 - gap);
 
     // 0 at the centre line, 1 at the pane's top and bottom edges, so the mirrored
     // half-height is a direct comparison against the level.
-    float across = abs(uv.y - 0.5) * 2.0;
-    float lvl = level(u_bands[idx]);
+    let across = abs(uv.y - 0.5) * 2.0;
+    let lvl = level(band_at(u32(idx)));
     // 0.9 of the full height, which is the 0.45 half-height the CPU version
     // scaled its rects by.
-    float body = step(across, lvl * 0.9) * in_bar;
+    let body = step(across, lvl * 0.9) * in_bar;
 
-    // The centre tick every fourth column. `mod` rather than an integer cast
-    // because `idx` is already an int and `%` on a negative is not a thing here
-    // — but the value is fractional-safe either way at this magnitude.
+    // The centre tick every fourth column. `%` on the integer index, which is
+    // never negative here, rather than a float modulus.
     //
     // A pixel tall, for the same reason as the gap: a fixed 1.2% of the pane's
     // height is 5px in a tall pane and a third of one in a short one, and a tick
     // that is sub-pixel is either absent or aliased depending on where the
     // splitter happened to be.
-    float tick_h = max(0.012, 0.5 / max(u_resolution.y, 1.0) * 2.0);
-    float tick_col = step(0.5, mod(float(idx), 4.0));
-    float tick = step(across, tick_h) * in_bar * tick_col;
+    let tick_h = max(0.012, 0.5 / max(u_resolution().y, 1.0) * 2.0);
+    let tick_col = step(0.5, f32(idx % 4));
+    let tick = step(across, tick_h) * in_bar * tick_col;
 
     // **Below about two pixels per cell there is no longer a bar chart, and
     // drawing one anyway is what shimmers.** A 32-band row needs room to be a row;
@@ -70,17 +71,16 @@ void main() {
     // *deliberate* rather than a consequence — every other property of the view
     // is resolution-independent, and this is the single case where the honest
     // answer is to draw less rather than draw differently.
-    float cells_px = 1.0 / max(px, 1e-6);
-    float legible = smoothstep(1.0, 2.5, cells_px);
+    let cells_px = 1.0 / max(px, 1e-6);
+    let legible = smoothstep(1.0, 2.5, cells_px);
 
-    // Alpha composited by hand, because the harness disables blending for a
-    // callback (egui blends its own primitives; a fullscreen quad must not be
-    // blended over the background it is replacing).
-    vec3 col = u_bg.rgb;
-    col = mix(col, u_accent.rgb, body * (0.4 + 0.6 * lvl) * legible);
-    col = mix(col, u_accent.rgb * 0.5, tick * legible);
-    frag_color = vec4(col, 1.0);
-}
+    // Alpha composited by hand, because the pipeline declares no blend state
+    // (egui blends its own primitives; a fullscreen quad must not be blended over
+    // the background it is replacing).
+    var col = u_bg().rgb;
+    col = mix(col, u_accent().rgb, body * (0.4 + 0.6 * lvl) * legible);
+    col = mix(col, u_accent().rgb * 0.5, tick * legible);
+    frag_color = vec4<f32>(col, 1.0);
 "#;
 
 pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &Palette) {
@@ -91,9 +91,9 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &P
     });
 
     // Attack/release constants (per-frame, 60 FPS assumed)
-    const ATTACK: f32 = 0.3;
-    const RELEASE: f32 = 0.92;
-    compute_bands(viz, &mut prev, ATTACK, RELEASE);
+    const ATTACK_MS: f32 = 46.7;
+    const RELEASE_MS: f32 = 6.6;
+    compute_bands(viz, &mut prev, frame_dt(painter), ATTACK_MS, RELEASE_MS);
 
     painter
         .ctx()
@@ -102,8 +102,8 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, viz: &VizBuf, palette: &P
     gpu::add_fullscreen(
         painter,
         rect,
+        HELPERS,
         FRAG,
         gpu::Uniforms::pack(viz, prev, palette, rect, painter.ctx()),
-        Target::Screen,
     );
 }

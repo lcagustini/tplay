@@ -92,8 +92,9 @@ fn build_gapless_next_produces_full_track_source() {
     let (eq_shared, balance, viz) = dummy_shared();
 
     let mut src = build_gapless_next(&wav, eq_shared, balance, viz).expect("a real wav must build");
-    assert_eq!(src.channels(), 2); // BalanceSource upmixes mono → stereo
-    assert_eq!(src.sample_rate(), 8000);
+    // rodio 0.22 types both as `NonZero`, so the assertions read through `.get()`.
+    assert_eq!(src.channels().get(), 2); // BalanceSource upmixes mono → stereo
+    assert_eq!(src.sample_rate().get(), 8000);
     common::assert_duration_approx(src.total_duration(), Duration::from_secs(1), "wav duration");
 
     // Not truncated, not a mix — a full track flows through (stereo frames).
@@ -189,11 +190,15 @@ fn source_chain_stereo_output() {
     let interleaved: Vec<f32> = (0..100)
         .flat_map(|i| [i as f32 * 0.01, i as f32 * 0.01 + 0.5])
         .collect();
-    let buf = SamplesBuffer::new(2, 44100, interleaved);
+    let buf = SamplesBuffer::new(
+        rodio::ChannelCount::new(2).expect("channel count is not zero"),
+        rodio::SampleRate::new(44_100).expect("sample rate is not zero"),
+        interleaved,
+    );
     let eq = EqSource::new(buf, eq_shared);
     let tap = TapSource::new(eq, viz);
     let bal = BalanceSource::new(tap, balance);
-    assert_eq!(bal.channels(), 2);
+    assert_eq!(bal.channels().get(), 2);
 }
 
 #[test]
