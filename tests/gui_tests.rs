@@ -906,6 +906,65 @@ fn both_lists_emit_the_rows_that_fit() {
     );
 }
 
+/// No tab bar may paint a ✕ beside a pane's title; the ☰ menu is the only way
+/// to hide a pane.
+///
+/// `egui_dock` 0.21 puts **two** close controls on a tab bar and every one of
+/// them defaults to `true`: the ✕ inside a tab (`show_close_buttons`) and the ✕
+/// at the right end of the bar (`show_leaf_close_all_buttons`). Each leaf here
+/// holds exactly one pane, so the second one reads as that pane's own close
+/// button — which is what a user reports seeing. `is_closeable -> false` is no
+/// substitute: it *greys the close-all button out* rather than removing it.
+///
+/// So this reads the builder chain. A builder flag is not observable at runtime
+/// — egui creates no widget for a false one, so an emitted-shape count cannot
+/// see it — and a version bump can flip a default without touching this file.
+///
+/// The `is_closeable` half is here for the same reason. The deprecated
+/// `closeable` is a **no-op** in 0.21: it compiles, it reads
+/// `// Hide via dropdown only`, and the right-click "Close" item and the
+/// middle-click on a tab still remove a pane.
+#[test]
+fn no_pane_draws_a_close_button() {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/gui/coordinator.rs"),
+    )
+    .expect("read coordinator.rs");
+
+    let start = src
+        .find("DockArea::new(&mut tree)")
+        .expect("premise: the coordinator builds one DockArea");
+    let chain = &src[start..];
+    let chain = &chain[..chain
+        .find("show_inside")
+        .expect("premise: the chain ends in show_inside")];
+
+    for flag in [
+        "show_close_buttons",
+        "show_leaf_close_all_buttons",
+        "show_leaf_collapse_buttons",
+    ] {
+        assert!(
+            chain.contains(&format!(".{flag}(false)")),
+            "the DockArea chain must pass .{flag}(false): all three default to true in \
+             egui_dock 0.21 and each paints a control at the right end of a tab bar. \
+             Chain read:\n{chain}",
+        );
+    }
+
+    assert!(
+        src.contains("fn is_closeable(&self"),
+        "PaneViewer must implement `is_closeable` — that is the hook egui_dock 0.21 \
+         calls when it decides whether a pane can be closed.",
+    );
+    assert!(
+        !src.contains("fn closeable(&mut self"),
+        "PaneViewer implements the deprecated `closeable`, which egui_dock 0.21 never \
+         calls. Override `is_closeable` instead: without it the right-click \"Close\" \
+         item and the middle-click on a tab both close a pane.",
+    );
+}
+
 /// The Library pane draws one breadcrumb for both sources, so the two segment
 /// builders plus `plan` (the `…` rule) are the only source-specific logic in
 /// it. Both are pure, so none of this needs an `egui::Ui`.

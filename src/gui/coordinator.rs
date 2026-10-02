@@ -180,8 +180,12 @@ impl TabViewer for PaneViewer<'_> {
         }
     }
 
-    fn closeable(&mut self, _tab: &mut Pane) -> bool {
-        false // Hide via dropdown only
+    /// The ☰ menu is the only way to hide a pane, so no close route may reach
+    /// one. This is `is_closeable`, not the deprecated `closeable`, which 0.21
+    /// never calls — it leaves the right-click "Close" item and the
+    /// middle-click on a tab as ways to drop a pane.
+    fn is_closeable(&self, _tab: &Pane) -> bool {
+        false
     }
 
     // The EQ pane sizes its bands to fit the pane width; hide the tab-level
@@ -537,8 +541,11 @@ pub fn update_ui(
             .show_add_buttons(false)
             .show_add_popup(false)
             .show_close_buttons(false)
-            // The close-all button was deprecated in favour of the collapse one
-            // in 0.21, and both are already off; clippy runs `-D warnings`.
+            // A second ✕ lives at the right end of every tab bar: the close-all
+            // button, on by default. Each leaf holds one pane, so it reads as
+            // that pane's own close button, and `is_closeable` alone only greys
+            // it out. The collapse button is the deprecated alias beside it.
+            .show_leaf_close_all_buttons(false)
             .show_leaf_collapse_buttons(false)
             .style(style.clone())
             .show_inside(ui, &mut viewer);
