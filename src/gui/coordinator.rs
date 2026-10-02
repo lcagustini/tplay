@@ -23,6 +23,9 @@ const LAYOUTS_DIR: &str = "layouts";
 const PANE_CONTENT_H: &str = "tplay.pane_content_h";
 /// egui memory key: measured minimum body width of a pane's content.
 const PANE_CONTENT_W: &str = "tplay.pane_content_w";
+/// egui memory key: whether the window is maximized. App-owned, see the read in
+/// `update_ui` — `RawInput::viewport().maximized` is not usable for this.
+const MAXIMIZED: &str = "tplay.maximized";
 
 /// Enforce minimum pane sizes by rewriting split fractions. Returns true if any fraction changed.
 fn apply_min_pane_sizes(
@@ -307,6 +310,7 @@ pub fn update_ui(
             // don't have to capture `app` (menu_contents already does).
             let win_close_tex = themes.icon(theme::Icon::Remove).cloned();
             let win_max_tex = themes.icon(theme::Icon::Maximize).cloned();
+            let win_restore_tex = themes.icon(theme::Icon::Restore).cloned();
             let win_min_tex = themes.icon(theme::Icon::Minimize).cloned();
 
             let menu_contents = |ui: &mut egui::Ui| {
@@ -408,7 +412,7 @@ pub fn update_ui(
                             ui,
                             win_close_tex.as_ref(),
                             theme::Icon::Remove,
-                            13.0,
+                            16.0,
                             true,
                             false,
                         )
@@ -470,13 +474,24 @@ pub fn update_ui(
                 // (Close) lands rightmost, so left-to-right the order is minimize,
                 // maximize/restore, close. Icons are per-theme files
                 // (text_primary chrome, ✕ close art).
-                let maximized = ui.ctx().input(|i| i.viewport().maximized).unwrap_or(false);
+                // Whether the window is maximized is ours, not egui's. It used to be read from
+                // `RawInput::viewport().maximized`, which reported `Some(true)` on a window
+                // that was not maximized — so this drew the restore glyph, and the click
+                // below computed `Maximized(false)`, a no-op that made maximize unreachable.
+                // Nothing in the app maximizes the window (decorations are off, so there is
+                // no title bar to double-click), so a flag this app flips is as good as the
+                // backend's and cannot be stuck. A window-manager keybinding could still
+                // maximize it behind the flag's back; that is the one drift left.
+                let maximized = ctx.memory_mut(|m| {
+                    *m.data
+                        .get_persisted_mut_or_default(egui::Id::new(MAXIMIZED))
+                });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let close = theme::icon_button(
                         ui,
                         win_close_tex.as_ref(),
                         theme::Icon::Remove,
-                        13.0,
+                        16.0,
                         true,
                         false,
                     )
@@ -484,11 +499,18 @@ pub fn update_ui(
                     if close.clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
+                    // The glyph follows the state, not only the tooltip: `restore.svg` is two
+                    // offset squares, so a maximized window reads as one from the
+                    // button rather than from the hover text alone.
                     let maximize = theme::icon_button(
                         ui,
-                        win_max_tex.as_ref(),
+                        if maximized {
+                            win_restore_tex.as_ref()
+                        } else {
+                            win_max_tex.as_ref()
+                        },
                         theme::Icon::Maximize,
-                        13.0,
+                        16.0,
                         true,
                         false,
                     )
@@ -498,13 +520,15 @@ pub fn update_ui(
                         "Maximize"
                     });
                     if maximize.clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+                        let next = !maximized;
+                        ctx.memory_mut(|m| m.data.insert_persisted(egui::Id::new(MAXIMIZED), next));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(next));
                     }
                     let minimize = theme::icon_button(
                         ui,
                         win_min_tex.as_ref(),
                         theme::Icon::Minimize,
-                        13.0,
+                        16.0,
                         true,
                         false,
                     )

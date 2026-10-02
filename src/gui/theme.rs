@@ -491,7 +491,7 @@ pub enum Icon {
     StarOff,
     /// Library folder row glyph.
     Folder,
-    /// Window chrome: minimize / maximize (text_primary, per theme).
+    /// Window chrome: minimize / maximize / restore (text_primary, per theme).
     Minimize,
     Maximize,
     /// Album Cover pane placeholder shown when a track has no art.
@@ -506,10 +506,12 @@ pub enum Icon {
     NewList,
     /// Playlist toolbar: save the playlist to its file.
     Save,
+    /// Window chrome: un-maximize a maximized window (text_primary, per theme).
+    Restore,
 }
 
 impl Icon {
-    pub const ALL: [Icon; 23] = [
+    pub const ALL: [Icon; 24] = [
         Icon::Logo,
         Icon::Play,
         Icon::Pause,
@@ -533,20 +535,21 @@ impl Icon {
         Icon::Reverse,
         Icon::NewList,
         Icon::Save,
+        Icon::Restore,
     ];
 
     /// `(file name, last-resort glyph)` per `ALL` slot, indexed by
     /// `self as usize`. **Append-only**: a new `Icon` goes at the end of the enum
     /// and the end of both arrays, or every later icon decodes the wrong file.
     ///
-    /// 16 of the 23 are [game-icons.net](https://game-icons.net) artwork under
+    /// 13 of the 24 are [game-icons.net](https://game-icons.net) artwork under
     /// CC BY 3.0 (see `CREDITS`); the rest are original. Each is a per-theme SVG
     /// with that theme's own palette token baked into its `fill`, which is why a
     /// single file can never serve two themes. A glyph is only ever painted when
     /// neither the theme nor the default ships the file, and several glyphs are
     /// known to tofu in the bundled egui font — which is exactly why the SVGs
     /// exist.
-    const DATA: [(&'static str, &'static str); 23] = [
+    const DATA: [(&'static str, &'static str); 24] = [
         ("logo.svg", "☰"),
         ("play.svg", "▶"),
         ("pause.svg", "⏸"),
@@ -570,6 +573,7 @@ impl Icon {
         ("reverse.svg", "⇅"),
         ("new_list.svg", "✳"),
         ("save.svg", "↓"),
+        ("restore.svg", "⧉"),
     ];
 
     /// The raster size this icon is drawn at, in pixels. Everything is a 20px

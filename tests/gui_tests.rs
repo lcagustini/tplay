@@ -965,6 +965,83 @@ fn no_pane_draws_a_close_button() {
     );
 }
 
+/// The window's maximized state is the app's, not egui's.
+///
+/// It used to be read from `RawInput::viewport().maximized`, which reported
+/// `Some(true)` on a window that was not maximized. Two things followed, and
+/// neither is observable at runtime: the button drew the *restore* glyph, and
+/// the click computed `Maximized(false)` — a no-op on an un-maximized window,
+/// so the maximize button could not maximize anything. The tooltip was already
+/// lying, so this only made an existing bug visible.
+///
+/// So this reads the source. It cannot be a behavioural test: driving the real
+/// top bar needs a full `TPlayApp`, and the value it got wrong is exactly the
+/// value a test on this machine would also read as wrong — there is no window
+/// whose `RawInput` says "not maximized" in a headless run.
+#[test]
+fn the_maximized_state_is_the_apps_and_not_eguis() {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/gui/coordinator.rs"),
+    )
+    .expect("read coordinator.rs");
+
+    // Comment lines are dropped before any of these greps. Documenting the
+    // thing a guard forbids is normal and necessary here, and a guard that
+    // reads comments then fails on its own explanation — the same trap
+    // `no_inline_tests.rs` skips comment lines to avoid.
+    let code: String = src
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        !code.contains("viewport().maximized"),
+        "the top bar must not read `RawInput::viewport().maximized` — eframe does not keep it \
+         in step with the window, and a stale `Some(true)` draws the restore glyph while making \
+         the click a no-op, so maximize becomes unreachable.",
+    );
+
+    let read = code
+        .find("get_persisted_mut_or_default")
+        .expect("premise: the maximized flag is read from egui memory");
+    let click = code
+        .find("if maximize.clicked()")
+        .expect("premise: the maximize button has a click handler");
+    assert!(
+        read < click,
+        "the flag is read before the click handler, so the glyph for this frame and the state \
+         the click flips are the same value.",
+    );
+
+    let handler = &code[click..click + 400];
+    assert!(
+        handler.contains("let next = !maximized"),
+        "the click must flip the flag it owns. Deriving the next state from a value the app does \
+         not control is what made the button dead; flipping the owned flag cannot disagree with \
+         the command it sends.",
+    );
+    assert!(
+        handler.contains("insert_persisted(egui::Id::new(MAXIMIZED), next)"),
+        "the click must store the state it just asked for, or the glyph lags the window by a \
+         frame. Handler:\n{handler}",
+    );
+    assert!(
+        handler.contains("ViewportCommand::Maximized(next)"),
+        "the command must send the same `next` that was stored, so the window and the glyph \
+         cannot disagree. Handler:\n{handler}",
+    );
+
+    // A persisted slot, not a temp one: `get_temp`/`insert_temp` are cleared at
+    // the end of every frame, so a flag stored there resets to false each frame
+    // and the glyph would never leave the maximize state.
+    assert!(
+        !handler.contains("insert_temp"),
+        "`insert_temp` is cleared at the end of each frame, so the flag would reset to false \
+         every frame and the glyph would never change.",
+    );
+}
+
 /// The Library pane draws one breadcrumb for both sources, so the two segment
 /// builders plus `plan` (the `…` rule) are the only source-specific logic in
 /// it. Both are pure, so none of this needs an `egui::Ui`.

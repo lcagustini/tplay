@@ -50,6 +50,7 @@ TOKENS = {
     "folder": "text_secondary",
     "minimize": "text_primary",
     "maximize": "text_primary",
+    "restore": "text_primary",
     "gapless": "text_primary",
     "crossfade": "text_primary",
     "reverse": "text_secondary",

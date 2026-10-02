@@ -2,11 +2,11 @@
 
 ## Icons
 
-16 of tplay's 23 pane icons are from **[game-icons.net](https://game-icons.net)**,
+13 of tplay's 24 pane icons are from **[game-icons.net](https://game-icons.net)**,
 used under the **[Creative Commons Attribution 3.0 Unported licence](http://creativecommons.org/licenses/by/3.0/)**
-(CC BY 3.0). The remaining seven — `logo`, `stop`, `shuffle`, `gapless`,
-`crossfade`, `new_list` and `nocover` — are original to this repository and carry
-no third-party terms.
+(CC BY 3.0). The remaining eleven — `logo`, `stop`, `shuffle`, `gapless`,
+`crossfade`, `new_list`, `nocover`, `minimize`, `maximize`, `restore` and
+`remove` — are original to this repository and carry no third-party terms.
 
 Attribution, as CC BY 3.0 requires:
 
@@ -26,16 +26,17 @@ Attribution, as CC BY 3.0 requires:
 | `next` | `delapouite/next-button` |
 | `repeat` | `lorc/cycle` |
 | `volume` | `delapouite/speaker` |
-| `remove` | `sbed/cancel` |
+| `remove` | `sbed/cancel`, replaced — see below |
 | `sort_asc` | `delapouite/progression` |
 | `sort_desc` | `delapouite/progression`, mirrored vertically |
 | `star_on` | `delapouite/round-star` |
 | `star_off` | `delapouite/round-star` |
 | `folder` | `delapouite/full-folder` |
-| `minimize` | `delapouite/contract` |
-| `maximize` | `delapouite/expand` |
+| `minimize` | `delapouite/contract`, replaced — see below |
+| `maximize` | `delapouite/expand`, replaced — see below |
 | `reverse` | `delapouite/vertical-flip` |
 | `save` | `delapouite/save` |
+| `restore` | original to this repository |
 | `logo` | original to this repository |
 | `shuffle` | original to this repository |
 | `stop` | original to this repository |
@@ -43,6 +44,12 @@ Attribution, as CC BY 3.0 requires:
 | `crossfade` | original to this repository |
 | `new_list` | original to this repository |
 | `nocover` | original to this repository |
+
+### The window controls
+
+`minimize` and `maximize` replace `delapouite/contract` and `delapouite/expand`
+— four arrows in and four arrows out, which is not what a title bar's controls
+mean. `restore` is new. `remove` drops the circle from `sbed/cancel`.
 
 ### The two that were drawn, not chosen
 
@@ -92,12 +99,12 @@ https://raw.githubusercontent.com/game-icons/icons/master/<author>/<name>.svg
 ```
 
 A future version of game-icons.net may replace an icon's artwork under the same
-name. The names above are the ones the 16 upstream shapes were taken from on
+name. The names above are the ones the 13 upstream shapes were taken from on
 2026-09-27.
 
 ### The two edits matter
 
-These are the two edits the 16 **upstream** files carry. The background rectangle
+These are the two edits the 13 **upstream** files carry. The background rectangle
 is load-bearing to remove, not cosmetic: it is an opaque black 512×512 fill, so an
 icon that kept it rasterizes to a solid black square.
 `every_icon_has_a_parseable_svg_source` in `tests/gui_tests.rs` asserts each file
