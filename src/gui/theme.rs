@@ -18,6 +18,7 @@
 //! lands instantly.
 
 use eframe::egui::{self, Color32, FontFamily, Stroke, TextureHandle, Vec2};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -838,8 +839,14 @@ pub struct Theme {
     /// a frame is a whole surface and borrowing another theme's would be a picture
     /// from a skin nobody chose.
     pub frames_dir: Option<PathBuf>,
+    /// `<theme_dir>/faces`, when the folder exists. Its own field for the same
+    /// reason as `frames_dir`: a theme shipping button art and no icon SVGs is
+    /// the normal case for a face.
+    pub faces_dir: Option<PathBuf>,
     /// What `frames` said, before any file was read.
     pub frames: Frames,
+    /// What `faces` said, before any file was read.
+    pub faces: Faces,
     /// `<theme_dir>/<font>`, when the theme names a font file that exists. Not
     /// a token value: like `icons_dir` it is a path resolved against the theme's
     /// own folder, and a theme with no font file is the normal case.
@@ -884,10 +891,13 @@ impl Theme {
         // hand-written one keep working with no edits.
         let group = |k: &str| v.get(k).cloned().unwrap_or(serde_json::Value::Null);
         let frames = Frames::from_json(&group("frames"));
+        let faces = Faces::from_json(&group("faces"));
         let icons_dir = dir.join("icons");
         let icons_dir = icons_dir.is_dir().then_some(icons_dir);
         let frames_dir = dir.join("frames");
         let frames_dir = frames_dir.is_dir().then_some(frames_dir);
+        let faces_dir = dir.join("faces");
+        let faces_dir = faces_dir.is_dir().then_some(faces_dir);
         let layout = {
             // Every token is optional; an absent one arrives as 0.0 and is
             // filled in by `with_defaults` on the way out.
@@ -920,8 +930,10 @@ impl Theme {
             layout,
             palette,
             frames,
+            faces,
             icons_dir,
             frames_dir,
+            faces_dir,
             font_file,
             type_: Type::from_json(&group("type")),
             chrome: Chrome::from_json(&group("chrome")),
@@ -1158,6 +1170,262 @@ pub struct DecodedFrames {
     pub pane: Option<(TextureHandle, Stretch)>,
 }
 
+/// One cell's rectangle inside a source image, in UV.
+///
+/// **The whole of a button's address, and pure.** Winamp's `CBUTTONS.BMP` is a
+/// grid of small bitmaps, so a theme names the file, the grid, and which cells are
+/// which state — and the arithmetic turning an index into a rectangle is the one
+/// thing here that can be wrong without anything failing loudly. A face drawn
+/// from a half-cell rect is a cropped button, which looks like an art problem.
+#[derive(Clone)]
+pub struct Cell {
+    /// Source image. Every face in a theme may share one file, which is what
+    /// makes a grid worth having.
+    pub tex: TextureHandle,
+    /// The cell, already in 0..1 UV space.
+    pub uv: egui::Rect,
+}
+
+/// A themed button face: four source rectangles out of one grid.
+///
+/// **The four states are Winamp's, not egui's.** egui draws a button's face as a
+/// `WidgetVisuals` fill, which a bitmap cannot be — so when a theme ships a face
+/// the button is *not* an egui `Button` at all (see `face_button`) and these four
+/// rectangles are the whole of its chrome. `lit` falls back to `pressed`, because
+/// a mode toggle's "on" face is the pressed artwork and a theme that means it
+/// differently can say so.
+#[derive(Clone)]
+pub struct Face {
+    pub normal: Cell,
+    pub pressed: Cell,
+    pub disabled: Cell,
+    pub lit: Cell,
+}
+
+impl std::fmt::Debug for Cell {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `TextureHandle` is neither `Copy` nor `Debug`, and a face test cares
+        // about the UV it resolves to, not the handle it came from.
+        f.debug_struct("Cell").field("uv", &self.uv).finish()
+    }
+}
+
+impl std::fmt::Debug for Face {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Face")
+            .field("normal", &self.normal)
+            .field("pressed", &self.pressed)
+            .field("disabled", &self.disabled)
+            .field("lit", &self.lit)
+            .finish()
+    }
+}
+
+impl Face {
+    /// The cell for an interaction state. `Ui`-free and `Painter`-free, so a test
+    /// can ask which of the four a given state picks without a frame.
+    ///
+    /// Hover and press share the pressed artwork, which is Winamp's own choice:
+    /// `CBUTTONS.BMP` carries normal and pressed rows and nothing between. A
+    /// theme that wants a distinct hover says so by naming `pressed` as the
+    /// pressed cell and accepting the share, not by getting a fourth.
+    pub fn cell_for(&self, enabled: bool, hovered: bool, pressed: bool, lit: bool) -> &Cell {
+        if !enabled {
+            &self.disabled
+        } else if lit {
+            &self.lit
+        } else if pressed || hovered {
+            &self.pressed
+        } else {
+            &self.normal
+        }
+    }
+}
+
+/// Divide a source image into a grid and name the cells a button uses.
+///
+/// The four indices are optional and each falls back to `cell`, so the smallest
+/// useful face is one line — a theme shipping a single static mark is the common
+/// case and should not have to invent a pressed variant to say so.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct FaceSlot {
+    /// File name inside `<theme>/faces/`.
+    pub src: String,
+    /// `[columns, rows]`. Omit for a single cell that fills the image.
+    #[serde(default)]
+    pub grid: Option<[u32; 2]>,
+    /// The resting face.
+    #[serde(default)]
+    pub cell: Option<u32>,
+    /// The held-down face. Defaults to `cell`.
+    #[serde(default)]
+    pub pressed: Option<u32>,
+    /// The greyed face. Defaults to `cell`.
+    #[serde(default)]
+    pub disabled: Option<u32>,
+    /// The lit face for a mode toggle. Defaults to `pressed`.
+    #[serde(default)]
+    pub lit: Option<u32>,
+}
+
+/// Every per-element bitmap a theme ships, keyed by the `Icon` slot it replaces.
+///
+/// **The key is an `Icon` variant name, so a face is looked up exactly where an
+/// icon texture is** — one call, and a theme that names six of them gets the other
+/// eighteen from the icon set. A grid rather than one file per element is
+/// Winamp's own shape: `CBUTTONS.BMP` holds the five transport marks in three
+/// states each, so a theme ships one image and a table of indices.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Faces {
+    slots: std::collections::BTreeMap<String, FaceSlot>,
+}
+
+impl Faces {
+    fn from_json(v: &serde_json::Value) -> Faces {
+        let mut slots = std::collections::BTreeMap::new();
+        if let Some(map) = v.as_object() {
+            for (k, f) in map {
+                let Some(src) = f.get("src").and_then(|x| x.as_str()) else {
+                    continue;
+                };
+                let num = |key: &str| f.get(key).and_then(|x| x.as_u64()).map(|n| n as u32);
+                let grid = f
+                    .get("grid")
+                    .and_then(|x| x.as_array())
+                    .and_then(|a| Some([a.first()?.as_u64()? as u32, a.get(1)?.as_u64()? as u32]));
+                slots.insert(
+                    k.clone(),
+                    FaceSlot {
+                        src: src.to_string(),
+                        grid,
+                        cell: num("cell"),
+                        pressed: num("pressed"),
+                        disabled: num("disabled"),
+                        lit: num("lit"),
+                    },
+                );
+            }
+        }
+        Faces { slots }
+    }
+}
+
+/// The UV rectangle of grid cell `index`, or `None` when the index is outside the
+/// grid.
+///
+/// `None` rather than a clamped rectangle on purpose: a theme whose `cell` points
+/// past its `grid` gets **no face**, so the button falls back to the icon — which
+/// is a legible mistake — rather than a silently cropped one, which is not.
+pub fn cell_to_rect(size: [usize; 2], grid: Option<[u32; 2]>, index: u32) -> Option<egui::Rect> {
+    let g = grid.unwrap_or([1, 1]);
+    let (cols, rows) = (g[0], g[1]);
+    if cols == 0 || rows == 0 {
+        return None;
+    }
+    let (cols, rows) = (cols as usize, rows as usize);
+    if (index as usize) >= cols * rows {
+        return None;
+    }
+    let (w, h) = (size[0] as f32, size[1] as f32);
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    let (cx, cy) = (index as usize % cols, index as usize / cols);
+    let (cw, ch) = (w / cols as f32, h / rows as f32);
+    Some(egui::Rect::from_min_max(
+        egui::pos2(cx as f32 * cw / w, cy as f32 * ch / h),
+        egui::pos2((cx + 1) as f32 * cw / w, (cy + 1) as f32 * ch / h),
+    ))
+}
+
+impl Faces {
+    /// Decode every named slot, and build a `Face` from each complete one.
+    ///
+    /// A slot missing its file, or naming an index outside its grid, is skipped
+    /// rather than fatal: the button keeps the icon it had, which is what a theme
+    /// that got the table slightly wrong should look like.
+    fn load(ctx: &egui::Context, theme: &Theme) -> BTreeMap<Icon, Face> {
+        let mut out = BTreeMap::new();
+        let Some(dir) = theme.faces_dir.as_deref() else {
+            return out;
+        };
+        // One decode per file, however many slots name it — a grid is the whole
+        // reason a theme can ship five transport marks in one image.
+        let mut textures: BTreeMap<String, TextureHandle> = BTreeMap::new();
+        for (key, slot) in &theme.faces.slots {
+            let Some(icon) = Icon::from_face_key(key) else {
+                log::warn!("faces.{key} is not an icon slot; ignoring it");
+                continue;
+            };
+            if !textures.contains_key(&slot.src) {
+                let path = dir.join(&slot.src);
+                match std::fs::read(&path)
+                    .map_err(|e| e.to_string())
+                    .and_then(|bytes| {
+                        let fmt =
+                            image::ImageFormat::from_path(&path).map_err(|e| e.to_string())?;
+                        image::load_from_memory_with_format(&bytes, fmt)
+                            .map(|i| i.into_rgba8())
+                            .map_err(|e| e.to_string())
+                    }) {
+                    Ok(img) => {
+                        let (w, h) = (img.width() as usize, img.height() as usize);
+                        textures.insert(
+                            slot.src.clone(),
+                            ctx.load_texture(
+                                format!("tplay-face-{}-{}", theme.id, slot.src),
+                                egui::ColorImage::from_rgba_premultiplied([w, h], img.as_raw()),
+                                // Nearest by default, like every other bitmap a
+                                // theme ships: this is 1x art on a HiDPI screen.
+                                egui::TextureOptions::NEAREST,
+                            ),
+                        );
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "face art {} did not decode ({e}); keeping the icons",
+                            path.display()
+                        );
+                        continue;
+                    }
+                }
+            }
+            let tex = textures[&slot.src].clone();
+            let cell = |i: u32| {
+                cell_to_rect(tex.size(), slot.grid, i).map(|uv| Cell {
+                    tex: tex.clone(),
+                    uv,
+                })
+            };
+            let Some(normal) = slot.cell.and_then(cell) else {
+                log::warn!("faces.{key} names no usable cell; keeping the icon");
+                continue;
+            };
+            out.insert(
+                icon,
+                Face {
+                    pressed: slot
+                        .pressed
+                        .and_then(cell)
+                        .unwrap_or_else(|| normal.clone()),
+                    disabled: slot
+                        .disabled
+                        .and_then(cell)
+                        .unwrap_or_else(|| normal.clone()),
+                    lit: slot
+                        .lit
+                        .and_then(cell)
+                        .or_else(|| slot.pressed.and_then(cell))
+                        .unwrap_or_else(|| normal.clone()),
+                    normal,
+                },
+            );
+        }
+        out
+    }
+}
+
 /// Which of the theme's two frame surfaces a caller wants.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Surface {
@@ -1249,6 +1517,7 @@ pub struct ThemeState {
     themes: Themes,
     icons: Vec<Option<TextureHandle>>,
     frames: DecodedFrames,
+    faces: BTreeMap<Icon, Face>,
 }
 
 impl ThemeState {
@@ -1262,11 +1531,32 @@ impl ThemeState {
             .unwrap_or_else(|| themes.default().clone());
         let icons = load_icons(ctx, &themes, &current);
         let frames = DecodedFrames::load(ctx, &current);
+        let faces = Faces::load(ctx, &current);
         Self {
             current,
             themes,
             icons,
             frames,
+            faces,
+        }
+    }
+
+    /// The theme's bitmap face for a slot, or `None` for the icon it replaces.
+    ///
+    /// **No fallback to the default theme, and that is deliberate.** Icons fall
+    /// back, because a missing mark is better drawn as egui's version than as a
+    /// glyph. A face does not: it is a button's whole chrome, so a borrowed one
+    /// would be a button in another skin's clothes, sitting next to this theme's
+    /// own faces.
+    pub fn face(&self, icon: Icon) -> Option<&Face> {
+        self.faces.get(&icon)
+    }
+
+    /// Both halves of a slot in one lookup, for the button helpers.
+    pub fn slot(&self, icon: Icon) -> Slot {
+        Slot {
+            face: self.face(icon).cloned(),
+            icon: self.icon(icon).cloned(),
         }
     }
 
@@ -1310,6 +1600,7 @@ impl ThemeState {
         self.current = Arc::clone(theme);
         self.icons = load_icons(ctx, &self.themes, &self.current);
         self.frames = DecodedFrames::load(ctx, &self.current);
+        self.faces = Faces::load(ctx, &self.current);
         true
     }
 }
@@ -1326,7 +1617,7 @@ pub const NOCOVER_PX: u32 = 128;
 /// Pane icons. Each maps to a `<theme>/icons/<name>.svg` and a fallback glyph.
 /// Fallback glyphs must exist in the bundled egui font stack (Ubuntu-Light /
 /// NotoEmoji / emoji-icon-font) or they render as tofu boxes.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Icon {
     /// App logo — menu button in the top panel (per-theme file, fallback glyph).
     Logo,
@@ -1462,20 +1753,104 @@ impl Icon {
     pub fn glyph(self) -> &'static str {
         Self::DATA[self.index()].1
     }
+
+    /// The `faces` token this slot is looked up by — the icon's file stem, so
+    /// `play.svg` and a face named `play` are the same thing.
+    ///
+    /// Deriving it from `DATA` rather than a second table is the point: a key
+    /// that could disagree with the icon it names is a key that eventually does.
+    pub fn face_key(self) -> &'static str {
+        Self::DATA[self.index()]
+            .0
+            .strip_suffix(".svg")
+            .expect("every icon file ends in .svg")
+    }
+
+    /// The inverse of [`Icon::face_key`]. `None` for a name that is not an icon
+    /// slot, so a typo in a theme's `faces` table is reported rather than drawn.
+    pub fn from_face_key(key: &str) -> Option<Icon> {
+        Icon::ALL.into_iter().find(|i| i.face_key() == key)
+    }
 }
 
-/// Transport/action button wired to a theme icon texture, falling back to a
-/// glyph when the icon failed to load. `selected` paints egui's selected
-/// visuals (theme `--progress-fill`/`--focus-ring`) for mode toggles.
+/// What to draw for one icon slot: the theme's bitmap face if it has one, and
+/// its icon texture either way.
+///
+/// **Owned rather than borrowed, and the reason is a borrow.** The ☰ menu closure
+/// needs `&mut ThemeState` to switch themes, so a `Slot` that lent out
+/// `&ThemeState` would conflict with the very lookup the window buttons need.
+/// Cloning is four refcount bumps per call — a `Face` is four `TextureHandle`s —
+/// which is nothing next to re-decoding them, and it leaves the coordinator's
+/// existing hoist-the-textures pattern untouched.
+#[derive(Clone, Default)]
+pub struct Slot {
+    pub face: Option<Face>,
+    pub icon: Option<TextureHandle>,
+}
+
+impl std::fmt::Debug for Slot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Slot")
+            .field("face", &self.face)
+            .field("icon", &self.icon.is_some())
+            .finish()
+    }
+}
+
+/// A button whose face is a bitmap cell rather than an egui widget.
+///
+/// **This is not an egui `Button` on purpose, and that is what makes it cheap.**
+/// egui paints a button's face as a `WidgetVisuals` fill, so a bitmap under one
+/// would have to be drawn *through* it — `bg_fill` and `weak_bg_fill` suppressed
+/// per widget, on a cloned `Style` (`Ui::style_mut` is clone-on-write), or the
+/// hover fill covering the art. Owning the whole widget means none of that: the
+/// face is drawn, the click is taken, and nothing else paints over it.
+///
+/// Hover needs no frame of latency either, because the state is read from this
+/// frame's own `interact` rather than inferred from last frame's `Response`.
+pub fn face_button(
+    ui: &mut egui::Ui,
+    face: &Face,
+    size: f32,
+    enabled: bool,
+    selected: bool,
+) -> egui::Response {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), egui::Sense::hover());
+    // A disabled button gets `Sense::hover`, so `clicked()` is false by
+    // construction rather than by a guard the call sites would each need.
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let resp = ui.interact(rect, ui.next_auto_id(), sense);
+    let cell = face.cell_for(
+        enabled,
+        resp.hovered(),
+        resp.is_pointer_button_down_on(),
+        selected,
+    );
+    ui.painter()
+        .image(cell.tex.id(), rect, cell.uv, Color32::WHITE);
+    resp
+}
+
+/// Transport/action button: the theme's bitmap face for the slot if it ships one,
+/// its icon texture if not, and a glyph if the icon failed to load. `selected`
+/// paints egui's selected visuals (theme `--progress-fill`/`--focus-ring`) for
+/// mode toggles — or selects the face's `lit` cell.
 pub fn icon_button(
     ui: &mut egui::Ui,
-    tex: Option<&TextureHandle>,
+    slot: Slot,
     icon: Icon,
     size: f32,
     enabled: bool,
     selected: bool,
 ) -> egui::Response {
-    let button = match tex {
+    if let Some(face) = &slot.face {
+        return face_button(ui, face, size, enabled, selected);
+    }
+    let button = match &slot.icon {
         Some(h) => egui::Button::image(egui::Image::new(h).fit_to_exact_size(Vec2::splat(size))),
         None => egui::Button::new(icon.glyph()),
     };
@@ -1492,12 +1867,12 @@ pub fn icon_button(
 /// more positional parameters: a shape that cannot be filled in wrongly.
 pub fn icon_toggle(
     ui: &mut egui::Ui,
-    tex: Option<&TextureHandle>,
+    slot: Slot,
     icon: Icon,
     size: f32,
     on: bool,
 ) -> egui::Response {
-    icon_button(ui, tex, icon, size, true, on)
+    icon_button(ui, slot, icon, size, true, on)
 }
 
 /// Standalone icon (e.g. the volume speaker beside its slider).

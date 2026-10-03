@@ -339,6 +339,10 @@ fn edit_modal(app: &mut TPlayApp, themes: &ThemeState, ctx: &egui::Context) {
             .backdrop
             .unwrap_or(egui::Color32::from_black_alpha(100)),
     );
+    // A theme with a bitmap face for the star uses its `lit` cell for the on
+    // state; one without keeps the two icon textures it always had, which is the
+    // only way the row can show on and off from a single `Icon`.
+    let star_face = themes.slot(theme::Icon::StarOn);
     let star_on = themes.icon(theme::Icon::StarOn).cloned();
     let star_off = themes.icon(theme::Icon::StarOff).cloned();
 
@@ -371,12 +375,20 @@ fn edit_modal(app: &mut TPlayApp, themes: &ThemeState, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             for n in 1..=5u8 {
                 let on = n <= armed.rating;
-                let tex = if on {
-                    star_on.as_ref()
+                let slot = if star_face.face.is_some() {
+                    star_face.clone()
                 } else {
-                    star_off.as_ref()
+                    theme::Slot {
+                        face: None,
+                        icon: if on {
+                            star_on.clone()
+                        } else {
+                            star_off.clone()
+                        },
+                    }
                 };
-                if theme::icon_toggle(ui, tex, theme::Icon::StarOn, panes.edit_star, on).clicked() {
+                if theme::icon_toggle(ui, slot, theme::Icon::StarOn, panes.edit_star, on).clicked()
+                {
                     // The same star again clears, which is what makes that
                     // reachable without a separate control.
                     stars = Some(if n == armed.rating { 0 } else { n });

@@ -354,12 +354,14 @@ pub fn update_ui(
             }
 
             let logo = themes.icon(theme::Icon::Logo).cloned();
-            // Window-chrome textures are cloned before the closures below so they
-            // don't have to capture `app` (menu_contents already does).
-            let win_close_tex = themes.icon(theme::Icon::Remove).cloned();
-            let win_max_tex = themes.icon(theme::Icon::Maximize).cloned();
-            let win_restore_tex = themes.icon(theme::Icon::Restore).cloned();
-            let win_min_tex = themes.icon(theme::Icon::Minimize).cloned();
+            // Window-chrome slots are resolved before the closures below, for the
+            // reason the textures were: the ☰ menu closure needs `&mut themes`,
+            // so a lookup inside it would conflict. `Slot` owns its handles, so
+            // this is a refcount bump rather than a borrow.
+            let win_close_slot = themes.slot(theme::Icon::Remove);
+            let win_max_slot = themes.slot(theme::Icon::Maximize);
+            let win_restore_slot = themes.slot(theme::Icon::Restore);
+            let win_min_slot = themes.slot(theme::Icon::Minimize);
 
             let menu_contents = |ui: &mut egui::Ui| {
                 // Inside the closure, not hoisted above it: `layouts_dir` does a
@@ -458,7 +460,7 @@ pub fn update_ui(
                         // Delete button (✕) — uses the same remove icon as window close
                         if theme::icon_button(
                             ui,
-                            win_close_tex.as_ref(),
+                            win_close_slot.clone(),
                             theme::Icon::Remove,
                             chrome_icon,
                             true,
@@ -537,7 +539,7 @@ pub fn update_ui(
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let close = theme::icon_button(
                         ui,
-                        win_close_tex.as_ref(),
+                        win_close_slot.clone(),
                         theme::Icon::Remove,
                         chrome_icon,
                         true,
@@ -553,9 +555,9 @@ pub fn update_ui(
                     let maximize = theme::icon_button(
                         ui,
                         if maximized {
-                            win_restore_tex.as_ref()
+                            win_restore_slot.clone()
                         } else {
-                            win_max_tex.as_ref()
+                            win_max_slot.clone()
                         },
                         theme::Icon::Maximize,
                         chrome_icon,
@@ -574,7 +576,7 @@ pub fn update_ui(
                     }
                     let minimize = theme::icon_button(
                         ui,
-                        win_min_tex.as_ref(),
+                        win_min_slot.clone(),
                         theme::Icon::Minimize,
                         chrome_icon,
                         true,

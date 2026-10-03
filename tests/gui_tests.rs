@@ -3848,3 +3848,284 @@ fn a_frame_is_nearest_unless_the_theme_asks_otherwise() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// Bitmap button faces
+// ---------------------------------------------------------------------------
+
+/// A face's whole address is `cell_to_rect`, and a button drawn from a half-cell
+/// is a cropped button — which reads as an art problem, not a code one. So the
+/// arithmetic is tested directly rather than through the drawing.
+#[test]
+fn a_grid_cell_addresses_its_own_slice_of_the_source() {
+    let uv = |idx| tplay::gui::theme::cell_to_rect([100, 60], Some([5, 3]), idx).unwrap();
+    let near = |a: egui::Pos2, b: egui::Pos2| (a - b).length() < 1e-6;
+    let same = |a: f32, b: f32| (a - b).abs() < 1e-6;
+
+    // Row-major, which is Winamp's own layout: `CBUTTONS.BMP` is five transport
+    // marks across and three states down.
+    assert!(near(uv(0).min, egui::pos2(0.0, 0.0)), "cell 0 is top-left");
+    assert!(
+        near(uv(1).min, egui::pos2(0.2, 0.0)),
+        "cell 1 is one column right"
+    );
+    assert!(
+        near(uv(5).min, egui::pos2(0.0, 1.0 / 3.0)),
+        "cell 5 wraps to row 1"
+    );
+    assert!(
+        near(uv(14).min, egui::pos2(4.0 / 5.0, 2.0 / 3.0)),
+        "cell 14 is the last"
+    );
+
+    // Every cell is inside the image and is the same size as every other.
+    let w = uv(0).width();
+    let h = uv(0).height();
+    for i in 0..15 {
+        let r = uv(i);
+        assert!(
+            same(r.width(), w) && same(r.height(), h),
+            "cell {i} is uniform"
+        );
+        assert!(
+            r.min.x >= -1e-6 && r.max.x <= 1.0 + 1e-6,
+            "cell {i} inside 0..1"
+        );
+        assert!(
+            r.min.y >= -1e-6 && r.max.y <= 1.0 + 1e-6,
+            "cell {i} inside 0..1"
+        );
+    }
+
+    // The last cell's corner is exactly 1.0, not a rounding past it — a UV past
+    // the edge wraps to the far side of the texture and shows the wrong art.
+    assert!((uv(14).max.x - 1.0).abs() < 1e-6);
+    assert!((uv(14).max.y - 1.0).abs() < 1e-6);
+}
+
+/// No `grid` means one cell filling the image, which is what a theme shipping a
+/// single static mark gets without inventing a grid.
+#[test]
+fn a_slot_without_a_grid_is_one_cell_filling_the_image() {
+    let r = tplay::gui::theme::cell_to_rect([64, 32], None, 0).expect("one cell");
+    assert_eq!(
+        r,
+        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))
+    );
+}
+
+/// **An index outside the grid is `None`, not a clamped cell.** A theme whose
+/// table points one row past its art then draws the icon it always had, which is
+/// a legible mistake — where a clamped rectangle is a silently cropped button.
+#[test]
+fn an_index_outside_the_grid_yields_no_cell() {
+    assert!(tplay::gui::theme::cell_to_rect([100, 60], Some([5, 3]), 15).is_none());
+    assert!(tplay::gui::theme::cell_to_rect([100, 60], Some([5, 3]), 9999).is_none());
+    // A zero-sized grid cannot address anything either.
+    assert!(tplay::gui::theme::cell_to_rect([100, 60], Some([0, 3]), 0).is_none());
+    assert!(tplay::gui::theme::cell_to_rect([100, 60], Some([5, 0]), 0).is_none());
+    // Nor can a zero-sized source.
+    assert!(tplay::gui::theme::cell_to_rect([0, 0], None, 0).is_none());
+}
+
+/// `Icon::face_key` and its inverse must be exact inverses, because the whole
+/// lookup is "the theme named a key, which is an icon slot". A key that could
+/// disagree with the icon it names is one that eventually does.
+#[test]
+fn a_face_key_is_the_icons_file_stem_and_the_inverse_is_exact() {
+    for icon in tplay::gui::theme::Icon::ALL {
+        let key = icon.face_key();
+        assert_eq!(key, icon.file_name().trim_end_matches(".svg"));
+        assert_eq!(
+            tplay::gui::theme::Icon::from_face_key(key),
+            Some(icon),
+            "{key} round-trips"
+        );
+    }
+    // Every key is distinct, so one face cannot answer for two icons.
+    let mut keys: Vec<&str> = tplay::gui::theme::Icon::ALL
+        .iter()
+        .map(|i| i.face_key())
+        .collect();
+    let before = keys.len();
+    keys.sort_unstable();
+    keys.dedup();
+    assert_eq!(keys.len(), before, "no two icons share a face key");
+    assert_eq!(tplay::gui::theme::Icon::from_face_key("nope"), None);
+}
+
+/// The four state cells each fall back to the resting one, so a theme shipping a
+/// single static mark gets a working face from one index.
+#[test]
+fn a_face_with_one_cell_is_valid_and_always_draws_it() {
+    let dir = std::env::temp_dir()
+        .join(format!("tplay-test-{}", std::process::id()))
+        .join("face-slot");
+    let theme_dir = dir.join("ft");
+    let faces_dir = theme_dir.join("faces");
+    std::fs::create_dir_all(&faces_dir).unwrap();
+    std::fs::write(
+        theme_dir.join("theme.json"),
+        r##"{"id":"ft","name":"Ft","base":"dark",
+             "palette":{"bg":"#101010","panel_bg":"#181818","text_primary":"#e0e0e0",
+             "text_secondary":"#8c8c8c","accent":"#2ea3f0","border":"#333333",
+             "progress_fill":"#2ea3f0","slider_track":"#222222","slider_handle":"#999999",
+             "row_even":"#141414","row_odd":"#1c1c1c","btn_hover":"#282828",
+             "focus_ring":"#2ea3f0"},
+             "faces":{"play":{"src":"cbuttons.png","grid":[5,3],"cell":1}}}"##,
+    )
+    .unwrap();
+    // A 50x30 image so the grid is 10x10 cells.
+    let mut png = Vec::new();
+    {
+        let mut img = image::RgbImage::new(50, 30);
+        for p in img.pixels_mut() {
+            *p = image::Rgb([255, 255, 255]);
+        }
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+    }
+    std::fs::write(faces_dir.join("cbuttons.png"), png).unwrap();
+
+    let ctx = egui::Context::default();
+    let themes = Themes::load_from(std::slice::from_ref(&dir));
+    let state = ThemeState::load(&ctx, themes, "ft");
+    let slot = state.slot(tplay::gui::theme::Icon::Play);
+    let face = slot.face.as_ref().expect("the face decoded");
+
+    // Only `cell` was named, so every other state falls back to it — which is
+    // what makes a one-index face table work.
+    for (enabled, hovered, pressed, lit) in [
+        (true, false, false, false),
+        (true, true, false, false),
+        (true, false, true, false),
+        (true, true, true, true),
+        (false, true, true, true),
+    ] {
+        assert_eq!(
+            face.cell_for(enabled, hovered, pressed, lit).uv,
+            face.normal.uv,
+            "all four states fall back to the resting cell"
+        );
+    }
+    // Cell 1 of a 5x3 grid on a 50x30 image.
+    assert!((face.normal.uv.min.x - 0.2).abs() < 1e-6);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Hover and press share the pressed artwork, and a lit toggle prefers `lit` —
+/// so the state table is pinned, not assumed.
+#[test]
+fn the_four_state_cells_are_chosen_in_a_fixed_order() {
+    let ctx = egui::Context::default();
+    let img = egui::ColorImage::new([20, 12], vec![egui::Color32::WHITE; 20 * 12]);
+    let tex = ctx.load_texture("face-states", img, egui::TextureOptions::NEAREST);
+    let cell = |i: u32| tplay::gui::theme::Cell {
+        tex: tex.clone(),
+        uv: tplay::gui::theme::cell_to_rect([20, 12], Some([4, 3]), i).unwrap(),
+    };
+    let face = tplay::gui::theme::Face {
+        normal: cell(0),
+        pressed: cell(4),
+        disabled: cell(8),
+        lit: cell(9),
+    };
+    let pick = |e, h, p, l| face.cell_for(e, h, p, l).uv;
+    let at = |i: u32| tplay::gui::theme::cell_to_rect([20, 12], Some([4, 3]), i).unwrap();
+
+    assert_eq!(
+        pick(false, false, false, false),
+        at(8),
+        "disabled wins over everything"
+    );
+    assert_eq!(pick(true, false, false, true), at(9), "lit wins over hover");
+    assert_eq!(
+        pick(true, true, false, false),
+        at(4),
+        "hover uses the pressed art"
+    );
+    assert_eq!(
+        pick(true, true, true, false),
+        at(4),
+        "press uses the pressed art"
+    );
+    assert_eq!(pick(true, false, false, false), at(0), "resting");
+}
+
+/// A face draws exactly one image, covering exactly the rect it was given, and a
+/// disabled one is not clickable — which is the whole contract of replacing an
+/// egui `Button` with a custom widget.
+#[test]
+fn a_face_button_draws_its_face_and_takes_the_click() {
+    let ctx = egui::Context::default();
+    let img = egui::ColorImage::new([40, 12], vec![egui::Color32::WHITE; 40 * 12]);
+    let tex = ctx.load_texture("face-button", img, egui::TextureOptions::NEAREST);
+    let cell = |i: u32| tplay::gui::theme::Cell {
+        tex: tex.clone(),
+        uv: tplay::gui::theme::cell_to_rect([40, 12], Some([4, 3]), i).unwrap(),
+    };
+    let face = tplay::gui::theme::Face {
+        normal: cell(0),
+        pressed: cell(4),
+        disabled: cell(8),
+        lit: cell(9),
+    };
+
+    // The pointer is parked well outside the panel: `RawInput::default()` leaves
+    // it at (0,0), which is *over* the first button, and a hovered face is the
+    // pressed artwork — so the cell this asserts would depend on where the frame
+    // happened to start.
+    let mut raw = egui::RawInput::default();
+    raw.events
+        .push(egui::Event::PointerMoved(egui::pos2(900.0, 900.0)));
+    let out = ctx.run_ui(raw, |ui| {
+        let _resp = tplay::gui::theme::face_button(ui, &face, 24.0, true, false);
+        // A disabled button is hover-sense only, so it can never report a click —
+        // by construction rather than by a guard each call site would need.
+        let dead = tplay::gui::theme::face_button(ui, &face, 24.0, false, false);
+        assert!(!dead.clicked());
+    });
+    let shapes = out.shapes.clone();
+    out.drop_without_applying_deltas();
+
+    let images: Vec<(egui::Rect, egui::Rect)> = shapes
+        .iter()
+        .filter_map(|c| match &c.shape {
+            egui::Shape::Mesh(m) if m.texture_id == tex.id() => {
+                let pos = m.vertices.iter().fold(egui::Rect::NOTHING, |acc, v| {
+                    acc.union(egui::Rect::from_min_size(v.pos, egui::vec2(0.0, 0.0)))
+                });
+                let uv = m.vertices.iter().fold(egui::Rect::NOTHING, |acc, v| {
+                    acc.union(egui::Rect::from_min_size(v.uv, egui::vec2(0.0, 0.0)))
+                });
+                Some((pos, uv))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        images.len(),
+        2,
+        "one face per button, and nothing else painted"
+    );
+    for (rect, _) in &images {
+        assert_eq!(rect.width(), 24.0, "the face covers the requested square");
+        assert_eq!(rect.height(), 24.0);
+    }
+    let cell = |i: u32| tplay::gui::theme::cell_to_rect([40, 12], Some([4, 3]), i).unwrap();
+    let which = |uv: egui::Rect| (0..12u32).find(|&i| cell(i) == uv);
+    assert_eq!(
+        which(images[0].1),
+        Some(0),
+        "the enabled, unhovered button is the resting cell, got {:?}",
+        images[0].1
+    );
+    assert_eq!(
+        which(images[1].1),
+        Some(8),
+        "the disabled button is the disabled cell, got {:?}",
+        images[1].1
+    );
+}

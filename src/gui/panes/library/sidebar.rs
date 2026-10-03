@@ -100,7 +100,7 @@ fn sidebar_row(
         if row.removable
             && theme::icon_button(
                 ui,
-                themes.icon(theme::Icon::Remove),
+                themes.slot(theme::Icon::Remove),
                 theme::Icon::Remove,
                 theme.panes.small_icon,
                 true,
@@ -366,7 +366,7 @@ pub fn sidebar_ui(
                             }
                             if theme::icon_button(
                                 ui,
-                                themes.icon(theme::Icon::Remove),
+                                themes.slot(theme::Icon::Remove),
                                 theme::Icon::Remove,
                                 theme.panes.small_icon,
                                 true,

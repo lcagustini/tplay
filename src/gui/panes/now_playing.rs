@@ -172,7 +172,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                 let prev_enabled = app.has_prev_track();
                 if theme::icon_button(
                     ui,
-                    themes.icon(Icon::Prev),
+                    themes.slot(Icon::Prev),
                     Icon::Prev,
                     panes.transport_icon,
                     prev_enabled,
@@ -190,7 +190,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                     // `play()` would have nothing to start.
                     if theme::icon_button(
                         ui,
-                        themes.icon(Icon::Play),
+                        themes.slot(Icon::Play),
                         Icon::Play,
                         panes.transport_icon,
                         app.can_play(),
@@ -202,7 +202,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                     }
                 } else if theme::icon_button(
                     ui,
-                    themes.icon(Icon::Pause),
+                    themes.slot(Icon::Pause),
                     Icon::Pause,
                     panes.transport_icon,
                     true,
@@ -213,7 +213,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                     app.pause();
                 }
 
-                if theme::icon_button(ui, themes.icon(Icon::Stop), Icon::Stop, 18.0, true, false)
+                if theme::icon_button(ui, themes.slot(Icon::Stop), Icon::Stop, 18.0, true, false)
                     .clicked()
                 {
                     app.stop();
@@ -222,7 +222,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                 let next_enabled = app.has_next_track();
                 if theme::icon_button(
                     ui,
-                    themes.icon(Icon::Next),
+                    themes.slot(Icon::Next),
                     Icon::Next,
                     panes.transport_icon,
                     next_enabled,
@@ -237,7 +237,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                 ui.separator();
                 if theme::icon_toggle(
                     ui,
-                    themes.icon(Icon::Shuffle),
+                    themes.slot(Icon::Shuffle),
                     Icon::Shuffle,
                     panes.transport_icon,
                     app.shuffle(),
@@ -248,7 +248,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                 }
                 if theme::icon_toggle(
                     ui,
-                    themes.icon(Icon::Repeat),
+                    themes.slot(Icon::Repeat),
                     Icon::Repeat,
                     panes.transport_icon,
                     app.repeat(),
@@ -304,7 +304,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                 // Crossfade toggle (icon button, lit while active)
                 if theme::icon_toggle(
                     ui,
-                    themes.icon(Icon::Crossfade),
+                    themes.slot(Icon::Crossfade),
                     Icon::Crossfade,
                     panes.transport_icon,
                     app.prefs().crossfade(),
@@ -316,7 +316,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                 // Gapless toggle (icon button, lit while active)
                 if theme::icon_toggle(
                     ui,
-                    themes.icon(Icon::Gapless),
+                    themes.slot(Icon::Gapless),
                     Icon::Gapless,
                     panes.transport_icon,
                     app.prefs().gapless(),

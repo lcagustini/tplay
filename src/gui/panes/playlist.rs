@@ -81,7 +81,7 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
 
         if theme::icon_button(
             ui,
-            themes.icon(Icon::Reverse),
+            themes.slot(Icon::Reverse),
             Icon::Reverse,
             panes.toolbar_icon,
             true,
@@ -96,7 +96,7 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
         // mark already means "shuffle" on the transport row.
         if theme::icon_button(
             ui,
-            themes.icon(Icon::Shuffle),
+            themes.slot(Icon::Shuffle),
             Icon::Shuffle,
             panes.toolbar_icon,
             true,
@@ -119,7 +119,7 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
                 .unwrap_or_else(|| "Save the playlist to a .tplay file".into());
             if theme::icon_button(
                 ui,
-                themes.icon(Icon::Save),
+                themes.slot(Icon::Save),
                 Icon::Save,
                 panes.toolbar_icon,
                 true,
@@ -132,7 +132,7 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
             }
             if theme::icon_button(
                 ui,
-                themes.icon(Icon::NewList),
+                themes.slot(Icon::NewList),
                 Icon::NewList,
                 panes.toolbar_icon,
                 true,
@@ -284,7 +284,7 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
                 row.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if theme::icon_button(
                         ui,
-                        themes.icon(Icon::Remove),
+                        themes.slot(Icon::Remove),
                         Icon::Remove,
                         panes.small_icon,
                         true,
