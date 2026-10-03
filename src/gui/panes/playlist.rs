@@ -9,15 +9,12 @@ use std::path::{Path, PathBuf};
 
 /// egui memory: the jump-to-file search text.
 const PL_QUERY: &str = "tplay.playlist.query";
-/// The playlist toolbar's icon size — the app's icon buttons all carry a literal
-/// (13 in the row chrome, 18 in Now Playing's transport); this is the toolbar's.
-const TOOLBAR_ICON: f32 = 16.0;
-
 pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui) {
     // Owned Arc copy — panes take `&mut app` while using theme data.
     let theme = themes.current().clone();
     let p = theme.palette;
-    let layout = theme.layout;
+    let (rows, panes, type_) = (theme.rows, theme.panes, theme.type_);
+    let (gap, field_w) = (panes.gap, panes.field_w);
 
     // Header: the playlist's name (single source — app.playlist_name; follows
     // New/Save/Load live).
@@ -25,7 +22,7 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(pl_name).strong().color(p.text_primary));
     });
-    ui.add_space(4.0);
+    ui.add_space(gap);
 
     // Jump-to-file. Same box, same haystack and the same single `LIB_QUERY`-style
     // key shape as the Library's, so the two filters feel like one feature; the
@@ -44,13 +41,13 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
         ui.add(
             egui::TextEdit::singleline(&mut q)
                 .hint_text("title, artist, album…")
-                .desired_width(220.0),
+                .desired_width(field_w),
         );
     });
     ui.ctx()
         .memory_mut(|m| m.data.insert_temp(query_id, q.clone()));
     let query = q.trim().to_lowercase();
-    ui.add_space(4.0);
+    ui.add_space(gap);
 
     // The toolbar: one row of icons above the list — the three content ops on
     // the left, the two file actions hard right. Text labels would eat 500px of a
@@ -62,8 +59,6 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
     // down there could only overflow what was reserved, while up here
     // `available_height()` already accounts for it and the list gets the rest.
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 8.0;
-
         // The sort control is the one button that keeps a text label, and it is
         // the right place for text: it is a ComboBox because it *picks a column*
         // out of `SORT_OPTIONS`, and an icon could only say "something about
@@ -88,7 +83,7 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
             ui,
             themes.icon(Icon::Reverse),
             Icon::Reverse,
-            TOOLBAR_ICON,
+            panes.toolbar_icon,
             true,
             false,
         )
@@ -103,7 +98,7 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
             ui,
             themes.icon(Icon::Shuffle),
             Icon::Shuffle,
-            TOOLBAR_ICON,
+            panes.toolbar_icon,
             true,
             false,
         )
@@ -116,7 +111,6 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
         // `Align::Min`, NOT `Center` — see `list_header_right` in
         // library/listing.rs for the measurement.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
             // Right-to-left puts the first widget furthest right, so Save is added
             // first to read Create → Save left to right.
             let save_hover = app
@@ -127,7 +121,7 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
                 ui,
                 themes.icon(Icon::Save),
                 Icon::Save,
-                TOOLBAR_ICON,
+                panes.toolbar_icon,
                 true,
                 false,
             )
@@ -140,7 +134,7 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
                 ui,
                 themes.icon(Icon::NewList),
                 Icon::NewList,
-                TOOLBAR_ICON,
+                panes.toolbar_icon,
                 true,
                 false,
             )
@@ -160,7 +154,7 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
             }
         });
     });
-    ui.add_space(4.0);
+    ui.add_space(gap);
 
     let drag_from_id = egui::Id::new("tplay.drag_from");
     let drag_hover_id = egui::Id::new("tplay.drag_hover");
@@ -182,14 +176,14 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
     // for, so the old `available_height() - footer_h` guess is gone. The 40px
     // floor is the one thing that survives — a pane squeezed to nothing should
     // still show one row rather than none.
-    let scroll_h = ui.available_height().max(40.0);
+    let scroll_h = ui.available_height().max(theme.rows.height);
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .max_height(scroll_h)
         .show(ui, |ui| {
             let mut to_delete: Option<usize> = None;
             let mut shown = 0usize;
-            let row_h = 24.0;
+            let row_h = rows.height;
 
             for i in 0..app.playlist().len() {
                 // **Rows outside the clip are not drawn.** A `ScrollArea` lays out
@@ -241,27 +235,28 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
                 // accent stripe all go under the widgets. Drag hover too.
                 let (rect, mut row) =
                     theme::row(ui, i, is_current || drag_hover == Some(i), row_h, &theme);
-                row.spacing_mut().item_spacing.x = 8.0;
 
                 row.label(
                     egui::RichText::new(format!("{:>2}.", i + 1))
                         .color(p.text_secondary)
-                        .font(egui::FontId::new(
-                            layout.text_meta,
-                            theme.metadata_font.clone(),
-                        )),
+                        .font(theme::meta_font(&type_)),
                 );
 
                 // Title fills the remaining width. The right side is the ✕ button
                 // and FORMAT cell when there is no secondary block, and adds the
                 // 150px artist·album cell when there is one.
-                let right_w = 130.0 + if meta.is_empty() { 0.0 } else { 158.0 };
+                let right_w = rows.trailing_w
+                    + if meta.is_empty() {
+                        0.0
+                    } else {
+                        panes.meta_w + rows.gap
+                    };
                 let title_resp = row.add_sized(
-                    egui::vec2((rect.width() - right_w).max(40.0), row_h),
+                    egui::vec2((rect.width() - right_w).max(rows.title_floor), row_h),
                     egui::Label::new(egui::RichText::new(&name).color(if is_current {
                         p.text_primary
                     } else {
-                        p.text_primary.gamma_multiply(0.85)
+                        p.text_primary.gamma_multiply(rows.dim)
                     }))
                     .truncate()
                     .sense(egui::Sense::click_and_drag()),
@@ -277,7 +272,7 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
                         title_resp.rect.center(),
                         egui::Align2::CENTER_CENTER,
                         &name,
-                        egui::FontId::new(layout.text_time, theme.metadata_font.clone()),
+                        theme::time_font(&type_),
                         p.accent,
                     );
                 }
@@ -291,7 +286,7 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
                         ui,
                         themes.icon(Icon::Remove),
                         Icon::Remove,
-                        13.0,
+                        panes.small_icon,
                         true,
                         false,
                     )
@@ -303,15 +298,12 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
                         ui.label(
                             egui::RichText::new(fmt.clone())
                                 .color(p.text_secondary)
-                                .font(egui::FontId::new(
-                                    layout.text_meta,
-                                    theme.metadata_font.clone(),
-                                )),
+                                .font(theme::meta_font(&type_)),
                         );
                     }
                     if !meta.is_empty() {
                         ui.add_sized(
-                            egui::vec2(150.0, row_h),
+                            egui::vec2(panes.meta_w, row_h),
                             egui::Label::new(
                                 egui::RichText::new(meta.clone()).color(p.text_secondary),
                             )

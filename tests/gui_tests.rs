@@ -2,14 +2,14 @@
 
 mod common;
 
-use eframe::egui::{self, Color32, FontFamily};
+use eframe::egui::{self, Color32, FontId};
 use std::path::Path;
 use tplay::app::{Pane, VizView};
 use tplay::audio;
 use tplay::audio::eq::EqShared;
 use tplay::audio::viz::{VizBuf, VIZ_BANDS, WAVE_BUCKETS};
 use tplay::gui::panes::visualizer::views::SHADER_VIEWS;
-use tplay::gui::theme::{rasterize_icon, Base, Icon, Layout, Themes, DEFAULT_THEME_ID};
+use tplay::gui::theme::{rasterize_icon, Base, Family, Icon, Layout, Themes, DEFAULT_THEME_ID};
 
 /// One headless frame, with the output disposed of.
 ///
@@ -57,13 +57,18 @@ fn theme_palette_has_all_required_tokens() {
     assert_ne!(p.btn_hover, egui::Color32::default());
 }
 
+/// The two families a theme can pick from. It cannot pick egui's `FontFamily`
+/// directly — that type's serde derive sits behind epaint's own feature — so
+/// this pins the closed set the theme layer exposes instead.
 #[test]
-fn theme_metadata_font_values() {
+fn theme_family_values() {
     let themes = Themes::load();
     for theme in themes.list() {
-        match theme.metadata_font {
-            FontFamily::Monospace | FontFamily::Proportional => {}
-            _ => panic!("unknown metadata_font variant"),
+        for f in [theme.type_.family, theme.type_.mono] {
+            assert!(matches!(f, Family::Proportional | Family::Monospace));
+            // And it converts to the egui family every pane actually hands a
+            // `FontId`, rather than being a parallel enum that drifts.
+            assert!(FontId::new(12.0, f.into()).family == f.into());
         }
     }
 }
@@ -106,6 +111,10 @@ fn eq_shared_default_gains_are_zero() {
     assert!(!shared.enabled);
 }
 
+/// `Layout` is the equalizer's sizing and nothing else. Its three type and row
+/// tokens moved into `Type` and `Rows`, and this is what pins the remainder to
+/// the sizes the app shipped with — a group's defaults are a look, so they are a
+/// test rather than a comment.
 #[test]
 fn theme_layout_defaults() {
     let layout = Layout::default().with_defaults();
@@ -114,9 +123,6 @@ fn theme_layout_defaults() {
     assert_eq!(layout.eq_band_w_min, 30.0);
     assert_eq!(layout.eq_header_gap, 6.0);
     assert_eq!(layout.eq_band_gap, 2.0);
-    assert_eq!(layout.text_meta, 12.0);
-    assert_eq!(layout.text_time, 13.0);
-    assert_eq!(layout.row_tint_alpha, 0.10);
 }
 
 #[test]
@@ -169,9 +175,20 @@ fn default_theme_id_constant() {
 /// sidebar's geometry contract, not a claim about which egui bug produced it.
 #[test]
 fn sidebar_column_and_scroll_content_ignore_textedit_overflow() {
+    // The sidebar's own three sizes, written down because the shape cases below
+    // are nested `fn`s and cannot capture. The premise assertion is what keeps
+    // that from being a second copy nothing updates: it fails by token name the
+    // day `panes` moves.
     const SIDEBAR: f32 = 120.0;
     const FORM_W: f32 = 100.0;
     const FIELD_H: f32 = 18.0;
+    let panes = tplay::gui::theme::Panes::default();
+    assert_eq!(SIDEBAR, panes.sidebar_w, "premise: sidebar_w moved");
+    assert_eq!(
+        FORM_W, panes.sidebar_form_w,
+        "premise: sidebar_form_w moved"
+    );
+    assert_eq!(FIELD_H, panes.sidebar_row_h, "premise: sidebar_row_h moved");
     const LONG: &str = "smb://192.168.15.59/newhd/some/deeply/nested/folder/name";
 
     #[derive(Clone, Copy)]

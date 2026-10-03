@@ -24,39 +24,48 @@ const LIB_QUERY: &str = "tplay.library.query";
 /// egui memory: the main-pane login prompt, keyed per host (`(NET_LOGIN, host)`).
 const NET_LOGIN: &str = "tplay.network.login";
 
-/// Column widths shared by the sortable header and the file rows (matches SORT_OPTIONS).
-const CELL_WIDTHS: [f32; 4] = [0.0, 90.0, 100.0, 44.0]; // Title is flexible
-/// The rating cell: a star and its digit, side by side.
+/// Width of the `+` button plus the inter-cell spacing that no token owns. The
+/// rest of a row's fixed width is `rows.columns` and the rating cell.
+const ACTION_W: f32 = 40.0;
+
+/// The rating cell: a star and its digit, side by side. One row wide, and the star
+/// is 5/24 of it — both *derived from the row height* rather than written down,
+/// which is what keeps the star's own comment ("half the row height") true after a
+/// theme changes `rows.height`.
 ///
-/// **Not** one of `CELL_WIDTHS`, because those are the sortable columns and this is
-/// not one — the header draws one cell per `SORT_OPTIONS` entry and stops, so the
-/// rating sits past the last header cell and the columns still line up. It is not
-/// sortable on purpose: rating is a whole-star field, so ordering by it would
+/// **Not** one of `rows.columns`, because those are the sortable columns and this
+/// is not one — the header draws one cell per `SORT_OPTIONS` entry and stops, so
+/// the rating sits past the last header cell and the columns still line up. It is
+/// not sortable on purpose: rating is a whole-star field, so ordering by it would
 /// produce long runs of indistinguishable rows.
-const RATING_W: f32 = 24.0;
-/// The star inside that cell. Half the row height, so a 24px row holds it without
-/// the cell's text growing.
-const RATING_STAR: f32 = 10.0;
-/// Fixed right-hand width per row: the three tag cells + the rating cell + the `+`
-/// button + inter-cell spacing, leaving the title column the flexible remainder.
-const ROW_FIXED_W: f32 = CELL_WIDTHS[1] + CELL_WIDTHS[2] + CELL_WIDTHS[3] + RATING_W + 40.0;
+fn rating_w(rows: &theme::Rows) -> f32 {
+    rows.height
+}
+
+/// Fixed right-hand width per row: the tag cells + the rating cell + the `+` button
+/// and its spacing, leaving the title column the flexible remainder.
+fn fixed_w(rows: &theme::Rows) -> f32 {
+    rows.columns[1] + rows.columns[2] + rows.columns[3] + rating_w(rows) + ACTION_W
+}
 
 /// One clickable column header; true when clicked, and the caller picks the sort
 /// key. The active column is accent-colored with a theme icon (`arrow`) for the
 /// direction; clicking it again flips it in `TPlayApp::set_library_sort`.
 fn header_cell(
     ui: &mut egui::Ui,
-    p: theme::Palette,
+    theme: &theme::Theme,
     label: &str,
     active: bool,
     arrow: Option<&egui::TextureHandle>,
     w: f32,
     row_h: f32,
 ) -> bool {
+    let p = theme.palette;
     let color = if active { p.accent } else { p.text_secondary };
     let btn = match arrow {
         Some(tex) => egui::Button::image_and_text(
-            egui::Image::new(tex).fit_to_exact_size(egui::vec2(10.0, 10.0)),
+            egui::Image::new(tex)
+                .fit_to_exact_size(egui::vec2(theme.panes.tiny_icon, theme.panes.tiny_icon)),
             egui::RichText::new(label).small().color(color),
         ),
         None => egui::Button::new(egui::RichText::new(label).small().color(color)),
@@ -75,14 +84,13 @@ fn draw_dir_row(
     folder: Option<&egui::TextureHandle>,
 ) -> bool {
     let p = theme.palette;
-    let layout = theme.layout;
-    let (rect, mut row) = theme::row(ui, i, false, row_h, theme);
-    row.spacing_mut().item_spacing.x = 4.0;
-    let mut text_x = rect.min.x + 6.0;
+    let rows = theme.rows;
+    let rect = theme::row(ui, i, false, row_h, theme).0;
+    let mut text_x = rect.min.x + rows.inset;
     if let Some(tex) = folder {
-        let s = 14.0;
+        let s = theme.panes.folder_icon;
         let img_rect = egui::Rect::from_min_size(
-            egui::pos2(rect.min.x + 2.0, rect.center().y - s / 2.0),
+            egui::pos2(rect.min.x + rows.inset, rect.center().y - s / 2.0),
             egui::vec2(s, s),
         );
         ui.painter().image(
@@ -91,7 +99,7 @@ fn draw_dir_row(
             egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
             egui::Color32::WHITE,
         );
-        text_x += s + 4.0;
+        text_x += s + rows.cell_gap;
     }
     let text = if folder.is_none() {
         format!("📁  {name}")
@@ -102,7 +110,7 @@ fn draw_dir_row(
         egui::pos2(text_x, rect.center().y),
         egui::Align2::LEFT_CENTER,
         text,
-        egui::FontId::new(layout.text_meta, theme.metadata_font.clone()),
+        theme::meta_font(&theme.type_),
         p.text_secondary,
     );
     let resp = ui.interact(rect, egui::Id::new("lib_dir").with(i), egui::Sense::click());
@@ -119,8 +127,8 @@ fn draw_playlist_row(
     path: &Path,
 ) -> bool {
     let p = theme.palette;
+    let rows = theme.rows;
     let (rect, mut row) = theme::row(ui, i, false, row_h, theme);
-    row.spacing_mut().item_spacing.x = 4.0;
 
     let name = path
         .file_name()
@@ -129,10 +137,15 @@ fn draw_playlist_row(
 
     let title_resp = row
         .add_sized(
-            egui::vec2((rect.width() - ROW_FIXED_W - 6.0).max(40.0), row_h),
-            egui::Label::new(egui::RichText::new(&name).color(p.text_primary.gamma_multiply(0.85)))
-                .truncate()
-                .sense(egui::Sense::click()),
+            egui::vec2(
+                (rect.width() - fixed_w(&rows) - rows.inset).max(rows.title_floor),
+                row_h,
+            ),
+            egui::Label::new(
+                egui::RichText::new(&name).color(p.text_primary.gamma_multiply(rows.dim)),
+            )
+            .truncate()
+            .sense(egui::Sense::click()),
         )
         .on_hover_text_at_pointer("Load playlist");
 
@@ -194,12 +207,11 @@ fn draw_file_row(
     star_off: Option<&egui::TextureHandle>,
 ) -> Option<FileAct> {
     let p = theme.palette;
-    let layout = theme.layout;
+    let rows = theme.rows;
     // A spooled `smb://` track is "current" under its URI, which is what the
     // playlist holds — so the highlight follows the track across both sources.
     let is_current = app.current_path().is_some_and(|c| c == path);
     let (rect, mut row) = theme::row(ui, i, is_current, row_h, theme);
-    row.spacing_mut().item_spacing.x = 4.0;
 
     let title = library::title_or_stem(path, info);
     let display = match info.and_then(|i| i.track_no.clone()) {
@@ -211,14 +223,14 @@ fn draw_file_row(
     let dur = info.and_then(|i| i.duration);
 
     // Title takes the flexible remainder; the tag cells mirror the header.
-    let title_w = (rect.width() - ROW_FIXED_W - 6.0).max(40.0);
+    let title_w = (rect.width() - fixed_w(&rows) - rows.inset).max(rows.title_floor);
     let title_resp = row
         .add_sized(
             egui::vec2(title_w, row_h),
             egui::Label::new(egui::RichText::new(&display).color(if is_current {
                 p.text_primary
             } else {
-                p.text_primary.gamma_multiply(0.85)
+                p.text_primary.gamma_multiply(rows.dim)
             }))
             .truncate()
             .sense(egui::Sense::click()),
@@ -231,17 +243,14 @@ fn draw_file_row(
             egui::Label::new(egui::RichText::new(text).color(p.text_secondary)).truncate(),
         );
     };
-    cell(&mut row, CELL_WIDTHS[1], artist);
-    cell(&mut row, CELL_WIDTHS[2], album);
+    cell(&mut row, rows.columns[1], artist);
+    cell(&mut row, rows.columns[2], album);
     row.add_sized(
-        egui::vec2(CELL_WIDTHS[3], row_h),
+        egui::vec2(rows.columns[3], row_h),
         egui::Label::new(
             egui::RichText::new(TPlayApp::fmt_duration(dur))
                 .color(p.text_secondary)
-                .font(egui::FontId::new(
-                    layout.text_meta,
-                    theme.metadata_font.clone(),
-                )),
+                .font(theme::meta_font(&theme.type_)),
         ),
     );
 
@@ -260,7 +269,7 @@ fn draw_file_row(
     } else {
         (theme::Icon::StarOff, star_off)
     };
-    theme::icon(&mut row, star_tex, star, RATING_STAR);
+    theme::icon(&mut row, star_tex, star, theme.panes.tiny_icon);
     let digits = if rating > 0 {
         rating.to_string()
     } else {
@@ -268,7 +277,7 @@ fn draw_file_row(
     };
     let rating_resp = row
         .add_sized(
-            egui::vec2(RATING_W - RATING_STAR, row_h),
+            egui::vec2(rating_w(&rows) - theme.panes.tiny_icon, row_h),
             egui::Label::new(egui::RichText::new(&digits).color(if rating > 0 {
                 p.accent
             } else {
@@ -366,13 +375,13 @@ fn file_list_ui(
         ui.add(
             egui::TextEdit::singleline(&mut q)
                 .hint_text("title, artist, album…")
-                .desired_width(220.0),
+                .desired_width(theme.panes.field_w),
         );
     });
     ui.ctx()
         .memory_mut(|m| m.data.insert_temp(egui::Id::new(LIB_QUERY), q.clone()));
     let query = q.trim().to_lowercase();
-    ui.add_space(4.0);
+    ui.add_space(theme.panes.gap);
 
     // Sortable column header only when the folder has audio files —
     // folders/playlists-only rows have no tag columns to align to.
@@ -384,23 +393,24 @@ fn file_list_ui(
         let asc_tex = themes.icon(theme::Icon::SortAsc).cloned();
         let desc_tex = themes.icon(theme::Icon::SortDesc).cloned();
         ui.horizontal(|ui| {
-            let (head, _) = ui
-                .allocate_exact_size(egui::vec2(ui.available_width(), 22.0), egui::Sense::hover());
+            let (head, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), theme.rows.header_h),
+                egui::Sense::hover(),
+            );
             ui.painter().rect_filled(head, 0.0, p.row_odd);
             let mut h = ui.new_child(
                 egui::UiBuilder::new()
                     .max_rect(egui::Rect::from_min_max(
-                        head.min + egui::vec2(6.0, 0.0),
+                        head.min + egui::vec2(theme.rows.inset, 0.0),
                         head.max,
                     ))
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
             );
-            h.spacing_mut().item_spacing.x = 4.0;
             for (key, label) in library::SORT_OPTIONS.iter().enumerate() {
                 let w = if key == 0 {
-                    (head.width() - ROW_FIXED_W).max(2.0)
+                    (head.width() - fixed_w(&theme.rows)).max(2.0)
                 } else {
-                    CELL_WIDTHS[key]
+                    theme.rows.columns[key]
                 };
                 let arrow = if key == cur {
                     if asc {
@@ -411,19 +421,29 @@ fn file_list_ui(
                 } else {
                     None
                 };
-                if header_cell(&mut h, p, label, key == cur, arrow, w, 22.0) {
+                if header_cell(
+                    &mut h,
+                    theme,
+                    label,
+                    key == cur,
+                    arrow,
+                    w,
+                    theme.rows.header_h,
+                ) {
                     action_sort = Some(key);
                 }
             }
         });
     }
 
-    let scroll_h = (ui.available_height() - 24.0).max(40.0);
+    // One row's height is both the reserve for the counts line above and the floor
+    // under the list, so neither figure is written down twice.
+    let scroll_h = (ui.available_height() - theme.rows.height).max(theme.rows.height);
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .max_height(scroll_h)
         .show(ui, |ui| {
-            let row_h = 24.0;
+            let row_h = theme.rows.height;
             let mut i = 0usize;
             let mut action: Option<Act> = None;
 
@@ -552,7 +572,7 @@ pub fn local_list_ui(
     // wanted `&mut TPlayApp` while `entries` came out of it; both are readers
     // now, so the folder is not walked at all.
     list_header_right(app, ui, theme.palette, Counts::of(app.library().entries()));
-    ui.add_space(4.0);
+    ui.add_space(theme.panes.gap);
     let scanning = app.library_scanning();
     let act = file_list_ui(
         app,
@@ -735,7 +755,14 @@ pub fn remote_list_ui(
         let mut names: Vec<&network::RemoteEntry> = browse.entries.iter().collect();
         names.sort_by_key(|e| e.name.to_lowercase());
         for e in names {
-            if draw_dir_row(ui, theme, 24.0, i, &e.name, folder_tex.as_ref()) {
+            if draw_dir_row(
+                ui,
+                theme,
+                theme.rows.height,
+                i,
+                &e.name,
+                folder_tex.as_ref(),
+            ) {
                 share_name = Some(e.name.clone());
             }
             i += 1;
@@ -815,7 +842,7 @@ pub fn remote_list_ui(
     });
 
     list_header_right(app, ui, p, Counts::of(&entries));
-    ui.add_space(4.0);
+    ui.add_space(theme.panes.gap);
     let act = file_list_ui(app, themes, ui, theme, &entries, note, true);
 
     match act {
@@ -887,13 +914,13 @@ fn login_form_ui(
         .small()
         .color(p.text_secondary),
     );
-    ui.add_space(4.0);
+    ui.add_space(theme.panes.gap);
 
     // Enter in either field submits (TextEdit surrenders focus on Enter).
     let mut enter = false;
-    let field_w = 220.0;
+    let field_w = theme.panes.field_w;
     let mut field = ui.add_sized(
-        egui::vec2(field_w, 18.0),
+        egui::vec2(field_w, theme.rows.height),
         egui::TextEdit::singleline(&mut creds.0)
             .hint_text("username")
             .desired_width(field_w)
@@ -903,7 +930,7 @@ fn login_form_ui(
         enter = true;
     }
     field = ui.add_sized(
-        egui::vec2(field_w, 18.0),
+        egui::vec2(field_w, theme.rows.height),
         egui::TextEdit::singleline(&mut creds.1)
             .password(true)
             .hint_text("password")

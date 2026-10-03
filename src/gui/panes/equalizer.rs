@@ -1,13 +1,11 @@
 use crate::app::{Pane, TPlayApp};
 use crate::audio::eq::{EQ_FREQUENCIES, EQ_GAIN_MAX_DB, EQ_GAIN_MIN_DB, EQ_PRESETS};
-use crate::gui::theme::ThemeState;
+use crate::gui::theme::{self, ThemeState};
 use eframe::egui;
 
 /// The one band count every layout decision reads, so a change to
 /// `EQ_FREQUENCIES` cannot leave the width maths and the floor behind.
 const BANDS: usize = EQ_FREQUENCIES.len();
-/// Widest a band's column gets before the row starts shrinking to fit.
-const BAND_W_MAX: f32 = 80.0;
 
 pub fn equalizer_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui) {
     // Owned Arc copy — panes take `&mut app` while using theme data.
@@ -60,7 +58,7 @@ pub fn equalizer_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui
     let label_h = ui.fonts_mut(|f| {
         f.layout_no_wrap(
             TPlayApp::format_freq(EQ_FREQUENCIES[0]),
-            egui::FontId::new(layout.text_meta, theme.metadata_font.clone()),
+            theme::meta_font(&theme.type_),
             p.text_secondary,
         )
         .size()
@@ -86,14 +84,14 @@ pub fn equalizer_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui
     // leftover width equally (dynamic centering).
     // The height budget subtracts the band gap and the label, both measured
     // above for the pane's minimum height. The floor above and this budget must
-    // subtract the same two numbers, or a theme with a larger `text_meta` grows
+    // subtract the same two numbers, or a theme with a larger `type.meta` grows
     // one and not the other and the labels clip.
     let label_below = layout.eq_band_gap + label_h;
     let slider_h =
         (ui.available_height() - label_below).clamp(layout.eq_slider_min_h, layout.eq_slider_max_h);
     let min_spacing = ui.spacing().item_spacing.x;
     let avail_w = ui.available_width();
-    let band_w_max = BAND_W_MAX;
+    let band_w_max = theme.panes.eq_band_w_max;
     let n = BANDS as f32;
     let gaps = (BANDS - 1) as f32;
     let row_w_full = band_w_max * n + min_spacing * gaps;
@@ -136,10 +134,7 @@ pub fn equalizer_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui
                     ui.label(
                         egui::RichText::new(TPlayApp::format_freq(EQ_FREQUENCIES[i]))
                             .color(p.text_secondary)
-                            .font(egui::FontId::new(
-                                layout.text_meta,
-                                theme.metadata_font.clone(),
-                            )),
+                            .font(theme::meta_font(&theme.type_)),
                     );
                 });
             });

@@ -9,17 +9,21 @@ fn seek_id() -> egui::Id {
     egui::Id::new("tplay.seek")
 }
 
-/// Label in the theme's metadata color + font (monospace in retro).
-fn meta(s: impl Into<String>, theme: &Theme, size: f32) -> egui::RichText {
+/// Label in the theme's metadata color + font (monospace in retro). The caller
+/// passes the role's `FontId` — `theme::meta_font` or `theme::time_font` — so the
+/// size and family are one token read rather than two arguments.
+fn meta(s: impl Into<String>, theme: &Theme, font: &egui::FontId) -> egui::RichText {
     egui::RichText::new(s.into())
         .color(theme.palette.text_secondary)
-        .font(egui::FontId::new(size, theme.metadata_font.clone()))
+        .font(font.clone())
 }
 
 pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui) {
     // Owned Arc copy — panes take `&mut app` while `meta` needs `&Theme`.
     let theme = themes.current().clone();
-    let layout = theme.layout;
+    let panes = theme.panes;
+    let meta_font = theme::meta_font(&theme.type_);
+    let time_font = theme::time_font(&theme.type_);
 
     // Fill pane, so pad the top to center the controls. The pad comes from last
     // frame's measured content height (the value the coordinator floors the split
@@ -45,7 +49,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                 .map(|p| library::title_or_stem(p, info))
                 .unwrap_or_default();
             if !title.is_empty() {
-                ui.label(meta(title, &theme, layout.text_time));
+                ui.label(meta(title, &theme, &time_font));
                 let artist = info.map(|i| i.artist.as_str()).unwrap_or_default();
                 let album = info.map(|i| i.album.as_str()).unwrap_or_default();
                 let sub = match (artist.is_empty(), album.is_empty()) {
@@ -55,7 +59,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                     (false, false) => Some(format!("{artist} · {album}")),
                 };
                 if let Some(sub) = sub {
-                    ui.label(meta(sub, &theme, layout.text_meta));
+                    ui.label(meta(sub, &theme, &meta_font));
                 }
             } else if app.network().pending().is_some() {
                 // Remote track spooling from the server; current_path stays
@@ -65,8 +69,8 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                     .pending()
                     .map(|p| library::title_or_stem(p, None))
                     .unwrap_or_default();
-                ui.label(meta(name.to_string(), &theme, layout.text_time));
-                ui.label(meta("Loading from server…", &theme, layout.text_meta));
+                ui.label(meta(name.to_string(), &theme, &time_font));
+                ui.label(meta("Loading from server…", &theme, &meta_font));
             }
 
             // Progress row: elapsed | full-width seek bar | total.
@@ -94,19 +98,22 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                 // Measure both labels so the bar between them takes exactly the
                 // leftover width. (available_width() read from a nested
                 // right-to-left scope under-sizes inside the dock's ScrollArea.)
-                let font = egui::FontId::new(layout.text_time, theme.metadata_font.clone());
                 let label_w = |s: &str| {
                     ui.fonts_mut(|f| {
-                        f.layout_no_wrap(s.to_owned(), font.clone(), theme.palette.text_secondary)
-                            .size()
-                            .x
+                        f.layout_no_wrap(
+                            s.to_owned(),
+                            time_font.clone(),
+                            theme.palette.text_secondary,
+                        )
+                        .size()
+                        .x
                     })
                 };
                 let gaps = ui.spacing().item_spacing.x * 2.0;
                 let bar_w = (ui.available_width() - label_w(&pos_str) - label_w(&total_str) - gaps)
-                    .max(40.0);
+                    .max(panes.seek_min_w);
 
-                let pos_label = ui.label(meta(pos_str, &theme, layout.text_time));
+                let pos_label = ui.label(meta(pos_str, &theme, &time_font));
                 let remaining = app.prefs().remaining();
                 if pos_label.clicked() {
                     app.prefs_mut().set_remaining(!remaining);
@@ -131,7 +138,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                     })
                     .inner;
 
-                ui.label(meta(total_str, &theme, layout.text_time));
+                ui.label(meta(total_str, &theme, &time_font));
 
                 if bar.dragged() {
                     // Mid-drag: the Slider owns the value, so the catch-up and
@@ -158,7 +165,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                     .memory_mut(|m| m.data.insert_temp(seek_id(), seek_normalized));
             });
 
-            ui.add_space(8.0);
+            ui.add_space(panes.pad);
 
             // Controls row: transport + volume.
             ui.horizontal(|ui| {
@@ -167,7 +174,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                     ui,
                     themes.icon(Icon::Prev),
                     Icon::Prev,
-                    18.0,
+                    panes.transport_icon,
                     prev_enabled,
                     false,
                 )
@@ -185,7 +192,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                         ui,
                         themes.icon(Icon::Play),
                         Icon::Play,
-                        18.0,
+                        panes.transport_icon,
                         app.can_play(),
                         false,
                     )
@@ -197,7 +204,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                     ui,
                     themes.icon(Icon::Pause),
                     Icon::Pause,
-                    18.0,
+                    panes.transport_icon,
                     true,
                     false,
                 )
@@ -217,7 +224,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                     ui,
                     themes.icon(Icon::Next),
                     Icon::Next,
-                    18.0,
+                    panes.transport_icon,
                     next_enabled,
                     false,
                 )
@@ -232,7 +239,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                     ui,
                     themes.icon(Icon::Shuffle),
                     Icon::Shuffle,
-                    18.0,
+                    panes.transport_icon,
                     app.shuffle(),
                 )
                 .clicked()
@@ -243,7 +250,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                     ui,
                     themes.icon(Icon::Repeat),
                     Icon::Repeat,
-                    18.0,
+                    panes.transport_icon,
                     app.repeat(),
                 )
                 .clicked()
@@ -254,7 +261,12 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                 ui.separator();
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    theme::icon(ui, themes.icon(Icon::Volume), Icon::Volume, 15.0);
+                    theme::icon(
+                        ui,
+                        themes.icon(Icon::Volume),
+                        Icon::Volume,
+                        panes.volume_icon,
+                    );
                     let mut volume = app.volume();
                     if ui
                         .add(
@@ -273,7 +285,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
         ui.horizontal(|ui| {
             // Balance slider (left); double-click resets to center
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                ui.label(meta("Balance", &theme, layout.text_meta));
+                ui.label(meta("Balance", &theme, &meta_font));
                 let mut balance = app.prefs().balance();
                 let bal_response = ui.add(
                     egui::Slider::new(&mut balance, -1.0..=1.0)
@@ -294,7 +306,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                     ui,
                     themes.icon(Icon::Crossfade),
                     Icon::Crossfade,
-                    18.0,
+                    panes.transport_icon,
                     app.prefs().crossfade(),
                 )
                 .clicked()
@@ -306,7 +318,7 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                     ui,
                     themes.icon(Icon::Gapless),
                     Icon::Gapless,
-                    18.0,
+                    panes.transport_icon,
                     app.prefs().gapless(),
                 )
                 .clicked()

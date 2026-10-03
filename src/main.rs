@@ -139,6 +139,17 @@ fn main() -> eframe::Result<()> {
             // ones so any Unicode in tags renders (no tofu boxes).
             gui::theme::install_fallback_fonts(&cc.egui_ctx, gui::theme::SYSTEM_FONT_CANDIDATES);
             let themes = ThemeState::load(&cc.egui_ctx, Themes::load(), &config.theme);
+            // The selected theme's own typeface, if it ships one. After the system
+            // fallback on purpose: a theme's font belongs at the front of the
+            // chain, and the system font only fills what it is missing.
+            if let Some(font) = &themes.current().font_file {
+                if !gui::theme::install_theme_font(&cc.egui_ctx, font) {
+                    log::warn!(
+                        "theme font {} did not load; using the bundled faces",
+                        font.display()
+                    );
+                }
+            }
             let app =
                 app::TPlayApp::new(&config, library_db::TrackDb::load(), output.mixer().clone());
             // `output` moves in here and is never read: dropping the

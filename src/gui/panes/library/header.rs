@@ -12,14 +12,10 @@ use crate::network;
 use eframe::egui;
 use std::path::{Path, PathBuf};
 
-/// Cap on one segment's width, so a long name truncates instead of shoving the
-/// ★ toggle (or Add All) off the pane edge.
-const SEG_MAX_W: f32 = 70.0;
 /// Gap between a segment's text and the right edge of its box, so the label does
-/// not sit flush against the `/` separator that follows it.
+/// not sit flush against the `/` separator that follows it. Paired with the
+/// measured text width, this is the whole of a segment's box.
 const SEG_PAD_W: f32 = 6.0;
-/// Height of one segment — the row the whole header sits on.
-const SEG_H: f32 = 18.0;
 /// Leading segments exempt from `plan`'s `…` collapse, per source. See `plan`.
 const LOCAL_ALWAYS: usize = 1;
 const SHARE_ALWAYS: usize = 3;
@@ -110,10 +106,11 @@ fn segment_width(ui: &egui::Ui, label: &str, color: egui::Color32) -> f32 {
 /// reachable from it.
 fn breadcrumb<'a>(
     ui: &mut egui::Ui,
-    p: theme::Palette,
+    theme: &theme::Theme,
     segs: &'a [Seg],
     always: usize,
 ) -> Option<&'a Seg> {
+    let p = theme.palette;
     let mut clicked = None;
     ui.horizontal(|ui| {
         for step in plan(segs.len(), always) {
@@ -137,9 +134,10 @@ fn breadcrumb<'a>(
                 }
                 continue;
             }
-            let w = (segment_width(ui, &seg.label, p.text_secondary) + SEG_PAD_W).min(SEG_MAX_W);
+            let w = (segment_width(ui, &seg.label, p.text_secondary) + SEG_PAD_W)
+                .min(theme.panes.breadcrumb_max_w);
             let resp = ui.add_sized(
-                egui::vec2(w, SEG_H),
+                egui::vec2(w, theme.panes.breadcrumb_h),
                 egui::Label::new(
                     egui::RichText::new(&seg.label)
                         .small()
@@ -184,10 +182,9 @@ pub fn local_header(
     ui: &mut egui::Ui,
     theme: &theme::Theme,
 ) {
-    let p = theme.palette;
     let dir = app.library().dir().to_path_buf();
     let segs = local_segs(&dir);
-    if let Some(seg) = breadcrumb(ui, p, &segs, LOCAL_ALWAYS) {
+    if let Some(seg) = breadcrumb(ui, theme, &segs, LOCAL_ALWAYS) {
         apply(app, seg);
     }
 
@@ -198,10 +195,11 @@ pub fn local_header(
         themes.icon(theme::Icon::StarOff).cloned()
     };
     let fav_btn = match tex {
-        Some(tex) => {
-            egui::Button::image(egui::Image::new(&tex).fit_to_exact_size(egui::vec2(14.0, 14.0)))
-                .selected(fav)
-        }
+        Some(tex) => egui::Button::image(
+            egui::Image::new(&tex)
+                .fit_to_exact_size(egui::vec2(theme.panes.folder_icon, theme.panes.folder_icon)),
+        )
+        .selected(fav),
         None => egui::Button::new(if fav { "★" } else { "☆" }).selected(fav),
     };
     if ui.add(fav_btn).on_hover_text("Favorite folder").clicked() {
@@ -217,7 +215,7 @@ pub fn remote_header(
     browse: &network::NetworkBrowse,
 ) {
     let segs = remote_segs(browse);
-    if let Some(seg) = breadcrumb(ui, theme.palette, &segs, SHARE_ALWAYS) {
+    if let Some(seg) = breadcrumb(ui, theme, &segs, SHARE_ALWAYS) {
         apply(app, seg);
     }
 }

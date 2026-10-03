@@ -75,12 +75,570 @@ pub struct Layout {
     pub eq_header_gap: f32,
     /// Gap between each band's slider and its frequency label (px).
     pub eq_band_gap: f32,
-    /// Type scale: row metadata / caption label size (px).
-    pub text_meta: f32,
-    /// Type scale: time / duration label size (px).
-    pub text_time: f32,
-    /// Active-row highlight: alpha (0..1) of the full-row accent tint.
-    pub row_tint_alpha: f32,
+}
+
+/// The two bundled font families, as a theme names them.
+///
+/// A theme may not spell `egui::FontFamily` directly: its serde derive sits
+/// behind epaint's own feature, and this module must not depend on which
+/// features eframe happened to turn on. `Base` above sets the precedent — a
+/// two-variant theme enum with a conversion — so this is that, for the one
+/// other closed set a theme picks from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Family {
+    #[default]
+    Proportional,
+    Monospace,
+}
+
+impl From<Family> for FontFamily {
+    fn from(f: Family) -> FontFamily {
+        match f {
+            Family::Proportional => FontFamily::Proportional,
+            Family::Monospace => FontFamily::Monospace,
+        }
+    }
+}
+
+/// The type scale: which family, and how big each role is.
+///
+/// One number per *role* rather than per label, because egui already has the
+/// roles — `Style::text_styles`. A theme that sets four numbers restyles every
+/// heading, body label, metadata line and time in the app, including the ~19
+/// labels that never build a `FontId` by hand.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Type {
+    /// Family for headings, buttons and body labels.
+    pub family: Family,
+    /// Family for metadata and times. Monospace by default, because tabular
+    /// digits are what stops a seek bar's two time labels from jittering.
+    #[serde(default = "mono_default")]
+    pub mono: Family,
+    /// Pane titles, dialog titles, section labels.
+    pub heading: f32,
+    /// Buttons and ordinary labels.
+    pub body: f32,
+    /// Captions, tags, breadcrumb segments, anything de-emphasised.
+    pub meta: f32,
+    /// Durations and the transport clock.
+    pub time: f32,
+}
+
+fn mono_default() -> Family {
+    Family::Monospace
+}
+
+impl Default for Type {
+    fn default() -> Self {
+        // egui's own `default_text_styles` for heading and body, so an untouched
+        // theme renders exactly as the app does today; meta and time are the
+        // sizes `Layout::text_meta` / `text_time` already used.
+        Self {
+            family: Family::default(),
+            mono: mono_default(),
+            heading: 18.0,
+            body: 13.0,
+            meta: 12.0,
+            time: 13.0,
+        }
+    }
+}
+
+/// Widget appearance: shape, the stroke widths, and the handful of `Visuals`
+/// fields egui colours from outside the palette.
+///
+/// Every one of these reaches egui through `apply` alone, so this group is one
+/// function's worth of change rather than a per-pane edit. `radius` is a single
+/// number for all five widget states on purpose — a skin wants square or softly
+/// rounded, not five independently chosen values — and `button_border` is
+/// optional because a resting button today has no frame at all, so making it one
+/// would change every button in the app.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Chrome {
+    /// Corner radius, all five widget states.
+    pub radius: f32,
+    /// Width of a widget's frame (noninteractive / hovered / active / open).
+    pub border_w: f32,
+    /// Width of a hovered or active widget's text-and-knob stroke.
+    pub fg_w: f32,
+    /// Width of the focus ring.
+    pub focus_w: f32,
+    /// Frame colour for a button at rest. `None` leaves it frameless, which is
+    /// what every button does today.
+    pub button_border: Option<Color32>,
+    /// Width of the text-edit caret. 0 hides it.
+    pub cursor_w: f32,
+    /// Slider and checkbox handle: 0 is a circle, anything else is a rectangle
+    /// of that width-over-height ratio.
+    pub handle_aspect: f32,
+    /// Alpha applied to a widget the app has disabled.
+    pub disabled_alpha: f32,
+    /// How far an expanded widget's frame reaches past its bounds.
+    pub expansion: f32,
+    /// Colour of de-emphasised text egui dims itself. `None` keeps its default.
+    pub weak_text: Option<Color32>,
+    /// Text-edit background. `None` keeps `extreme_bg_color`.
+    pub text_edit_bg: Option<Color32>,
+    /// Window and popup outline. `None` keeps egui's.
+    pub window_stroke: Option<Color32>,
+    /// Corner radius of a window or popup frame.
+    pub window_radius: f32,
+    /// Dimming drawn behind a modal. `None` keeps egui's hardcoded black.
+    pub backdrop: Option<Color32>,
+    /// Seconds a widget colour cross-fade takes. 0 is the instant, Winamp-snappy
+    /// switch the app ships with; a theme may raise it to animate.
+    pub motion: f32,
+    /// Horizontal gap between widgets, app-wide.
+    pub item_gap: f32,
+    /// Padding inside a button's frame.
+    pub button_pad: f32,
+    /// Padding between a menu and the window it drops from.
+    pub menu_pad: f32,
+}
+
+impl Default for Chrome {
+    fn default() -> Self {
+        Self {
+            // 2.0 is what four of egui's five states already use; hovered is 3.
+            radius: 2.0,
+            border_w: 1.0,
+            fg_w: 1.5,
+            focus_w: 1.0,
+            button_border: None,
+            cursor_w: 2.0,
+            handle_aspect: 0.75,
+            disabled_alpha: 0.5,
+            expansion: 0.0,
+            weak_text: None,
+            text_edit_bg: None,
+            window_stroke: None,
+            window_radius: 6.0,
+            backdrop: None,
+            motion: 0.0,
+            item_gap: 8.0,
+            button_pad: 6.0,
+            menu_pad: 8.0,
+        }
+    }
+}
+
+/// List-row chrome, shared by the Playlist and Library panes.
+///
+/// These are five numbers for three row draws: the row height was written down
+/// separately in the playlist, the file list and the share list, and the same
+/// two values were spelled out for each. `theme::row` is the one function every
+/// row passes through, so it is the only place these need reading.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Rows {
+    /// Height of one track or folder row.
+    pub height: f32,
+    /// Corner radius of the row's fill and of the active-row tint over it.
+    pub radius: f32,
+    /// Width of the accent stripe down the active row's left edge.
+    pub stripe_w: f32,
+    /// Inset of row content from the row's left edge, which clears the stripe.
+    pub inset: f32,
+    /// Gap between two widgets inside a playlist row. The Library's file rows
+    /// are tighter and read `cell_gap` instead, because their cells are columns.
+    pub gap: f32,
+    /// Width reserved at a row's right end when it has no artist·album cell:
+    /// the ✕ button, the FORMAT cell and their gaps.
+    pub trailing_w: f32,
+    /// Gamma factor applied to a row's title when it is *not* the playing track.
+    pub dim: f32,
+    /// Alpha of the active row's accent overlay, 0 to leave it untinted.
+    pub tint_alpha: f32,
+    /// Height of the Library's sortable column-header strip.
+    pub header_h: f32,
+    /// Narrowest a row's title column may get before the row stops shrinking.
+    pub title_floor: f32,
+    /// Gap between two row cells.
+    pub cell_gap: f32,
+    /// Width of each sortable column, in `SORT_OPTIONS` order. A `0.0` column
+    /// takes the leftover width, which is how Title flexes.
+    pub columns: [f32; crate::library::SORT_OPTIONS.len()],
+}
+
+impl Default for Rows {
+    fn default() -> Self {
+        Self {
+            height: 24.0,
+            radius: 2.0,
+            stripe_w: 3.0,
+            inset: 6.0,
+            gap: 8.0,
+            trailing_w: 130.0,
+            dim: 0.85,
+            tint_alpha: 0.10,
+            header_h: 22.0,
+            title_floor: 40.0,
+            cell_gap: 4.0,
+            columns: [0.0, 90.0, 100.0, 44.0],
+        }
+    }
+}
+
+/// Per-pane sizing: icon sizes, the sidebar column, the top bar, and the few
+/// fixed widths that are a taste call rather than a derived figure.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Panes {
+    /// Height of the window's title bar.
+    pub topbar_h: f32,
+    /// The ☰ menu button. 18 is the logo's real budget; larger and the bolt and
+    /// the play triangle merge into one mass.
+    pub logo: f32,
+    /// Minimize / maximize / restore.
+    pub chrome_icon: f32,
+    /// Transport, shuffle, repeat, gapless, crossfade.
+    pub transport_icon: f32,
+    /// A row's ✕ and the sidebar's ✕.
+    pub small_icon: f32,
+    /// A folder row's icon.
+    pub folder_icon: f32,
+    /// The smallest marks: the Library's sort arrow and the row rating star.
+    pub tiny_icon: f32,
+    /// Playlist toolbar buttons.
+    pub toolbar_icon: f32,
+    /// The volume speaker beside its slider.
+    pub volume_icon: f32,
+    /// The Library's Places / Volumes / Favorites column. Sized against the
+    /// 320px minimum window, which is why it cannot grow much.
+    pub sidebar_w: f32,
+    /// Height of one sidebar row, and of the add-server form's text fields.
+    pub sidebar_row_h: f32,
+    /// Width of a sidebar row's label, leaving room for the ✕ on removable rows.
+    pub sidebar_row_w: f32,
+    /// Width of a Network row's label. Narrower than a Places row, because the
+    /// ✕ sits inside the same column and host strings are longer than labels.
+    pub sidebar_server_w: f32,
+    /// Width of the add-server form's fields, inside the fixed-width column.
+    pub sidebar_form_w: f32,
+    /// Height of one breadcrumb segment.
+    pub breadcrumb_h: f32,
+    /// Cap on one breadcrumb segment, past which its label truncates.
+    pub breadcrumb_max_w: f32,
+    /// Width of a search or text field.
+    pub field_w: f32,
+    /// Narrowest the seek bar may get between its two time labels.
+    pub seek_min_w: f32,
+    /// Width of a row's artist·album cell.
+    pub meta_w: f32,
+    /// Widest the Equalizer's band column gets before the row shrinks to fit.
+    pub eq_band_w_max: f32,
+    /// Minimum width of the Yes/No dialog.
+    pub confirm_w: f32,
+    /// Width of the track editor's dialog, and of a text field within it. This is
+    /// also the app's minimum window width.
+    pub edit_w: f32,
+    /// Width of the editor's label column, so its four inputs line up.
+    pub edit_label_w: f32,
+    /// The star size in the editor, bigger than a row's inline star because this
+    /// is the one place a rating is *chosen* rather than scanned.
+    pub edit_star: f32,
+    /// The Album Cover pane's no-art placeholder, as a fraction of the pane's
+    /// short side. It is painted at pane size rather than at a fixed raster, so
+    /// a fraction is the only honest way to state it.
+    pub nocover_frac: f32,
+    /// Vertical gap between two stacked rows of controls.
+    pub gap: f32,
+    /// Padding between a pane's edge and its content.
+    pub pad: f32,
+}
+
+impl Default for Panes {
+    fn default() -> Self {
+        Self {
+            topbar_h: 22.0,
+            logo: 18.0,
+            chrome_icon: 16.0,
+            transport_icon: 18.0,
+            small_icon: 13.0,
+            folder_icon: 14.0,
+            tiny_icon: 10.0,
+            toolbar_icon: 16.0,
+            volume_icon: 15.0,
+            sidebar_w: 120.0,
+            sidebar_row_h: 18.0,
+            sidebar_row_w: 100.0,
+            sidebar_server_w: 88.0,
+            sidebar_form_w: 100.0,
+            breadcrumb_h: 18.0,
+            breadcrumb_max_w: 70.0,
+            field_w: 220.0,
+            seek_min_w: 40.0,
+            meta_w: 150.0,
+            eq_band_w_max: 80.0,
+            confirm_w: 260.0,
+            edit_w: 320.0,
+            edit_label_w: 56.0,
+            edit_star: 22.0,
+            nocover_frac: 0.35,
+            gap: 4.0,
+            pad: 8.0,
+        }
+    }
+}
+
+/// Docking chrome: tab strips and splitters.
+///
+/// The largest hole the token system had. `egui_dock::Style` is rebuilt from the
+/// live egui style every frame and then given three fields, so every other tab
+/// and splitter colour and every corner radius was egui's own.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Dock {
+    /// Height of a tab strip.
+    pub tab_h: f32,
+    /// Corner radius of a tab.
+    pub tab_radius: f32,
+    /// Fill of an inactive tab. `None` keeps egui's.
+    pub tab_bg: Option<Color32>,
+    /// Fill of the selected tab. `None` keeps egui's.
+    pub tab_bg_active: Option<Color32>,
+    /// Outline of a tab. `None` keeps egui's.
+    pub tab_stroke: Option<Color32>,
+    /// Fill of a tab while it is being dragged.
+    pub drag_fill: Option<Color32>,
+    /// Title of an inactive tab. `None` keeps egui's.
+    pub tab_text: Option<Color32>,
+    /// Title of the selected tab.
+    pub tab_text_active: Color32,
+    /// Width of a splitter between two panes.
+    pub split_w: f32,
+    /// Colour of a splitter at rest.
+    pub split_color: Option<Color32>,
+    /// Colour of a splitter being dragged.
+    pub split_color_active: Option<Color32>,
+}
+
+impl Default for Dock {
+    fn default() -> Self {
+        Self {
+            tab_h: 22.0,
+            tab_radius: 2.0,
+            tab_bg: None,
+            tab_bg_active: None,
+            tab_stroke: None,
+            drag_fill: None,
+            tab_text: None,
+            tab_text_active: Color32::from_gray(230),
+            split_w: 4.0,
+            split_color: None,
+            split_color_active: None,
+        }
+    }
+}
+
+/// The visualizer's palette, which reaches the GPU rather than a `Painter`.
+///
+/// Only two tokens, and that is a measured ceiling rather than a stopping
+/// point. Ten of the thirteen palette tokens never left the CPU before this
+/// group existed: the harness uploaded `bg`, `accent` and `progress_fill` and
+/// every shipped shader read exactly those three, so overriding the first two
+/// is what lets a skin paint the visualizer a colour the rest of the player
+/// does not use.
+///
+/// **A third and fourth colour were cut, deliberately.** `peak` and `trail`
+/// would each have been a `vec4` in the uniform block with no shipped shader
+/// declaring them, which is the `u_level` mistake the `gpu.rs` module docs write
+/// up: an input nobody reads is a cost with no capability attached. A view has to
+/// want one before the block grows to carry it. The block has the headroom —
+/// `downlevel_defaults` promises 16 KiB and the whole thing is 736 bytes — so
+/// this is about not shipping a declaration with no reader, not about room.
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Viz {
+    /// Overrides `palette.bg` for the pane's own fill and every shader's
+    /// background. `None` keeps the palette's.
+    pub bg: Option<Color32>,
+    /// Overrides `palette.accent` — the body colour of bars, the ring of radial,
+    /// the glow of chladni, and the deposit trails leaves behind.
+    pub accent: Option<Color32>,
+}
+
+/// Read one number out of a token group, falling back to `d` when the theme
+/// omitted it.
+///
+/// `Option` rather than the `> 0.0` test `Layout::with_defaults` uses, because
+/// several new tokens have a meaningful zero — a square `radius`, an instant
+/// `motion`, no `expansion`, a circular slider handle, an untinted active row —
+/// and a sentinel test would silently discard exactly the values a Winamp skin
+/// wants most.
+fn num(v: &serde_json::Value, k: &str, d: f32) -> f32 {
+    v.get(k)
+        .and_then(|x| x.as_f64())
+        .map(|n| n as f32)
+        .unwrap_or(d)
+}
+
+/// Read one optional colour out of a token group. A token that is present but
+/// not a colour is a typo in a hand-editable file, so it says so rather than
+/// quietly rendering the fallback forever.
+fn tok(v: &serde_json::Value, k: &str) -> Option<Color32> {
+    let s = v.get(k)?.as_str()?;
+    match Color32::from_hex(s) {
+        Ok(c) => Some(c),
+        Err(e) => {
+            log::warn!("theme token `{k}` is not a colour ({s:?}: {e:?}); using the default");
+            None
+        }
+    }
+}
+
+fn family(v: &serde_json::Value, k: &str, d: Family) -> Family {
+    match v.get(k).and_then(|x| x.as_str()) {
+        Some("monospace") => Family::Monospace,
+        Some("proportional") => Family::Proportional,
+        _ => d,
+    }
+}
+
+/// Read a column-width array, filling whatever the theme left out from `d`.
+///
+/// `zip` rather than indexing, so a `columns` array of the wrong length fills
+/// what it can instead of panicking on a `theme.json` this module is only meant
+/// to warn about. The array is sized by `SORT_OPTIONS::len()`, so a fifth
+/// sortable column is a compile error here rather than a silently unwritten row.
+fn columns(
+    v: &serde_json::Value,
+    d: [f32; crate::library::SORT_OPTIONS.len()],
+) -> [f32; crate::library::SORT_OPTIONS.len()] {
+    let Some(a) = v.get("columns").and_then(|x| x.as_array()) else {
+        return d;
+    };
+    let mut out = d;
+    for (slot, n) in out.iter_mut().zip(a.iter().filter_map(|x| x.as_f64())) {
+        *slot = n as f32;
+    }
+    out
+}
+
+impl Type {
+    fn from_json(v: &serde_json::Value) -> Type {
+        let d = Type::default();
+        Type {
+            family: family(v, "family", d.family),
+            mono: family(v, "mono", d.mono),
+            heading: num(v, "heading", d.heading),
+            body: num(v, "body", d.body),
+            meta: num(v, "meta", d.meta),
+            time: num(v, "time", d.time),
+        }
+    }
+}
+
+impl Chrome {
+    fn from_json(v: &serde_json::Value) -> Chrome {
+        let d = Chrome::default();
+        Chrome {
+            radius: num(v, "radius", d.radius),
+            border_w: num(v, "border_w", d.border_w),
+            fg_w: num(v, "fg_w", d.fg_w),
+            focus_w: num(v, "focus_w", d.focus_w),
+            button_border: tok(v, "button_border"),
+            cursor_w: num(v, "cursor_w", d.cursor_w),
+            handle_aspect: num(v, "handle_aspect", d.handle_aspect),
+            disabled_alpha: num(v, "disabled_alpha", d.disabled_alpha),
+            expansion: num(v, "expansion", d.expansion),
+            weak_text: tok(v, "weak_text"),
+            text_edit_bg: tok(v, "text_edit_bg"),
+            window_stroke: tok(v, "window_stroke"),
+            window_radius: num(v, "window_radius", d.window_radius),
+            backdrop: tok(v, "backdrop"),
+            motion: num(v, "motion", d.motion),
+            item_gap: num(v, "item_gap", d.item_gap),
+            button_pad: num(v, "button_pad", d.button_pad),
+            menu_pad: num(v, "menu_pad", d.menu_pad),
+        }
+    }
+}
+
+impl Rows {
+    fn from_json(v: &serde_json::Value) -> Rows {
+        let d = Rows::default();
+        Rows {
+            height: num(v, "height", d.height),
+            radius: num(v, "radius", d.radius),
+            stripe_w: num(v, "stripe_w", d.stripe_w),
+            inset: num(v, "inset", d.inset),
+            gap: num(v, "gap", d.gap),
+            trailing_w: num(v, "trailing_w", d.trailing_w),
+            dim: num(v, "dim", d.dim),
+            tint_alpha: num(v, "tint_alpha", d.tint_alpha),
+            header_h: num(v, "header_h", d.header_h),
+            title_floor: num(v, "title_floor", d.title_floor),
+            cell_gap: num(v, "cell_gap", d.cell_gap),
+            columns: columns(v, d.columns),
+        }
+    }
+}
+
+impl Panes {
+    fn from_json(v: &serde_json::Value) -> Panes {
+        let d = Panes::default();
+        Panes {
+            topbar_h: num(v, "topbar_h", d.topbar_h),
+            logo: num(v, "logo", d.logo),
+            chrome_icon: num(v, "chrome_icon", d.chrome_icon),
+            transport_icon: num(v, "transport_icon", d.transport_icon),
+            small_icon: num(v, "small_icon", d.small_icon),
+            folder_icon: num(v, "folder_icon", d.folder_icon),
+            tiny_icon: num(v, "tiny_icon", d.tiny_icon),
+            toolbar_icon: num(v, "toolbar_icon", d.toolbar_icon),
+            volume_icon: num(v, "volume_icon", d.volume_icon),
+            sidebar_w: num(v, "sidebar_w", d.sidebar_w),
+            sidebar_row_h: num(v, "sidebar_row_h", d.sidebar_row_h),
+            sidebar_row_w: num(v, "sidebar_row_w", d.sidebar_row_w),
+            sidebar_server_w: num(v, "sidebar_server_w", d.sidebar_server_w),
+            sidebar_form_w: num(v, "sidebar_form_w", d.sidebar_form_w),
+            breadcrumb_h: num(v, "breadcrumb_h", d.breadcrumb_h),
+            breadcrumb_max_w: num(v, "breadcrumb_max_w", d.breadcrumb_max_w),
+            field_w: num(v, "field_w", d.field_w),
+            seek_min_w: num(v, "seek_min_w", d.seek_min_w),
+            meta_w: num(v, "meta_w", d.meta_w),
+            eq_band_w_max: num(v, "eq_band_w_max", d.eq_band_w_max),
+            confirm_w: num(v, "confirm_w", d.confirm_w),
+            edit_w: num(v, "edit_w", d.edit_w),
+            edit_label_w: num(v, "edit_label_w", d.edit_label_w),
+            edit_star: num(v, "edit_star", d.edit_star),
+            nocover_frac: num(v, "nocover_frac", d.nocover_frac),
+            gap: num(v, "gap", d.gap),
+            pad: num(v, "pad", d.pad),
+        }
+    }
+}
+
+impl Dock {
+    fn from_json(v: &serde_json::Value) -> Dock {
+        let d = Dock::default();
+        Dock {
+            tab_h: num(v, "tab_h", d.tab_h),
+            tab_radius: num(v, "tab_radius", d.tab_radius),
+            tab_bg: tok(v, "tab_bg"),
+            tab_bg_active: tok(v, "tab_bg_active"),
+            tab_stroke: tok(v, "tab_stroke"),
+            drag_fill: tok(v, "drag_fill"),
+            tab_text: tok(v, "tab_text"),
+            tab_text_active: tok(v, "tab_text_active").unwrap_or(d.tab_text_active),
+            split_w: num(v, "split_w", d.split_w),
+            split_color: tok(v, "split_color"),
+            split_color_active: tok(v, "split_color_active"),
+        }
+    }
+}
+
+impl Viz {
+    fn from_json(v: &serde_json::Value) -> Viz {
+        Viz {
+            bg: tok(v, "bg"),
+            accent: tok(v, "accent"),
+        }
+    }
 }
 
 impl Layout {
@@ -97,9 +655,6 @@ impl Layout {
             eq_band_w_min: or(self.eq_band_w_min, 30.0),
             eq_header_gap: or(self.eq_header_gap, 6.0),
             eq_band_gap: or(self.eq_band_gap, 2.0),
-            text_meta: or(self.text_meta, 12.0),
-            text_time: or(self.text_time, 13.0),
-            row_tint_alpha: or(self.row_tint_alpha, 0.10),
         }
     }
 }
@@ -112,8 +667,6 @@ pub struct Theme {
     /// Human-friendly name shown in the Theme dropdown.
     pub name: String,
     pub base: Base,
-    /// Retro renders times/metadata in monospace (the pixel-era look).
-    pub metadata_font: FontFamily,
     pub palette: Palette,
     /// Per-theme UI layout/sizing tokens. `from_json` runs
     /// `Layout::with_defaults` on the way in, so a pane may read these
@@ -122,6 +675,22 @@ pub struct Theme {
     pub layout: Layout,
     /// `<theme_dir>/icons`, when the folder exists.
     pub icons_dir: Option<PathBuf>,
+    /// `<theme_dir>/<font>`, when the theme names a font file that exists. Not
+    /// a token value: like `icons_dir` it is a path resolved against the theme's
+    /// own folder, and a theme with no font file is the normal case.
+    pub font_file: Option<PathBuf>,
+    /// Font family, family and the four role sizes.
+    pub type_: Type,
+    /// Widget shape, stroke widths and the `Visuals` fields egui owns.
+    pub chrome: Chrome,
+    /// List-row chrome, shared by the two scrolling lists.
+    pub rows: Rows,
+    /// Per-pane sizing.
+    pub panes: Panes,
+    /// Docking chrome.
+    pub dock: Dock,
+    /// The visualizer's palette, which reaches the GPU rather than a `Painter`.
+    pub viz: Viz,
 }
 
 impl Theme {
@@ -142,10 +711,6 @@ impl Theme {
             Some("light") => Base::Light,
             _ => Base::Dark,
         };
-        let metadata_font = match v.get("metadata_font").and_then(|x| x.as_str()) {
-            Some("monospace") => FontFamily::Monospace,
-            _ => FontFamily::Proportional,
-        };
         let palette = Palette::from_json(v.get("palette")?)?;
         let icons_dir = dir.join("icons");
         let icons_dir = icons_dir.is_dir().then_some(icons_dir);
@@ -163,23 +728,37 @@ impl Theme {
                         eq_band_w_min: num(l, "eq_band_w_min"),
                         eq_header_gap: num(l, "eq_header_gap"),
                         eq_band_gap: num(l, "eq_band_gap"),
-                        text_meta: num(l, "text_meta"),
-                        text_time: num(l, "text_time"),
-                        row_tint_alpha: num(l, "row_tint_alpha"),
                     }
                     .with_defaults()
                 })
                 .unwrap_or_else(|| Layout::default().with_defaults())
         };
+        // Every group is optional. An absent group parses as `Null`, and every
+        // `from_json` above reads through `num`/`tok`, which fall back per token.
+        // So a `theme.json` written before these groups existed loads unchanged
+        // and renders exactly as it did, which is what lets the three bundled
+        // themes and any hand-written one keep working with no edits.
+        let group = |k: &str| v.get(k).cloned().unwrap_or(serde_json::Value::Null);
+        let font_file = v
+            .get("font")
+            .and_then(|x| x.as_str())
+            .map(|name| dir.join(name))
+            .filter(|p| p.is_file());
 
         Some(Theme {
             id,
             name,
             base,
             layout,
-            metadata_font,
             palette,
             icons_dir,
+            font_file,
+            type_: Type::from_json(&group("type")),
+            chrome: Chrome::from_json(&group("chrome")),
+            rows: Rows::from_json(&group("rows")),
+            panes: Panes::from_json(&group("panes")),
+            dock: Dock::from_json(&group("dock")),
+            viz: Viz::from_json(&group("viz")),
         })
     }
 
@@ -658,22 +1237,50 @@ pub fn icon(
     }
 }
 
-/// Map the token palette onto egui's `Visuals`. (egui has no 1:1 token slots, so
-/// nearby fields stand in; the ones that can't be expressed here — row banding
-/// and disabled text — are read straight from `theme.palette` by the panes.)
+/// The metadata role: `type.meta`'s size in the metadata family.
+///
+/// **Not `.small()`.** That carries `type.family`, but a theme whose `type.mono`
+/// is monospace needs its captions *and its times* monospaced — which is the
+/// whole reason retro looks like retro, since monospace digits are tabular and
+/// a seek bar's two time labels would otherwise jitter as they count. egui has
+/// no style slot for "small size, mono family", so this is that combination.
+pub fn meta_font(t: &Type) -> egui::FontId {
+    egui::FontId::new(t.meta, t.mono.into())
+}
+
+/// The time role: `type.time`'s size in the metadata family. See [`meta_font`].
+pub fn time_font(t: &Type) -> egui::FontId {
+    egui::FontId::new(t.time, t.mono.into())
+}
+
+/// Map the token groups onto egui's `Visuals` and `Style`. (egui has no 1:1
+/// token slots, so nearby fields stand in; the ones that can't be expressed here
+/// — row banding — are read straight from `theme.palette` by the panes.)
 ///
 ///   --bg              panel_fill / window_fill / extreme_bg_color
 ///   --panel-bg        faint_bg_color / noninteractive.bg_fill
 ///   --text-primary    override_text_color
-///   --accent          hyperlink_color / active.bg_fill
+///   --accent          hyperlink_color / active.bg_fill / text cursor
 ///   --progress-fill   selection.bg_fill (the slider's trailing fill)
 ///   --slider-track    inactive.bg_fill (the slider rail)
 ///   --slider-handle   inactive.fg_stroke (the slider knob outline)
 ///   --btn-hover       hovered.bg_fill
 ///   --border          noninteractive.bg_stroke
 ///   --focus-ring      selection.stroke (egui focus rectangles)
+///
+/// `chrome` and `type_` fill the gaps the palette cannot: corner radius and every
+/// stroke width, the four optional colours egui owns, widget density, and the
+/// text scale. **`Style::text_styles` is the largest single win here** — it is
+/// what the ~19 labels that never build a `FontId` by hand resolve against, and
+/// until now no theme could reach any of them.
+///
+/// Both styles are written, not just the active one. `set_visuals` touches only
+/// whichever the system preference selects, so the other kept whatever it had
+/// when egui built it; a mid-session OS theme flip then surfaced stale greys.
+/// Every field here is idempotent, so writing both costs nothing.
 pub fn apply(ctx: &egui::Context, theme: &Theme) {
     let p = theme.palette;
+    let c = &theme.chrome;
     let mut v = match theme.base {
         Base::Light => egui::Visuals::light(),
         Base::Dark => egui::Visuals::dark(),
@@ -684,36 +1291,119 @@ pub fn apply(ctx: &egui::Context, theme: &Theme) {
     v.faint_bg_color = p.panel_bg;
     v.code_bg_color = p.panel_bg;
     v.override_text_color = Some(p.text_primary);
+    v.weak_text_color = c.weak_text;
+    v.text_edit_bg_color = c.text_edit_bg;
     v.hyperlink_color = p.accent;
     v.selection = egui::style::Selection {
         bg_fill: p.progress_fill,
-        stroke: Stroke::new(1.0_f32, p.focus_ring),
+        stroke: Stroke::new(c.focus_w, p.focus_ring),
     };
 
+    // An optional `Visuals` colour that a theme left out keeps egui's own value,
+    // which for these three is a sensible neutral rather than a wrong one.
+    v.window_stroke = Stroke::new(c.border_w, c.window_stroke.unwrap_or(p.border));
+    v.window_corner_radius = c.window_radius.into();
+    v.menu_corner_radius = c.window_radius.into();
+    v.disabled_alpha = c.disabled_alpha;
+    v.text_cursor.stroke = Stroke::new(c.cursor_w, p.accent);
+    v.handle_shape = if c.handle_aspect > 0.0 {
+        egui::style::HandleShape::Rect {
+            aspect_ratio: c.handle_aspect,
+        }
+    } else {
+        egui::style::HandleShape::Circle
+    };
+
+    let radius: egui::CornerRadius = c.radius.into();
+    let border = Stroke::new(c.border_w, p.border);
+    let fg = Stroke::new(c.fg_w, p.text_primary);
+
     v.widgets.noninteractive.bg_fill = p.panel_bg;
-    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, p.border);
-    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, p.text_secondary);
+    v.widgets.noninteractive.bg_stroke = border;
+    v.widgets.noninteractive.fg_stroke = Stroke::new(c.border_w, p.text_secondary);
     v.widgets.inactive.weak_bg_fill = p.btn_hover;
     v.widgets.inactive.bg_fill = p.slider_track;
-    v.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, p.slider_handle);
+    v.widgets.inactive.fg_stroke = Stroke::new(c.border_w, p.slider_handle);
+    // A resting button has no frame today, so the border colour is optional
+    // rather than defaulting to `--border`: making one the default would put a
+    // ring around every button in the app.
+    v.widgets.inactive.bg_stroke = c
+        .button_border
+        .map(|col| Stroke::new(c.border_w, col))
+        .unwrap_or(Stroke::NONE);
     v.widgets.hovered.weak_bg_fill = p.btn_hover;
     v.widgets.hovered.bg_fill = p.btn_hover;
-    v.widgets.hovered.fg_stroke = Stroke::new(1.5_f32, p.text_primary);
+    v.widgets.hovered.fg_stroke = fg;
+    v.widgets.hovered.bg_stroke = border;
     v.widgets.active.weak_bg_fill = p.accent;
     v.widgets.active.bg_fill = p.accent;
-    v.widgets.active.fg_stroke = Stroke::new(1.5_f32, p.text_primary);
+    v.widgets.active.fg_stroke = fg;
+    v.widgets.active.bg_stroke = Stroke::new(c.border_w, p.focus_ring);
+    // `open` had no mapping at all, so a ComboBox with its menu down was egui's
+    // grey. It reads as hovered, which is what the state means.
+    v.widgets.open = v.widgets.hovered;
 
-    ctx.set_visuals(v);
+    for w in [
+        &mut v.widgets.noninteractive,
+        &mut v.widgets.inactive,
+        &mut v.widgets.hovered,
+        &mut v.widgets.active,
+        &mut v.widgets.open,
+    ] {
+        w.corner_radius = radius;
+        w.expansion = c.expansion;
+    }
 
-    // Kill widget color cross-fades so a mid-session switch lands on the very
-    // next frame: the aesthetic is instant, Winamp-style, and the default
-    // ~0.08s animation smears token colors across every widget.
-    //
-    // Both styles, not the active one: `set_visuals` above writes only into
-    // the active style, and which of the two that is follows the system
-    // preference, so zeroing one would leave the app animating a switch the
-    // moment the OS theme changed under it.
-    ctx.all_styles_mut(|s| s.animation_time = 0.0);
+    let text_styles = text_styles(&theme.type_);
+    let item_gap = c.item_gap;
+    let button_pad = c.button_pad;
+    let menu_pad = c.menu_pad;
+    let motion = c.motion;
+
+    ctx.all_styles_mut(|s| {
+        s.visuals = v.clone();
+        s.text_styles = text_styles.clone();
+        s.spacing.item_spacing.x = item_gap;
+        s.spacing.button_padding = Vec2::splat(button_pad);
+        let m = menu_pad.clamp(0.0, i8::MAX as f32) as i8;
+        s.spacing.menu_margin = egui::Margin {
+            left: m,
+            right: m,
+            top: m,
+            bottom: m,
+        };
+        // Kill widget colour cross-fades so a mid-session switch lands on the
+        // very next frame: the aesthetic is instant, Winamp-style, and the
+        // default ~0.08s animation smears token colours across every widget. A
+        // theme may raise `motion` to animate a switch instead.
+        s.animation_time = motion;
+    });
+}
+
+/// The four roles egui's `Style` already distinguishes, from one theme scale.
+///
+/// `Small` follows `meta` rather than keeping egui's 9pt, which is the visible
+/// part of this: the breadcrumb segments, the "Playlist" row tag and the
+/// section labels are all `.small()` and are all unreadable at 9pt.
+fn text_styles(t: &Type) -> std::collections::BTreeMap<egui::TextStyle, egui::FontId> {
+    use egui::TextStyle;
+    [
+        (
+            TextStyle::Heading,
+            egui::FontId::new(t.heading, t.family.into()),
+        ),
+        (TextStyle::Body, egui::FontId::new(t.body, t.family.into())),
+        (
+            TextStyle::Button,
+            egui::FontId::new(t.body, t.family.into()),
+        ),
+        (TextStyle::Small, egui::FontId::new(t.meta, t.family.into())),
+        (
+            TextStyle::Monospace,
+            egui::FontId::new(t.time, t.mono.into()),
+        ),
+    ]
+    .into()
 }
 
 /// System font files probed (in order) for the text fallback — covers
@@ -731,6 +1421,35 @@ pub const SYSTEM_FONT_CANDIDATES: &[&str] = &[
     "C:\\Windows\\Fonts\\arial.ttf",
     "C:\\Windows\\Fonts\\segoeui.ttf",
 ];
+
+/// Put a theme's own font file at the front of both font families.
+///
+/// A theme may ship a typeface, which is the closest this reaches Winamp's
+/// `TEXT.BMP` — a skin that names a font gets it, and one that does not is
+/// unaffected. Returns whether the bytes loaded, so a bad or unreadable file
+/// falls back to egui's bundled faces instead of leaving the app typeless.
+///
+/// Front, not back: a theme's font is the one it chose deliberately, so it wins
+/// over egui's bundled set for every glyph it has. The system fallback installed
+/// afterwards fills only what is left.
+pub fn install_theme_font(ctx: &egui::Context, path: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    let mut defs = egui::FontDefinitions::default();
+    defs.font_data.insert(
+        "theme-font".to_owned(),
+        Arc::new(egui::FontData::from_owned(bytes)),
+    );
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        defs.families
+            .entry(family)
+            .or_default()
+            .insert(0, "theme-font".to_owned());
+    }
+    ctx.set_fonts(defs);
+    true
+}
 
 /// Append the first available system font to the fallback chain of both font
 /// families so characters the bundled fonts miss render instead of tofu
@@ -760,11 +1479,16 @@ pub fn install_fallback_fonts(ctx: &egui::Context, candidates: &[&str]) -> bool 
     false
 }
 
-/// `(row_rect, child_ui)` with banding, accent tint, a 3px stripe and 6px inset.
+/// `(row_rect, child_ui)` with banding, accent tint, a left stripe and an inset.
 /// `i` is the row index for even/odd banding. `is_current` marks the playing
-/// track with a translucent `row_tint_alpha` accent overlay over the banded bg —
+/// track with a translucent `rows.tint_alpha` accent overlay over the banded bg —
 /// which keeps text readable, unlike a gamma-multiplied fill that darkens past
-/// the bg — plus the 3px stripe.
+/// the bg — plus the stripe.
+///
+/// Every row in the app comes through here, so the six numbers below are the
+/// whole of list-row chrome. `row_h` stays a parameter because the three call
+/// sites each know their own list's row height; `rows.height` is where those
+/// three read it from.
 pub fn row(
     ui: &mut egui::Ui,
     i: usize,
@@ -773,6 +1497,7 @@ pub fn row(
     theme: &Theme,
 ) -> (egui::Rect, egui::Ui) {
     let p = theme.palette;
+    let r = &theme.rows;
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), row_h),
         egui::Sense::hover(),
@@ -782,18 +1507,18 @@ pub fn row(
     } else {
         p.row_odd
     };
-    ui.painter().rect_filled(rect, 2.0, bg);
+    let radius: egui::CornerRadius = r.radius.into();
+    ui.painter().rect_filled(rect, radius, bg);
     if is_current {
-        let alpha = theme.layout.row_tint_alpha;
         let tint = Color32::from_rgba_unmultiplied(
             p.accent.r(),
             p.accent.g(),
             p.accent.b(),
-            (alpha * 255.0).round() as u8,
+            (r.tint_alpha * 255.0).round() as u8,
         );
-        ui.painter().rect_filled(rect, 2.0, tint);
+        ui.painter().rect_filled(rect, radius, tint);
         ui.painter().rect_filled(
-            egui::Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height())),
+            egui::Rect::from_min_size(rect.min, egui::vec2(r.stripe_w, rect.height())),
             0.0,
             p.accent,
         );
@@ -801,11 +1526,11 @@ pub fn row(
     let mut child = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(egui::Rect::from_min_max(
-                rect.min + egui::vec2(6.0, 0.0),
+                rect.min + egui::vec2(r.inset, 0.0),
                 rect.max,
             ))
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
-    child.spacing_mut().item_spacing.x = 4.0;
+    child.spacing_mut().item_spacing.x = r.gap;
     (rect, child)
 }

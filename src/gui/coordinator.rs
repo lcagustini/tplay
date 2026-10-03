@@ -173,8 +173,7 @@ impl TabViewer for PaneViewer<'_> {
     }
 
     fn title(&mut self, pane: &mut Pane) -> egui::WidgetText {
-        let accent = self.themes.current().palette.accent;
-        pane_title(*pane).color(accent)
+        pane_title(*pane).color(self.themes.current().dock.tab_text_active)
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, pane: &mut Pane) {
@@ -557,6 +556,49 @@ pub fn update_ui(
     // rather than at each use.
     let mut style = Style::from_egui(&ctx.style_of(ctx.theme()));
     style.tab_bar.fill_tab_bar = true;
+
+    // `from_egui` seeds the whole dock style from egui, and the app then left
+    // everything but three fields at egui's defaults — so no theme could reach a
+    // tab, a splitter or the dock surface. Every token here is optional, and an
+    // omitted one keeps egui's value rather than guessing.
+    let dock = themes.current().dock;
+    let radius: egui::CornerRadius = dock.tab_radius.into();
+    style.tab_bar.height = dock.tab_h;
+    style.tab_bar.corner_radius = radius;
+    style.separator.width = dock.split_w;
+    if let Some(c) = dock.split_color {
+        style.separator.color_idle = c;
+    }
+    if let Some(c) = dock.split_color_active {
+        style.separator.color_hovered = c;
+        style.separator.color_dragged = c;
+    }
+    for (tab, active) in [
+        (&mut style.tab.inactive, false),
+        (&mut style.tab.active, true),
+        (&mut style.tab.hovered, false),
+    ] {
+        tab.corner_radius = radius;
+        if let Some(c) = dock.tab_bg {
+            tab.bg_fill = c;
+        }
+        if let Some(c) = dock.tab_stroke {
+            tab.outline_color = c;
+        }
+        if let Some(c) = if active {
+            Some(dock.tab_text_active)
+        } else {
+            dock.tab_text
+        } {
+            tab.text_color = c;
+        }
+    }
+    if let Some(c) = dock.tab_bg_active {
+        style.tab.active.bg_fill = c;
+    }
+    if let Some(c) = dock.drag_fill {
+        style.overlay.selection_color = c;
+    }
 
     let inner = style.tab.tab_body.inner_margin;
     let border_v = style.tab_bar.height + f32::from(inner.top) + f32::from(inner.bottom);

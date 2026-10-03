@@ -29,17 +29,6 @@ pub const CONFIRM_ID: &str = "tplay.confirm";
 pub const SAVE_NAME_ID: &str = "tplay.save_name";
 /// egui memory: the armed track editor, `Option<EditArmed>`.
 pub const EDIT_ID: &str = "tplay.edit";
-/// The save-name modal's width, and the field's desired width within it.
-const FIELD_W: f32 = 220.0;
-/// Minimum width of the confirm modal (its description wraps within this).
-const CONFIRM_W: f32 = 260.0;
-/// The editor modal's width, and a text field's desired width within it.
-const EDIT_W: f32 = 320.0;
-/// Width of a field's label, so the four inputs line up.
-const FIELD_LABEL_W: f32 = 56.0;
-/// The star size in the editor. Bigger than the row's inline star, because this is
-/// the one place the rating is *chosen* rather than scanned.
-const PICKER_STAR: f32 = 22.0;
 
 /// A state-losing action to confirm. Every arm is a plain value, so the whole
 /// pending action round-trips through egui memory.
@@ -167,12 +156,22 @@ fn confirm_modal(app: &mut TPlayApp, themes: &ThemeState, ctx: &egui::Context) {
     let Some(armed) = take_state::<Armed>(ctx, CONFIRM_ID) else {
         return;
     };
-    let p = themes.current().palette;
+    let theme = themes.current();
+    let p = theme.palette;
+    let panes = theme.panes;
+    // `Modal`'s backdrop is a per-call field, not a `Visuals` one, so egui hardcodes
+    // it to a black at alpha 100 and no theme could reach it.
+    let modal = egui::Modal::new(egui::Id::new(CONFIRM_ID)).backdrop_color(
+        theme
+            .chrome
+            .backdrop
+            .unwrap_or(egui::Color32::from_black_alpha(100)),
+    );
 
     // None = still open, Some(true) = Yes, Some(false) = dismissed.
     let mut answer: Option<bool> = None;
-    let resp = egui::Modal::new(egui::Id::new(CONFIRM_ID)).show(ctx, |ui| {
-        ui.set_min_width(CONFIRM_W);
+    let resp = modal.show(ctx, |ui| {
+        ui.set_min_width(panes.confirm_w);
         ui.label(
             egui::RichText::new(&armed.title)
                 .strong()
@@ -180,7 +179,7 @@ fn confirm_modal(app: &mut TPlayApp, themes: &ThemeState, ctx: &egui::Context) {
         );
         // Wrapped: descriptions carry track and layout names, which can be long.
         ui.add(egui::Label::new(egui::RichText::new(&armed.desc).color(p.text_secondary)).wrap());
-        ui.add_space(6.0);
+        ui.add_space(panes.gap + panes.gap / 2.0);
         ui.horizontal(|ui| {
             if ui.button("Yes").clicked() {
                 answer = Some(true);
@@ -250,11 +249,21 @@ fn save_name_modal(
         return;
     };
 
-    let p = themes.current().palette;
+    let theme = themes.current();
+    let p = theme.palette;
+    let panes = theme.panes;
+    // `Modal`'s backdrop is a per-call field, not a `Visuals` one, so egui hardcodes
+    // it to a black at alpha 100 and no theme could reach it.
+    let modal = egui::Modal::new(egui::Id::new(SAVE_NAME_ID)).backdrop_color(
+        theme
+            .chrome
+            .backdrop
+            .unwrap_or(egui::Color32::from_black_alpha(100)),
+    );
     // Some(None) = dismissed, Some(Some(name)) = confirmed.
     let mut action: Option<Option<String>> = None;
-    let resp = egui::Modal::new(egui::Id::new(SAVE_NAME_ID)).show(ctx, |ui| {
-        ui.set_min_width(FIELD_W);
+    let resp = modal.show(ctx, |ui| {
+        ui.set_min_width(panes.field_w);
         ui.label(
             egui::RichText::new(target.title())
                 .strong()
@@ -265,19 +274,19 @@ fn save_name_modal(
             egui::Label::new(egui::RichText::new(&dir).small().color(p.text_secondary)).truncate(),
         )
         .on_hover_text(&dir);
-        ui.add_space(4.0);
+        ui.add_space(panes.gap);
 
         // Enter submits (TextEdit surrenders focus on Enter).
         let mut enter = false;
         let field = ui.add(
             egui::TextEdit::singleline(&mut name)
-                .desired_width(FIELD_W)
+                .desired_width(panes.field_w)
                 .clip_text(true),
         );
         if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
             enter = true;
         }
-        ui.add_space(6.0);
+        ui.add_space(panes.gap + panes.gap / 2.0);
         ui.horizontal(|ui| {
             if ui.button("Save").clicked() {
                 action = Some(Some(name.clone()));
@@ -319,14 +328,24 @@ fn edit_modal(app: &mut TPlayApp, themes: &ThemeState, ctx: &egui::Context) {
     let Some(mut armed) = take_state::<EditArmed>(ctx, EDIT_ID) else {
         return;
     };
-    let p = themes.current().palette;
+    let theme = themes.current();
+    let p = theme.palette;
+    let panes = theme.panes;
+    // `Modal`'s backdrop is a per-call field, not a `Visuals` one, so egui hardcodes
+    // it to a black at alpha 100 and no theme could reach it.
+    let modal = egui::Modal::new(egui::Id::new(EDIT_ID)).backdrop_color(
+        theme
+            .chrome
+            .backdrop
+            .unwrap_or(egui::Color32::from_black_alpha(100)),
+    );
     let star_on = themes.icon(theme::Icon::StarOn).cloned();
     let star_off = themes.icon(theme::Icon::StarOff).cloned();
 
     let mut stars: Option<u8> = None;
     let mut save = false;
-    let resp = egui::Modal::new(egui::Id::new(EDIT_ID)).show(ctx, |ui| {
-        ui.set_min_width(EDIT_W);
+    let resp = modal.show(ctx, |ui| {
+        ui.set_min_width(panes.edit_w);
         ui.label(
             egui::RichText::new("Edit track")
                 .strong()
@@ -347,7 +366,7 @@ fn edit_modal(app: &mut TPlayApp, themes: &ThemeState, ctx: &egui::Context) {
             .truncate(),
         )
         .on_hover_text(armed.track.to_string_lossy());
-        ui.add_space(4.0);
+        ui.add_space(panes.gap);
 
         ui.horizontal(|ui| {
             for n in 1..=5u8 {
@@ -357,7 +376,7 @@ fn edit_modal(app: &mut TPlayApp, themes: &ThemeState, ctx: &egui::Context) {
                 } else {
                     star_off.as_ref()
                 };
-                if theme::icon_toggle(ui, tex, theme::Icon::StarOn, PICKER_STAR, on).clicked() {
+                if theme::icon_toggle(ui, tex, theme::Icon::StarOn, panes.edit_star, on).clicked() {
                     // The same star again clears, which is what makes that
                     // reachable without a separate control.
                     stars = Some(if n == armed.rating { 0 } else { n });
@@ -373,7 +392,7 @@ fn edit_modal(app: &mut TPlayApp, themes: &ThemeState, ctx: &egui::Context) {
                 .color(p.text_secondary),
             );
         });
-        ui.add_space(4.0);
+        ui.add_space(panes.gap);
 
         for (label, field) in [
             ("Title", &mut armed.title),
@@ -383,23 +402,23 @@ fn edit_modal(app: &mut TPlayApp, themes: &ThemeState, ctx: &egui::Context) {
         ] {
             ui.horizontal(|ui| {
                 ui.add_sized(
-                    egui::vec2(FIELD_LABEL_W, ui.spacing().interact_size.y),
+                    egui::vec2(panes.edit_label_w, ui.spacing().interact_size.y),
                     egui::Label::new(egui::RichText::new(label).small().color(p.text_secondary))
                         .truncate(),
                 );
                 ui.add(
                     egui::TextEdit::singleline(field)
-                        .desired_width(FIELD_W)
+                        .desired_width(panes.field_w)
                         .clip_text(true),
                 );
             });
         }
-        ui.add_space(4.0);
+        ui.add_space(panes.gap);
         if ui.button("Save").clicked() {
             save = true;
         }
         if let Some(e) = &armed.error {
-            ui.add_space(4.0);
+            ui.add_space(panes.gap);
             ui.label(
                 egui::RichText::new(e)
                     .small()

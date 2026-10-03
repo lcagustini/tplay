@@ -14,20 +14,6 @@ use crate::network;
 use eframe::egui;
 use std::path::{Path, PathBuf};
 
-/// Fixed width of the Places/Favorites column. Allocated as an exact rect (not
-/// `set_min_width`) so no child can resize it — see the note in `sidebar_ui`.
-const SIDEBAR_W: f32 = 120.0;
-/// Width of one row's label, leaving room for the ✕ on removable rows.
-const ROW_W: f32 = 100.0;
-/// Width of a row's label in the Network section, where the ✕ sits inside the
-/// same 120px and the host strings are longer than the friendly labels.
-const SERVER_ROW_W: f32 = 88.0;
-/// Height of one row.
-const ROW_H: f32 = 18.0;
-/// Width of the add-server form's text fields, inside the fixed-width sidebar.
-const FORM_W: f32 = 100.0;
-/// Height of one add-server form text field.
-const FORM_FIELD_H: f32 = 18.0;
 /// egui memory: the Places and Volumes lists, read once per session.
 const LIB_PLACES: &str = "tplay.library.places";
 
@@ -87,7 +73,6 @@ fn sidebar_row(
     ui: &mut egui::Ui,
     themes: &ThemeState,
     theme: &theme::Theme,
-    layout: &theme::Layout,
     row: Row,
 ) -> Option<RowClick> {
     let p = theme.palette;
@@ -95,7 +80,7 @@ fn sidebar_row(
     ui.horizontal(|ui| {
         let resp = ui
             .add_sized(
-                egui::vec2(ROW_W, ROW_H),
+                egui::vec2(theme.panes.sidebar_row_w, theme.panes.sidebar_row_h),
                 egui::Label::new(
                     egui::RichText::new(row.label)
                         .color(if row.active {
@@ -103,10 +88,7 @@ fn sidebar_row(
                         } else {
                             p.text_secondary
                         })
-                        .font(egui::FontId::new(
-                            layout.text_meta,
-                            theme.metadata_font.clone(),
-                        )),
+                        .font(theme::meta_font(&theme.type_)),
                 )
                 .truncate()
                 .sense(egui::Sense::click()),
@@ -120,7 +102,7 @@ fn sidebar_row(
                 ui,
                 themes.icon(theme::Icon::Remove),
                 theme::Icon::Remove,
-                13.0,
+                theme.panes.small_icon,
                 true,
                 false,
             )
@@ -133,14 +115,14 @@ fn sidebar_row(
 }
 
 /// A section heading: "Places" / "Volumes" / "Network" / "Favorites".
-fn section_label(ui: &mut egui::Ui, p: theme::Palette, text: &str) {
+fn section_label(ui: &mut egui::Ui, theme: &theme::Theme, p: theme::Palette, text: &str) {
     ui.label(
         egui::RichText::new(text)
             .small()
             .strong()
             .color(p.text_secondary),
     );
-    ui.add_space(4.0);
+    ui.add_space(theme.panes.gap);
 }
 
 pub fn sidebar_ui(
@@ -152,7 +134,6 @@ pub fn sidebar_ui(
     network_mode: bool,
 ) {
     let p = theme.palette;
-    let layout = theme.layout;
 
     // The Places/Favorites column is a FIXED 120px sidebar. Two egui facts force
     // this exact shape:
@@ -169,14 +150,15 @@ pub fn sidebar_ui(
     //    `allocate_new_ui` does), so the file-list sibling landed at the same x
     //    and drew over the sidebar. `allocate_space` reserves the rect *and*
     //    moves the cursor — both halves needed.
-    let (_, sidebar_rect) = ui.allocate_space(egui::vec2(SIDEBAR_W, ui.available_height()));
+    let (_, sidebar_rect) =
+        ui.allocate_space(egui::vec2(theme.panes.sidebar_w, ui.available_height()));
     let mut sidebar = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(sidebar_rect)
             .layout(egui::Layout::top_down(egui::Align::Min)),
     );
     sidebar.vertical(|ui| {
-        let scroll_h = (ui.available_height() - 8.0).max(40.0);
+        let scroll_h = (ui.available_height() - theme.panes.pad).max(theme.rows.height);
         // id_salt: without it this shares the default "scroll_area" persistent id
         // with the file list's ScrollArea (sibling column uis resolve to the same
         // ui.id) → egui's ID-clash debug overlay.
@@ -214,7 +196,7 @@ pub fn sidebar_ui(
 
                 // Places: Home + XDG shortcuts — the favorites row style, no ✕.
                 if !dirs.places.is_empty() {
-                    section_label(ui, p, "Places");
+                    section_label(ui, theme, p, "Places");
                     for (label, path) in &dirs.places {
                         let active = current_local.as_deref() == Some(path.as_path());
                         if matches!(
@@ -222,7 +204,6 @@ pub fn sidebar_ui(
                                 ui,
                                 themes,
                                 theme,
-                                &layout,
                                 Row {
                                     label,
                                     path,
@@ -235,12 +216,12 @@ pub fn sidebar_ui(
                             jump = Some(path.clone());
                         }
                     }
-                    ui.add_space(8.0);
+                    ui.add_space(theme.panes.pad);
                 }
 
                 // Volumes: local block partitions from /proc/self/mounts.
                 if !dirs.volumes.is_empty() {
-                    section_label(ui, p, "Volumes");
+                    section_label(ui, theme, p, "Volumes");
                     for vol in &dirs.volumes {
                         let active = current_local.as_deref() == Some(vol.path.as_path());
                         if matches!(
@@ -248,7 +229,6 @@ pub fn sidebar_ui(
                                 ui,
                                 themes,
                                 theme,
-                                &layout,
                                 Row {
                                     label: &vol.label,
                                     path: &vol.path,
@@ -261,7 +241,7 @@ pub fn sidebar_ui(
                             jump = Some(vol.path.clone());
                         }
                     }
-                    ui.add_space(8.0);
+                    ui.add_space(theme.panes.pad);
                 }
 
                 // Network: built-in SMB browsing (no mount required).
@@ -298,8 +278,9 @@ pub fn sidebar_ui(
                         // Fixed-rect child, as the column above: the TextEdit
                         // overflow allocation must not reach the scroll content.
                         let gap = ui.spacing().item_spacing.y;
-                        let form_h = FORM_FIELD_H + gap + ui.spacing().interact_size.y;
-                        let (_, form_rect) = ui.allocate_space(egui::vec2(FORM_W, form_h));
+                        let form_h = theme.panes.sidebar_row_h + gap + ui.spacing().interact_size.y;
+                        let (_, form_rect) =
+                            ui.allocate_space(egui::vec2(theme.panes.sidebar_form_w, form_h));
                         let mut form_ui = ui.new_child(
                             egui::UiBuilder::new()
                                 .max_rect(form_rect)
@@ -308,7 +289,10 @@ pub fn sidebar_ui(
                         form_ui.vertical(|ui| {
                             let field = ui
                                 .add_sized(
-                                    egui::vec2(FORM_W, FORM_FIELD_H),
+                                    egui::vec2(
+                                        theme.panes.sidebar_form_w,
+                                        theme.panes.sidebar_row_h,
+                                    ),
                                     egui::TextEdit::singleline(host)
                                         .hint_text("host or smb://host/share")
                                         .clip_text(true),
@@ -356,21 +340,21 @@ pub fn sidebar_ui(
                             Some(false) => *form = None,
                             None => {}
                         }
-                        ui.add_space(4.0);
+                        ui.add_space(theme.panes.gap);
                     }
                     for s in servers {
                         ui.horizontal(|ui| {
                             let active = active_host.as_ref() == Some(&s.host);
                             if ui
                                 .add_sized(
-                                    egui::vec2(SERVER_ROW_W, ROW_H),
+                                    egui::vec2(
+                                        theme.panes.sidebar_server_w,
+                                        theme.panes.sidebar_row_h,
+                                    ),
                                     egui::Label::new(
                                         egui::RichText::new(&s.host)
                                             .color(if active { p.accent } else { p.text_secondary })
-                                            .font(egui::FontId::new(
-                                                layout.text_meta,
-                                                theme.metadata_font.clone(),
-                                            )),
+                                            .font(theme::meta_font(&theme.type_)),
                                     )
                                     .truncate()
                                     .sense(egui::Sense::click()),
@@ -384,7 +368,7 @@ pub fn sidebar_ui(
                                 ui,
                                 themes.icon(theme::Icon::Remove),
                                 theme::Icon::Remove,
-                                13.0,
+                                theme.panes.small_icon,
                                 true,
                                 false,
                             )
@@ -394,10 +378,10 @@ pub fn sidebar_ui(
                             }
                         });
                     }
-                    ui.add_space(8.0);
+                    ui.add_space(theme.panes.pad);
                 }
 
-                section_label(ui, p, "Favorites");
+                section_label(ui, theme, p, "Favorites");
                 for dir in app.library().favorites().to_vec() {
                     let name = dir_name(&dir);
                     let active = current_local.as_deref() == Some(dir.as_path());
@@ -405,7 +389,6 @@ pub fn sidebar_ui(
                         ui,
                         themes,
                         theme,
-                        &layout,
                         Row {
                             label: &name,
                             path: &dir,
@@ -464,7 +447,6 @@ pub fn sidebar_ui(
                             ui,
                             themes,
                             theme,
-                            &layout,
                             Row {
                                 label: &view.name,
                                 path: Path::new(""),
@@ -497,7 +479,7 @@ pub fn sidebar_ui(
                         }
                     }
                     if !app.smart_views().is_empty() {
-                        ui.add_space(8.0);
+                        ui.add_space(theme.panes.pad);
                     }
 
                     if let Some(view) = add {

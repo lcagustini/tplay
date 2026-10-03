@@ -58,7 +58,7 @@ pub fn library_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui) 
         header::local_header(app, themes, ui, &theme);
     }
 
-    ui.add_space(4.0);
+    ui.add_space(theme.panes.gap);
 
     // Add-server form state (just the host) lives in egui memory, carried across
     // frames. Credentials are prompted for in the main pane instead, so a saved
@@ -81,7 +81,7 @@ pub fn library_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui) 
             // where the local one is. Both go through the same `breadcrumb`.
             Some(browse) => {
                 header::remote_header(app, ui, &theme, browse);
-                ui.add_space(4.0);
+                ui.add_space(theme.panes.gap);
                 listing::remote_list_ui(app, themes, ui, &theme, browse);
             }
             None => listing::local_list_ui(app, themes, ui, &theme),

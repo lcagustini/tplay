@@ -85,7 +85,7 @@ pub fn album_cover_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
         }
         None => {
             // No art: themed placeholder, centered at a pane-relative size.
-            let size = rect.width().min(rect.height()) * 0.35;
+            let size = rect.width().min(rect.height()) * theme.panes.nocover_frac;
             let center = rect.center();
             match themes.icon(Icon::NoCover) {
                 Some(icon) => {
@@ -101,7 +101,7 @@ pub fn album_cover_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                         center,
                         egui::Align2::CENTER_CENTER,
                         Icon::NoCover.glyph(),
-                        egui::FontId::proportional(size),
+                        egui::FontId::new(size, theme.type_.family.into()),
                         p.text_secondary,
                     );
                 }
