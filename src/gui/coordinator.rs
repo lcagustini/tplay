@@ -180,6 +180,22 @@ impl TabViewer for PaneViewer<'_> {
         // Reborrow rather than move: `self` is `&mut PaneViewer`, so the
         // destructuring below would otherwise move the `&mut` out of it.
         let (app, themes) = (&mut *self.app, self.themes);
+
+        // A pane body's own 9-slice, when the theme ships one. Into the
+        // *background* layer rather than this pane's, so paint order cannot
+        // decide whether it lands behind the content or over it — the one
+        // question a nine-slice has to get right and cannot report on.
+        //
+        // The Visualizer and Album Cover panes paint their own full-rect `bg`
+        // first thing, which covers this. That is the rule rather than a special
+        // case: a pane that draws its own surface wins over the theme's.
+        if let Some((tex, st)) = themes.frame(theme::Surface::Pane) {
+            let rect = ui.max_rect();
+            let tex = tex.clone();
+            let mut p = ui.ctx().layer_painter(egui::LayerId::background());
+            p.set_clip_rect(rect);
+            theme::nine_slice(&p, rect, tex, st);
+        }
         match pane {
             Pane::NowPlaying => panes::now_playing::now_playing_pane(app, themes, ui),
             Pane::Playlist => panes::playlist::playlist_pane(app, themes, ui),
@@ -295,9 +311,34 @@ pub fn update_ui(
     // 0.34 folded `TopBottomPanel`/`SidePanel`/`CentralPanel` into one `Panel`
     // enum, and 0.36 made `show` take the enclosing `Ui` rather than a
     // `Context`. `Frame::none()` became the `Frame::NONE` const.
+    //
+    // The frame is the theme's, where it used to be `Frame::NONE` — the bar was
+    // an empty strip holding a logo and three buttons, with no surface of its own
+    // to take a fill or a border. `panes.topbar_h` gives it a height the window
+    // title bar normally would, and the chrome tokens give it a fill and an
+    // edge, which is the whole of a Winamp title bar's colour.
+    // Copied out rather than read through the `Arc` inside the closure: the ☰
+    // menu below needs `&mut themes` to switch themes, so a borrow that lived as
+    // long as the closure would be a conflict.
+    let bar = themes.current();
+    let (pad, logo_px, chrome_icon) = (bar.panes.pad, bar.panes.logo, bar.panes.chrome_icon);
+    let topbar = egui::Frame::new()
+        .fill(bar.palette.panel_bg)
+        .stroke(egui::Stroke::new(bar.chrome.border_w, bar.palette.border))
+        .inner_margin(egui::Margin::symmetric(pad as i8, 0));
+    // The title bar's own 9-slice, when the theme ships one. Drawn into the
+    // panel's own layer rather than the background one, because a `Panel` *is*
+    // its own layer and a frame there has nothing to compete with.
+    let titlebar_frame = themes
+        .frame(theme::Surface::Titlebar)
+        .map(|(t, st)| (t.clone(), st));
     egui::Panel::top("pane_dropdown_panel")
-        .frame(egui::Frame::NONE)
+        .exact_size(bar.panes.topbar_h)
+        .frame(topbar)
         .show(ui, |ui| {
+            if let Some((tex, st)) = &titlebar_frame {
+                theme::nine_slice(ui.painter(), ui.max_rect(), tex.clone(), *st);
+            }
             // No native title bar (decorations off — see main.rs), so the whole
             // bar drags the window. Added first, at the bottom of the z-stack:
             // the menu logo and the window controls drawn after still win their
@@ -419,7 +460,7 @@ pub fn update_ui(
                             ui,
                             win_close_tex.as_ref(),
                             theme::Icon::Remove,
-                            16.0,
+                            chrome_icon,
                             true,
                             false,
                         )
@@ -462,11 +503,11 @@ pub fn update_ui(
                 }
             };
             ui.horizontal(|ui| {
-                ui.add_space(8.0);
+                ui.add_space(pad / 2.0);
                 match logo {
                     Some(tex) => {
                         ui.menu_image_button(
-                            egui::Image::new(&tex).fit_to_exact_size(egui::vec2(18.0, 18.0)),
+                            egui::Image::new(&tex).fit_to_exact_size(egui::vec2(logo_px, logo_px)),
                             menu_contents,
                         );
                     }
@@ -498,7 +539,7 @@ pub fn update_ui(
                         ui,
                         win_close_tex.as_ref(),
                         theme::Icon::Remove,
-                        16.0,
+                        chrome_icon,
                         true,
                         false,
                     )
@@ -517,7 +558,7 @@ pub fn update_ui(
                             win_max_tex.as_ref()
                         },
                         theme::Icon::Maximize,
-                        16.0,
+                        chrome_icon,
                         true,
                         false,
                     )
@@ -535,7 +576,7 @@ pub fn update_ui(
                         ui,
                         win_min_tex.as_ref(),
                         theme::Icon::Minimize,
-                        16.0,
+                        chrome_icon,
                         true,
                         false,
                     )

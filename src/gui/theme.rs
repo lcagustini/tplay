@@ -518,6 +518,159 @@ fn columns(
     out
 }
 
+/// How one 9-sliced source image is cut.
+///
+/// Winamp states this in `.TXT` files beside each bitmap — two rectangles of the
+/// source, one for the tiled/whole case and one for the frame — so the same two
+/// numbers appear here: `w`/`h` of the source, and how much of each edge is
+/// fixed rather than stretched.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Stretch {
+    /// Fixed pixels along the left edge.
+    pub left: u32,
+    /// Fixed pixels along the top edge.
+    pub top: u32,
+    /// Fixed pixels along the right edge.
+    pub right: u32,
+    /// Fixed pixels along the bottom edge.
+    pub bottom: u32,
+}
+
+/// One 9-sliced frame: which file, how it is cut, and how it is filtered.
+///
+/// `src` is resolved inside the theme's own folder, like `icons_dir`, so a theme
+/// carries its art with it and a user theme that omits a frame falls back to
+/// nothing at all rather than to another theme's.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Frame {
+    /// File name inside `<theme>/frames/`.
+    pub src: String,
+    pub stretch: Stretch,
+    /// `false` is nearest-neighbour, which is what pixel art wants; `true` is
+    /// linear, for art authored at a larger size than it is drawn.
+    ///
+    /// The default is nearest because the reference format is a 1x bitmap
+    /// magnified onto a HiDPI screen, and the icons already had to learn this the
+    /// hard way — see `ICON_PX`.
+    #[serde(default)]
+    pub smooth: bool,
+}
+
+/// The theme's own artwork: the surfaces a skin paints rather than colours.
+///
+/// **Winamp's substrate, on egui.** A real skin ships `MAIN.BMP`, `PLEDIT.BMP`
+/// and `TITLEBAR.BMP` and reads coordinates out of the `.TXT` beside each one;
+/// this is the same idea with the coordinates in `theme.json`, drawn by
+/// `nine_slice`. What it cannot reach is a per-*element* bitmap — a tab strip,
+/// a button face — because those are egui_dock and egui widgets, which paint
+/// themselves. Two surfaces ship: the title bar and the pane body.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Frames {
+    /// The window's title bar.
+    pub titlebar: Option<Frame>,
+    /// The docked pane body behind a pane's content.
+    pub pane: Option<Frame>,
+}
+
+impl Frames {
+    fn from_json(v: &serde_json::Value) -> Frames {
+        let one = |k: &str| -> Option<Frame> {
+            let f = v.get(k)?;
+            let src = f.get("src")?.as_str()?.to_string();
+            let d = Stretch::default();
+            let num = |o: &str, dflt: u32| {
+                f.get("stretch")
+                    .and_then(|s| s.get(o))
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(dflt as u64) as u32
+            };
+            Some(Frame {
+                src,
+                stretch: Stretch {
+                    left: num("left", d.left),
+                    top: num("top", d.top),
+                    right: num("right", d.right),
+                    bottom: num("bottom", d.bottom),
+                },
+                smooth: f.get("smooth").and_then(|x| x.as_bool()).unwrap_or(false),
+            })
+        };
+        Frames {
+            titlebar: one("titlebar"),
+            pane: one("pane"),
+        }
+    }
+}
+
+/// Draw a 9-sliced frame into `rect`.
+///
+/// Walks three rows by three columns and paints each cell's slice of the source
+/// at its own scale, so the corners keep their size while the edges and the
+/// middle stretch. That is the whole mechanism; there is no third mode and no
+/// special case for a degenerate row.
+///
+/// **The centre cell is what makes this cheap.** A theme whose `stretch` covers
+/// the whole source has nothing to stretch, and every view that wants a solid
+/// surface wants exactly that.
+///
+/// `rect` smaller than the source is handled by clamping rather than by dividing:
+/// a pane narrower than its own frame must still draw, and a negative cell size
+/// would panic in the `Painter`.
+pub fn nine_slice(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    tex: egui::TextureHandle,
+    st: Stretch,
+) {
+    let size = tex.size();
+    let [sw, sh] = size;
+    let (sw, sh) = (sw as f32, sh as f32);
+    if sw <= 0.0 || sh <= 0.0 {
+        return;
+    }
+    // Clamp each inset against both the source and the target, then against what
+    // its opposite partner already claimed. Without the third step two insets
+    // larger than the source put the middle cell at a negative width.
+    let l = (st.left as f32).min(sw).min(rect.width());
+    let t = (st.top as f32).min(sh).min(rect.height());
+    let r = (st.right as f32).min(sw - l).min(rect.width() - l);
+    let b = (st.bottom as f32).min(sh - t).min(rect.height() - t);
+
+    // Source and destination edges for the four cuts: the outside pair is the
+    // image's own edge, the inside pair is the fixed inset.
+    let sx = [0.0, l, sw - r, sw];
+    let sy = [0.0, t, sh - b, sh];
+    let dx = [rect.min.x, rect.min.x + l, rect.max.x - r, rect.max.x];
+    let dy = [rect.min.y, rect.min.y + t, rect.max.y - b, rect.max.y];
+
+    for row in 0..3 {
+        for col in 0..3 {
+            let w = dx[col + 1] - dx[col];
+            let h = dy[row + 1] - dy[row];
+            if w <= 0.0 || h <= 0.0 {
+                continue;
+            }
+            // A cell's UV is its own slice of the source, normalised. Computed
+            // from the edges rather than a width so the last cell cannot round
+            // past 1.0 and wrap.
+            let uv = egui::Rect::from_min_max(
+                egui::pos2(sx[col] / sw, sy[row] / sh),
+                egui::pos2(sx[col + 1] / sw, sy[row + 1] / sh),
+            );
+            painter.image(
+                tex.id(),
+                egui::Rect::from_min_max(
+                    egui::pos2(dx[col], dy[row]),
+                    egui::pos2(dx[col + 1], dy[row + 1]),
+                ),
+                uv,
+                egui::Color32::WHITE,
+            );
+        }
+    }
+}
+
 impl Type {
     fn from_json(v: &serde_json::Value) -> Type {
         let d = Type::default();
@@ -675,6 +828,8 @@ pub struct Theme {
     pub layout: Layout,
     /// `<theme_dir>/icons`, when the folder exists.
     pub icons_dir: Option<PathBuf>,
+    /// What `frames` said, before any file was read.
+    pub frames: Frames,
     /// `<theme_dir>/<font>`, when the theme names a font file that exists. Not
     /// a token value: like `icons_dir` it is a path resolved against the theme's
     /// own folder, and a theme with no font file is the normal case.
@@ -712,6 +867,13 @@ impl Theme {
             _ => Base::Dark,
         };
         let palette = Palette::from_json(v.get("palette")?)?;
+        // Every group is optional. An absent group parses as `Null`, and every
+        // `from_json` reads through `num`/`tok`, which fall back per token. So a
+        // `theme.json` written before these groups existed loads unchanged and
+        // renders exactly as it did, which is what lets the bundled themes and any
+        // hand-written one keep working with no edits.
+        let group = |k: &str| v.get(k).cloned().unwrap_or(serde_json::Value::Null);
+        let frames = Frames::from_json(&group("frames"));
         let icons_dir = dir.join("icons");
         let icons_dir = icons_dir.is_dir().then_some(icons_dir);
         let layout = {
@@ -733,12 +895,6 @@ impl Theme {
                 })
                 .unwrap_or_else(|| Layout::default().with_defaults())
         };
-        // Every group is optional. An absent group parses as `Null`, and every
-        // `from_json` above reads through `num`/`tok`, which fall back per token.
-        // So a `theme.json` written before these groups existed loads unchanged
-        // and renders exactly as it did, which is what lets the three bundled
-        // themes and any hand-written one keep working with no edits.
-        let group = |k: &str| v.get(k).cloned().unwrap_or(serde_json::Value::Null);
         let font_file = v
             .get("font")
             .and_then(|x| x.as_str())
@@ -751,6 +907,7 @@ impl Theme {
             base,
             layout,
             palette,
+            frames,
             icons_dir,
             font_file,
             type_: Type::from_json(&group("type")),
@@ -976,6 +1133,99 @@ pub fn load_icons(
         .collect()
 }
 
+/// A theme's 9-sliced artwork, decoded into textures.
+///
+/// Kept apart from the `Frames` token struct on purpose: that one is *what the
+/// file said*, and this one is *what the GPU holds*. They are different shapes —
+/// a theme may name a frame that is missing, and a missing frame is not an error
+/// — and conflating them is how a decode failure turns into a paint failure.
+#[derive(Clone, Default)]
+pub struct DecodedFrames {
+    pub titlebar: Option<(TextureHandle, Stretch)>,
+    pub pane: Option<(TextureHandle, Stretch)>,
+}
+
+/// Which of the theme's two frame surfaces a caller wants.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Surface {
+    /// The window's title bar, above the dock.
+    Titlebar,
+    /// A docked pane's body, behind its content.
+    Pane,
+}
+
+impl std::fmt::Debug for DecodedFrames {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `Theme` derives Debug and this is a field of it, but `TextureHandle`
+        // does not implement Debug and the handle's identity is its texture id.
+        // What a reader wants here is which frames loaded, not their ids.
+        f.debug_struct("DecodedFrames")
+            .field("titlebar", &self.titlebar.is_some())
+            .field("pane", &self.pane.is_some())
+            .finish()
+    }
+}
+
+impl DecodedFrames {
+    /// Decode both surfaces from `<theme>/frames/`.
+    ///
+    /// A missing file is not a failure: a theme with no frames is the normal case
+    /// and the pane just paints its own surface colour. A file that exists but
+    /// does not decode says so, because that is a theme author's mistake rather
+    /// than a theme that simply does not use frames.
+    fn load(ctx: &egui::Context, theme: &Theme) -> DecodedFrames {
+        let dir = theme.icons_dir.as_ref().and_then(|icons| icons.parent());
+        let Some(dir) = dir else {
+            return DecodedFrames::default();
+        };
+        let one = |f: &Option<Frame>, name: &str| -> Option<(TextureHandle, Stretch)> {
+            let f = f.as_ref()?;
+            let path = dir.join("frames").join(&f.src);
+            let Ok(bytes) = std::fs::read(&path) else {
+                return None;
+            };
+            let opts = if f.smooth {
+                egui::TextureOptions::LINEAR
+            } else {
+                egui::TextureOptions::NEAREST
+            };
+            // Format from the extension rather than sniffed: a theme author
+            // chose `.bmp` or `.png` deliberately, and the sniff would silently
+            // accept a mislabelled file instead of naming the mismatch.
+            let Ok(fmt) = image::ImageFormat::from_path(&path) else {
+                log::warn!(
+                    "theme frame {} has no format the decoder knows; drawing without it",
+                    path.display()
+                );
+                return None;
+            };
+            match image::load_from_memory_with_format(&bytes, fmt) {
+                Ok(img) => {
+                    let img = img.into_rgba8();
+                    let (w, h) = (img.width() as usize, img.height() as usize);
+                    let tex = ctx.load_texture(
+                        format!("tplay-frame-{}-{}", theme.id, name),
+                        egui::ColorImage::from_rgba_premultiplied([w, h], img.as_raw()),
+                        opts,
+                    );
+                    Some((tex, f.stretch))
+                }
+                Err(e) => {
+                    log::warn!(
+                        "theme frame {} did not decode ({e}); drawing without it",
+                        path.display()
+                    );
+                    None
+                }
+            }
+        };
+        DecodedFrames {
+            titlebar: one(&theme.frames.titlebar, "titlebar"),
+            pane: one(&theme.frames.pane, "pane"),
+        }
+    }
+}
+
 /// The selected theme, the list, and the loaded icon textures — one group.
 ///
 /// These were three `TPlayApp` fields, and the awkward part was never the fields:
@@ -986,6 +1236,7 @@ pub struct ThemeState {
     current: Arc<Theme>,
     themes: Themes,
     icons: Vec<Option<TextureHandle>>,
+    frames: DecodedFrames,
 }
 
 impl ThemeState {
@@ -998,11 +1249,23 @@ impl ThemeState {
             .cloned()
             .unwrap_or_else(|| themes.default().clone());
         let icons = load_icons(ctx, &themes, &current);
+        let frames = DecodedFrames::load(ctx, &current);
         Self {
             current,
             themes,
             icons,
+            frames,
         }
+    }
+
+    /// The theme's 9-sliced artwork, for `nine_slice`. `None` for a surface the
+    /// theme does not draw, which is every surface for a theme with no frames.
+    pub fn frame(&self, which: Surface) -> Option<(&TextureHandle, Stretch)> {
+        let slot = match which {
+            Surface::Titlebar => &self.frames.titlebar,
+            Surface::Pane => &self.frames.pane,
+        };
+        slot.as_ref().map(|(t, s)| (t, *s))
     }
 
     /// The active theme — what `apply` maps onto egui `Visuals` each frame.
@@ -1034,6 +1297,7 @@ impl ThemeState {
         log::info!("switched to the {} theme", theme.name);
         self.current = Arc::clone(theme);
         self.icons = load_icons(ctx, &self.themes, &self.current);
+        self.frames = DecodedFrames::load(ctx, &self.current);
         true
     }
 }

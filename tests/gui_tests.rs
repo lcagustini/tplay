@@ -3564,3 +3564,245 @@ mod shader_views {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Nine-sliced theme frames
+// ---------------------------------------------------------------------------
+
+/// Run `nine_slice` over a known source size and collect what it emitted.
+///
+/// Reads `ctx.shapes()` inside the frame rather than after it, because the
+/// harness disposes of the output deltas on the way out.
+fn slice_shapes(src: [usize; 2], rect: egui::Rect, st: [u32; 4]) -> Vec<(egui::Rect, egui::Rect)> {
+    use tplay::gui::theme::Stretch;
+    let ctx = egui::Context::default();
+    let img = egui::ColorImage::new(src, vec![egui::Color32::WHITE; src[0] * src[1]]);
+    let tex = ctx.load_texture("nine-slice-test", img, egui::TextureOptions::NEAREST);
+    let mine = tex.id();
+    let stretch = Stretch {
+        left: st[0],
+        top: st[1],
+        right: st[2],
+        bottom: st[3],
+    };
+    let out = ctx.run_ui(egui::RawInput::default(), |ui| {
+        tplay::gui::theme::nine_slice(ui.painter(), rect, tex.clone(), stretch);
+    });
+    let shapes = out.shapes.clone();
+    out.drop_without_applying_deltas();
+
+    // Two details make this read out what the test is about. `Painter::image`
+    // emits a one-rect `Mesh` rather than an image shape, so each cell is
+    // recovered as the bounding box of its vertices — which is the geometry the
+    // assertions are about anyway: where the cell landed and which slice of the
+    // source it took. And the frame paints backgrounds of its own, so the meshes
+    // are filtered by texture id: counting egui's would make "nine cells" a
+    // statement about the harness rather than about the frame.
+    shapes
+        .iter()
+        .filter_map(|c| match &c.shape {
+            egui::Shape::Mesh(m) if m.texture_id == mine => {
+                let pos = m.vertices.iter().fold(egui::Rect::NOTHING, |acc, v| {
+                    acc.union(egui::Rect::from_min_size(v.pos, egui::vec2(0.0, 0.0)))
+                });
+                let uv = m.vertices.iter().fold(egui::Rect::NOTHING, |acc, v| {
+                    acc.union(egui::Rect::from_min_size(v.uv, egui::vec2(0.0, 0.0)))
+                });
+                Some((pos, uv))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The corners must not scale with the pane. A frame whose corners stretch to fit
+/// a resized window is the failure the whole mechanism exists to prevent.
+#[test]
+fn a_nine_slice_keeps_its_corners_and_stretches_only_the_middle() {
+    let st = [8, 4, 8, 4];
+    let small = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 80.0));
+    let big = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(600.0, 240.0));
+    let a = slice_shapes([64, 32], small, st);
+    let b = slice_shapes([64, 32], big, st);
+
+    let corner = |shapes: &[(egui::Rect, egui::Rect)]| {
+        shapes
+            .iter()
+            .find(|(r, _)| r.min.distance(egui::pos2(0.0, 0.0)) < 0.01)
+            .map(|(r, _)| r.size())
+            .expect("a corner cell")
+    };
+    assert_eq!(corner(&a), corner(&b), "corners match at both sizes");
+
+    // The middle cell is the one that grew, so it must be wider than a corner.
+    let middle = |shapes: &[(egui::Rect, egui::Rect)]| {
+        shapes
+            .iter()
+            .find(|(r, uv)| uv.width() > 0.4 && uv.height() > 0.4 && r.min.x > 1.0)
+            .map(|(r, _)| r.width())
+            .expect("a centre cell")
+    };
+    assert!(
+        middle(&b) > middle(&a) * 2.0,
+        "the middle took the extra width: {} vs {}",
+        middle(&a),
+        middle(&b)
+    );
+}
+
+/// A rect smaller than its own frame must still draw. Both the insets and the
+/// resulting cells are clamped, and a negative cell width is a panic in the
+/// Painter rather than a gap on screen.
+#[test]
+fn a_nine_slice_survives_a_rect_smaller_than_its_own_insets() {
+    let tiny = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(3.0, 2.0));
+    let shapes = slice_shapes([64, 32], tiny, [16, 16, 16, 16]);
+    assert!(!shapes.is_empty(), "something drew rather than a panic");
+    for (r, _) in &shapes {
+        assert!(
+            r.width() >= 0.0 && r.height() >= 0.0,
+            "no negative cell: {r:?}"
+        );
+        assert!(
+            tiny.width() - r.width() < 0.01,
+            "no cell wider than the rect"
+        );
+    }
+
+    // Insets larger than the source are the same hazard from the other end, and
+    // they are what a theme with a wrong `stretch` actually ships.
+    let huge = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 400.0));
+    for (r, uv) in slice_shapes([8, 8], huge, [999, 999, 999, 999]) {
+        assert!(
+            uv.min.x >= -0.001 && uv.max.x <= 1.001 && uv.min.y >= -0.001 && uv.max.y <= 1.001,
+            "uv stays in range: {uv:?}"
+        );
+        assert!(r.width() >= 0.0 && r.height() >= 0.0);
+    }
+}
+
+/// The clamp is the whole of `nine_slice`'s edge handling, so it is worth the
+/// property rather than one hand-picked case: **whatever the insets and whatever
+/// the rect, the cells still tile it exactly** — inside the rect, no overlap, no
+/// gap. Every row below is a case that broke an earlier version of this function
+/// or would break a plausible future one: a rect narrower than one inset, insets
+/// larger than the source, a zero inset, and an inset exactly on the border.
+///
+/// A degenerate input is *not* required to draw one cell. Insets that cannot all
+/// fit are clamped until they do, and the ones that fit are the ones kept — so a
+/// `stretch` of the whole source on a larger rect still stretches its middle.
+/// What must hold is that the result is a correct tiling, and that is asserted.
+#[test]
+fn a_nine_slice_tiles_its_rect_however_awkward_the_insets() {
+    let cases: &[([usize; 2], egui::Vec2, [u32; 4])] = &[
+        ([64, 32], egui::vec2(120.0, 60.0), [8, 4, 8, 4]),
+        ([64, 32], egui::vec2(120.0, 60.0), [0, 0, 0, 0]),
+        ([64, 32], egui::vec2(3.0, 2.0), [16, 16, 16, 16]),
+        ([8, 8], egui::vec2(400.0, 400.0), [999, 999, 999, 999]),
+        ([32, 32], egui::vec2(100.0, 50.0), [32, 32, 32, 32]),
+        ([16, 16], egui::vec2(64.0, 64.0), [16, 16, 16, 16]),
+        ([1, 1], egui::vec2(50.0, 50.0), [1, 1, 1, 1]),
+        ([64, 32], egui::vec2(0.5, 0.5), [8, 4, 8, 4]),
+    ];
+    for (src, size, st) in cases {
+        let rect = egui::Rect::from_min_size(egui::pos2(3.0, 7.0), *size);
+        let cells = slice_shapes(*src, rect, *st);
+        assert!(!cells.is_empty(), "{src:?} {st:?}: something must draw");
+
+        for (r, uv) in &cells {
+            assert!(
+                rect.contains_rect(*r),
+                "{src:?} {st:?}: {r:?} inside {rect:?}"
+            );
+            assert!(
+                uv.min.x >= -0.001 && uv.max.x <= 1.001 && uv.min.y >= -0.001 && uv.max.y <= 1.001,
+                "{src:?} {st:?}: uv stays in 0..1, got {uv:?}"
+            );
+            assert!(
+                r.width() >= 0.0 && r.height() >= 0.0,
+                "{src:?} {st:?}: {r:?}"
+            );
+        }
+
+        // Coverage: the cells' areas sum to the rect's, which holds exactly when
+        // they tile it. Overlap or a gap both break it.
+        let area: f32 = cells.iter().map(|(r, _)| r.width() * r.height()).sum();
+        let want = rect.width() * rect.height();
+        assert!(
+            (area - want).abs() < 0.5,
+            "{src:?} {st:?}: cells cover {area}, rect is {want}"
+        );
+    }
+}
+
+/// A zero inset is a value, not an absent token: a theme asking for a frame with
+/// no left border gets a cell that degenerates instead of one that keeps the
+/// source's default width.
+#[test]
+fn a_zero_inset_collapses_that_column_rather_than_using_the_default() {
+    let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 40.0));
+    let cells = slice_shapes([64, 32], rect, [0, 4, 8, 4]);
+    // Four columns collapse to three, so nine cells become six.
+    assert_eq!(cells.len(), 6, "the left column took no width");
+    for (r, _) in &cells {
+        assert!(rect.contains_rect(*r), "{r:?} inside {rect:?}");
+    }
+}
+
+/// `frames` is optional and a theme without one is the normal case, so an absent
+/// group must not touch the surfaces at all.
+#[test]
+fn a_theme_without_frames_names_none() {
+    let themes = Themes::load();
+    for theme in themes.list() {
+        assert!(
+            theme.frames.titlebar.is_none() && theme.frames.pane.is_none(),
+            "{} ships no frame files yet",
+            theme.id
+        );
+    }
+}
+
+/// `nearest` is the default, because the reference format is a 1x bitmap
+/// magnified onto a HiDPI screen and the icons already had to learn that the
+/// hard way. A theme has to ask for `smooth` to get linear filtering.
+#[test]
+fn a_frame_is_nearest_unless_the_theme_asks_otherwise() {
+    let dir = std::env::temp_dir()
+        .join(format!("tplay-test-{}", std::process::id()))
+        .join("frames-default");
+    std::fs::create_dir_all(dir.join("fr")).unwrap();
+    std::fs::write(
+        dir.join("fr").join("theme.json"),
+        r##"{"id":"fr","name":"Fr","base":"dark",
+             "palette":{"bg":"#101010","panel_bg":"#181818","text_primary":"#e0e0e0",
+             "text_secondary":"#8c8c8c","accent":"#2ea3f0","border":"#333333",
+             "progress_fill":"#2ea3f0","slider_track":"#222222","slider_handle":"#999999",
+             "row_even":"#141414","row_odd":"#1c1c1c","btn_hover":"#282828",
+             "focus_ring":"#2ea3f0"},
+             "frames":{"titlebar":{"src":"bar.bmp","stretch":{"left":6,"top":0,"right":6,"bottom":0}},
+                       "pane":{"src":"pane.bmp","smooth":true,"stretch":{"left":12,"top":20,"right":12,"bottom":20}}}}"##,
+    )
+    .unwrap();
+    let t = Themes::load_from(std::slice::from_ref(&dir));
+    let t = t.get("fr").expect("fixture loaded");
+
+    let bar = t.frames.titlebar.as_ref().expect("titlebar named");
+    assert_eq!(bar.src, "bar.bmp");
+    assert!(!bar.smooth, "nearest by default");
+    assert_eq!(bar.stretch.left, 6);
+    assert_eq!(
+        bar.stretch.top, 0,
+        "a zero inset is a value, not an absent token"
+    );
+
+    let pane = t.frames.pane.as_ref().expect("pane named");
+    assert!(pane.smooth, "the theme asked for linear");
+    assert_eq!(pane.stretch.bottom, 20);
+
+    // A frame naming a file that is not there is a theme that draws nothing, not
+    // a theme that fails to load: `DecodedFrames::load` skips it silently.
+    assert!(t.frames.pane.is_some());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

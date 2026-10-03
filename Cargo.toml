@@ -23,8 +23,10 @@ dirs      = "7.0"
 # Docking layout: tab drag/split/tear-off; serde for layout persistence
 egui_dock = { version = "0.21", features = ["serde"] }
 
-# PNG+JPEG decode for album covers
-image     = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# PNG/JPEG decode for album covers, plus BMP for theme frames
+# "bmp" is not decoration: a Winamp skin ships .bmp, so the nine-slice frames
+# read the format the reference format actually is.
+image     = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
 # Theme icon rasterization. default-features = false drops `text` + `system-fonts`,
 # and with them fontdb/rustybuzz: no icon SVG contains text, and letting usvg scan
 # system fonts would fight theme::install_fallback_fonts over egui's font families.
