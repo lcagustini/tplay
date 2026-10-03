@@ -15,10 +15,8 @@ use std::path::{Path, PathBuf};
 /// Cap on one segment's width, so a long name truncates instead of shoving the
 /// ★ toggle (or Add All) off the pane edge.
 const SEG_MAX_W: f32 = 70.0;
-/// Approx. width of one character in a segment label, plus its padding. The label
-/// has a fixed size rather than being measured, which is what the truncation cap
-/// depends on.
-const SEG_CHAR_W: f32 = 8.0;
+/// Gap between a segment's text and the right edge of its box, so the label does
+/// not sit flush against the `/` separator that follows it.
 const SEG_PAD_W: f32 = 6.0;
 /// Height of one segment — the row the whole header sits on.
 const SEG_H: f32 = 18.0;
@@ -93,6 +91,17 @@ pub fn plan(n: usize, always: usize) -> Vec<Step> {
     steps
 }
 
+/// Width of one segment label as drawn, in the style `breadcrumb` paints it.
+///
+/// Measured rather than estimated from a character count, because the estimate
+/// decides where the label truncates and no per-character constant can be right:
+/// it cannot tell `i` from `W`, and it is wrong for every label the moment a
+/// theme moves the font size off egui's default `Small`.
+fn segment_width(ui: &egui::Ui, label: &str, color: egui::Color32) -> f32 {
+    let font = ui.style().text_styles[&egui::TextStyle::Small].clone();
+    ui.fonts_mut(|f| f.layout_no_wrap(label.to_owned(), font, color).size().x)
+}
+
 /// Draws the breadcrumb and returns the segment that was clicked, if any.
 ///
 /// Source-agnostic: no branch here knows about local paths or SMB URIs — the
@@ -128,7 +137,7 @@ fn breadcrumb<'a>(
                 }
                 continue;
             }
-            let w = (seg.label.chars().count() as f32 * SEG_CHAR_W + SEG_PAD_W).min(SEG_MAX_W);
+            let w = (segment_width(ui, &seg.label, p.text_secondary) + SEG_PAD_W).min(SEG_MAX_W);
             let resp = ui.add_sized(
                 egui::vec2(w, SEG_H),
                 egui::Label::new(
