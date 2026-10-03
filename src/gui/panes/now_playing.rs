@@ -98,22 +98,40 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                 // Measure both labels so the bar between them takes exactly the
                 // leftover width. (available_width() read from a nested
                 // right-to-left scope under-sizes inside the dock's ScrollArea.)
+                //
+                // **The digit strip measures itself**, so a skin's clock and the
+                // width computed for it are the same number — the "measure it
+                // once" rule the EQ pane's slider budget follows, and the reason
+                // the helper is separate from the painter.
+                let strip = themes.digits();
                 let label_w = |s: &str| {
-                    ui.fonts_mut(|f| {
-                        f.layout_no_wrap(
-                            s.to_owned(),
-                            time_font.clone(),
-                            theme.palette.text_secondary,
-                        )
-                        .size()
-                        .x
-                    })
+                    strip
+                        .and_then(|(tex, chars)| {
+                            theme::digit_width(tex, chars, s, theme.type_.time)
+                        })
+                        .unwrap_or_else(|| {
+                            ui.fonts_mut(|f| {
+                                f.layout_no_wrap(
+                                    s.to_owned(),
+                                    time_font.clone(),
+                                    theme.palette.text_secondary,
+                                )
+                                .size()
+                                .x
+                            })
+                        })
                 };
                 let gaps = ui.spacing().item_spacing.x * 2.0;
                 let bar_w = (ui.available_width() - label_w(&pos_str) - label_w(&total_str) - gaps)
                     .max(panes.seek_min_w);
 
-                let pos_label = ui.label(meta(pos_str, &theme, &time_font));
+                // The bitmap clock replaces the label only when the theme's strip
+                // can render every character of it; otherwise this is the same
+                // text label as before.
+                let pos_label = match theme::digits_button(ui, strip, &pos_str, theme.type_.time) {
+                    Some(r) => r,
+                    None => ui.label(meta(pos_str.clone(), &theme, &time_font)),
+                };
                 let remaining = app.prefs().remaining();
                 if pos_label.clicked() {
                     app.prefs_mut().set_remaining(!remaining);
@@ -138,7 +156,9 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                     })
                     .inner;
 
-                ui.label(meta(total_str, &theme, &time_font));
+                if theme::digits_button(ui, strip, &total_str, theme.type_.time).is_none() {
+                    ui.label(meta(total_str.clone(), &theme, &time_font));
+                }
 
                 if bar.dragged() {
                     // Mid-drag: the Slider owns the value, so the catch-up and

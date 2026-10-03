@@ -135,6 +135,71 @@
         "right": 10,
         "bottom": 10
       }
+    },
+    "eq": {
+      "src": "pane.bmp",
+      "stretch": {
+        "left": 10,
+        "top": 10,
+        "right": 10,
+        "bottom": 10
+      }
     }
+  },
+  "faces": {
+    "prev": {
+      "src": "cbuttons.bmp",
+      "grid": [
+        5,
+        3
+      ],
+      "cell": 0,
+      "pressed": 5,
+      "disabled": 10
+    },
+    "play": {
+      "src": "cbuttons.bmp",
+      "grid": [
+        5,
+        3
+      ],
+      "cell": 1,
+      "pressed": 6,
+      "disabled": 11
+    },
+    "pause": {
+      "src": "cbuttons.bmp",
+      "grid": [
+        5,
+        3
+      ],
+      "cell": 2,
+      "pressed": 7,
+      "disabled": 12
+    },
+    "stop": {
+      "src": "cbuttons.bmp",
+      "grid": [
+        5,
+        3
+      ],
+      "cell": 3,
+      "pressed": 8,
+      "disabled": 13
+    },
+    "next": {
+      "src": "cbuttons.bmp",
+      "grid": [
+        5,
+        3
+      ],
+      "cell": 4,
+      "pressed": 9,
+      "disabled": 14
+    }
+  },
+  "digits": {
+    "src": "numbers.bmp",
+    "chars": "0123456789: "
   }
 }

@@ -4129,3 +4129,119 @@ fn a_face_button_draws_its_face_and_takes_the_click() {
         images[1].1
     );
 }
+
+/// The theme that uses every group must reach every bitmap surface: two frames,
+/// the digit strip and a face per transport mark. Each step of that path —
+/// `theme.json` names a `.bmp`, the loader resolves it inside the theme's folder,
+/// the `image` crate decodes it, a texture is allocated, and the cell arithmetic
+/// lands on the right part of it — is invisible to a test that only reads tokens.
+#[test]
+fn the_winamp_theme_decodes_its_frames_its_digits_and_its_faces() {
+    let ctx = egui::Context::default();
+    let themes = Themes::load();
+    let winamp = themes.get("winamp").expect("the winamp theme ships");
+    let named = (
+        winamp.frames.titlebar.is_some(),
+        winamp.frames.pane.is_some(),
+        winamp.frames.eq.is_some(),
+        winamp.digits.is_some(),
+        winamp.faces.slots.len(),
+    );
+    let state = ThemeState::load(&ctx, themes, "winamp");
+    assert!(named.0, "theme.json names a titlebar");
+    assert!(named.1, "theme.json names a pane");
+    assert!(named.2, "theme.json names an eq backdrop");
+    assert!(named.3, "theme.json names a digit strip");
+    assert!(named.4 >= 5, "theme.json names the five transport marks");
+
+    for surface in [Surface::Titlebar, Surface::Pane, Surface::Eq] {
+        let (tex, stretch) = state
+            .frame(surface)
+            .unwrap_or_else(|| panic!("{surface:?} decoded"));
+        assert!(
+            tex.size()[0] > 0 && tex.size()[1] > 0,
+            "{surface:?} has pixels"
+        );
+        let [w, h] = tex.size();
+        assert!(
+            (stretch.left + stretch.right) as usize <= w
+                && (stretch.top + stretch.bottom) as usize <= h,
+            "{surface:?}: insets {stretch:?} fit inside {w}x{h}"
+        );
+    }
+
+    let (tex, chars) = state.digits().expect("the digit strip decoded");
+    assert_eq!(
+        chars, "0123456789: ",
+        "the strip's cell order is what it says"
+    );
+    assert_eq!(
+        tex.size()[0] as u32 % chars.chars().count() as u32,
+        0,
+        "the strip divides evenly into its cells"
+    );
+
+    for icon in [
+        tplay::gui::theme::Icon::Prev,
+        tplay::gui::theme::Icon::Play,
+        tplay::gui::theme::Icon::Pause,
+        tplay::gui::theme::Icon::Stop,
+        tplay::gui::theme::Icon::Next,
+    ] {
+        let slot = state.slot(icon);
+        let face = slot
+            .face
+            .as_ref()
+            .unwrap_or_else(|| panic!("{icon:?} has a face"));
+        // Every state resolved to a real cell, and the four are distinct where
+        // the theme named four indices — a face whose states all collapse to one
+        // is a theme that shipped a grid and a table it did not need.
+        assert!(face.normal.uv.width() > 0.0, "{icon:?} normal");
+        assert!(face.disabled.uv.width() > 0.0, "{icon:?} disabled");
+    }
+    // And the five marks are five different cells, which is what makes the grid
+    // worth having rather than one image drawn five times.
+    let mut seen: Vec<egui::Rect> = Vec::new();
+    for icon in [
+        tplay::gui::theme::Icon::Prev,
+        tplay::gui::theme::Icon::Play,
+        tplay::gui::theme::Icon::Pause,
+        tplay::gui::theme::Icon::Stop,
+        tplay::gui::theme::Icon::Next,
+    ] {
+        let uv = state.face(icon).unwrap().normal.uv;
+        assert!(
+            !seen.contains(&uv),
+            "{icon:?} shares a cell with another mark"
+        );
+        seen.push(uv);
+    }
+}
+
+/// A time string the strip cannot render must fall back to the text label rather
+/// than drawing a gap. Winamp's own `NUMBERS.BMP` has no colon — the background
+/// supplies it — so a strip that omits one is the normal case, not a broken one.
+#[test]
+fn a_digit_strip_that_lacks_a_character_asks_for_no_width() {
+    let ctx = egui::Context::default();
+    let img = egui::ColorImage::new([30, 13], vec![egui::Color32::WHITE; 30 * 13]);
+    let tex = ctx.load_texture("digits", img, egui::TextureOptions::NEAREST);
+    let n = "0123456789";
+    assert!(
+        tplay::gui::theme::digit_width(&tex, n, "1:23", 13.0).is_none(),
+        "no colon, no width"
+    );
+    assert!(tplay::gui::theme::digit_width(&tex, n, "1:23", 13.0).is_none());
+    assert!(
+        tplay::gui::theme::digit_width(&tex, "0123456789: ", "1:23", 13.0).is_some(),
+        "with the colon named, the same string measures"
+    );
+    // Width scales with the height, or a resized window would size one and draw
+    // the other.
+    let a = tplay::gui::theme::digit_width(&tex, n, "12345", 13.0).unwrap();
+    let b = tplay::gui::theme::digit_width(&tex, n, "12345", 26.0).unwrap();
+    assert!(
+        (b - a * 2.0).abs() < 1e-4,
+        "twice the height is twice the width"
+    );
+}

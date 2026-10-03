@@ -572,6 +572,8 @@ pub struct Frames {
     pub titlebar: Option<Frame>,
     /// The docked pane body behind a pane's content.
     pub pane: Option<Frame>,
+    /// The Equalizer's own backdrop, behind its controls.
+    pub eq: Option<Frame>,
 }
 
 impl Frames {
@@ -600,6 +602,7 @@ impl Frames {
         Frames {
             titlebar: one("titlebar"),
             pane: one("pane"),
+            eq: one("eq"),
         }
     }
 }
@@ -847,6 +850,9 @@ pub struct Theme {
     pub frames: Frames,
     /// What `faces` said, before any file was read.
     pub faces: Faces,
+    /// The digit strip, if the theme names one. A sibling of `faces` rather than
+    /// one of its slots, because it addresses characters rather than icons.
+    pub digits: Option<Digits>,
     /// `<theme_dir>/<font>`, when the theme names a font file that exists. Not
     /// a token value: like `icons_dir` it is a path resolved against the theme's
     /// own folder, and a theme with no font file is the normal case.
@@ -892,6 +898,19 @@ impl Theme {
         let group = |k: &str| v.get(k).cloned().unwrap_or(serde_json::Value::Null);
         let frames = Frames::from_json(&group("frames"));
         let faces = Faces::from_json(&group("faces"));
+        let digits = {
+            let d = group("digits");
+            match (
+                d.get("src").and_then(|x| x.as_str()),
+                d.get("chars").and_then(|x| x.as_str()),
+            ) {
+                (Some(src), Some(chars)) => Some(Digits {
+                    src: src.to_string(),
+                    chars: chars.to_string(),
+                }),
+                _ => None,
+            }
+        };
         let icons_dir = dir.join("icons");
         let icons_dir = icons_dir.is_dir().then_some(icons_dir);
         let frames_dir = dir.join("frames");
@@ -931,6 +950,7 @@ impl Theme {
             palette,
             frames,
             faces,
+            digits,
             icons_dir,
             frames_dir,
             faces_dir,
@@ -1168,6 +1188,7 @@ pub fn load_icons(
 pub struct DecodedFrames {
     pub titlebar: Option<(TextureHandle, Stretch)>,
     pub pane: Option<(TextureHandle, Stretch)>,
+    pub eq: Option<(TextureHandle, Stretch)>,
 }
 
 /// One cell's rectangle inside a source image, in UV.
@@ -1278,11 +1299,26 @@ pub struct FaceSlot {
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Faces {
-    slots: std::collections::BTreeMap<String, FaceSlot>,
+    /// Keyed by `Icon::face_key`. Public so a test can count what a theme named
+    /// without reading the decoded `ThemeState` map, which only holds the ones
+    /// that resolved.
+    pub slots: std::collections::BTreeMap<String, FaceSlot>,
 }
 
 impl Faces {
     fn from_json(v: &serde_json::Value) -> Faces {
+        // `digits` is a sibling key, so it must not be read as an Icon slot.
+        let v = v
+            .as_object()
+            .map(|m| {
+                serde_json::Value::Object(
+                    m.iter()
+                        .filter(|(k, _)| k.as_str() != "digits")
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect(),
+                )
+            })
+            .unwrap_or(serde_json::Value::Null);
         let mut slots = std::collections::BTreeMap::new();
         if let Some(map) = v.as_object() {
             for (k, f) in map {
@@ -1345,6 +1381,36 @@ impl Faces {
     /// A slot missing its file, or naming an index outside its grid, is skipped
     /// rather than fatal: the button keeps the icon it had, which is what a theme
     /// that got the table slightly wrong should look like.
+    /// Decode the digit strip, if the theme names one.
+    fn load_digits(
+        ctx: &egui::Context,
+        theme: &Theme,
+        d: &Digits,
+    ) -> Option<(TextureHandle, String)> {
+        let dir = theme.faces_dir.as_deref()?;
+        let path = dir.join(&d.src);
+        let img = std::fs::read(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| {
+                let fmt = image::ImageFormat::from_path(&path).map_err(|e| e.to_string())?;
+                image::load_from_memory_with_format(&bytes, fmt)
+                    .map(|i| i.into_rgba8())
+                    .map_err(|e| e.to_string())
+            })
+            .map_err(|e| {
+                log::warn!("digit strip {} did not decode ({e})", path.display());
+                e
+            })
+            .ok()?;
+        let (w, h) = (img.width() as usize, img.height() as usize);
+        let tex = ctx.load_texture(
+            format!("tplay-digits-{}", theme.id),
+            egui::ColorImage::from_rgba_premultiplied([w, h], img.as_raw()),
+            egui::TextureOptions::NEAREST,
+        );
+        Some((tex, d.chars.clone()))
+    }
+
     fn load(ctx: &egui::Context, theme: &Theme) -> BTreeMap<Icon, Face> {
         let mut out = BTreeMap::new();
         let Some(dir) = theme.faces_dir.as_deref() else {
@@ -1426,6 +1492,80 @@ impl Faces {
     }
 }
 
+/// The characters a digit strip carries, in cell order.
+///
+/// **A string rather than a table of indices**, because it is the same thing and
+/// it is self-describing: `"0123456789: "` says what the strip holds without a
+/// reader counting cells, and a theme with no colon simply omits the character.
+/// A character the string does not name has no cell, which is what makes
+/// [`digits`] able to decline a string instead of drawing a wrong glyph.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Digits {
+    /// File name inside `<theme>/faces/`.
+    pub src: String,
+    /// The strip's cells, left to right.
+    pub chars: String,
+}
+
+/// Width `text` occupies in a digit strip, at height `h`.
+///
+/// **Separate from the painter, because the seek bar's width is computed from it.**
+/// A layout that measured with egui's font and painted with a bitmap would size
+/// the bar to one number and fill it with another, and the mismatch is only
+/// visible with a skin loaded — the same "measure it once" rule the EQ pane's
+/// slider budget follows.
+pub fn digit_width(tex: &TextureHandle, chars: &str, text: &str, h: f32) -> Option<f32> {
+    let n = chars.chars().count();
+    if n == 0 || h <= 0.0 {
+        return None;
+    }
+    let [w, th] = tex.size();
+    if w == 0 || th == 0 {
+        return None;
+    }
+    let cell_w = w as f32 / n as f32;
+    let cell_h = th as f32;
+    let adv = h * cell_w / cell_h;
+    text.chars()
+        .map(|c| chars.find(c).map(|_| adv))
+        .collect::<Option<Vec<f32>>>()
+        .map(|v| v.iter().sum())
+}
+
+/// A label drawn as a row of bitmap digits, clickable like any other.
+///
+/// The elapsed-time label toggles remaining mode on a click, so it cannot be
+/// inert art — and that is why this is a widget and not a `painter` call. It
+/// returns `None` when the theme ships no strip or when the text has a character
+/// the strip lacks, and the caller then draws the ordinary label, so a skin
+/// without digits and a time string with a colon both land somewhere legible.
+pub fn digits_button(
+    ui: &mut egui::Ui,
+    digits: Option<(&TextureHandle, &str)>,
+    text: &str,
+    height: f32,
+) -> Option<egui::Response> {
+    let (tex, chars) = digits?;
+    let w = digit_width(tex, chars, text, height)?;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, height), egui::Sense::hover());
+    let resp = ui.interact(rect, ui.next_auto_id(), egui::Sense::click());
+    let n = chars.chars().count();
+    let mut x = rect.min.x;
+    for c in text.chars() {
+        let idx = chars.find(c)? as u32;
+        let uv = cell_to_rect(tex.size(), Some([n as u32, 1]), idx)?;
+        let cell = rect.height() * (uv.width() / uv.height());
+        ui.painter().image(
+            tex.id(),
+            egui::Rect::from_min_max(egui::pos2(x, rect.min.y), egui::pos2(x + cell, rect.max.y)),
+            uv,
+            Color32::WHITE,
+        );
+        x += cell;
+    }
+    Some(resp)
+}
+
 /// Which of the theme's two frame surfaces a caller wants.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Surface {
@@ -1433,6 +1573,12 @@ pub enum Surface {
     Titlebar,
     /// A docked pane's body, behind its content.
     Pane,
+    /// The Equalizer's own backdrop, behind its controls rather than around them.
+    ///
+    /// Its own slot because the EQ is the one pane whose *background* is artwork
+    /// in a Winamp skin — `EQMAIN.BMP` — while the playlist and library share
+    /// the window frame.
+    Eq,
 }
 
 impl std::fmt::Debug for DecodedFrames {
@@ -1443,6 +1589,7 @@ impl std::fmt::Debug for DecodedFrames {
         f.debug_struct("DecodedFrames")
             .field("titlebar", &self.titlebar.is_some())
             .field("pane", &self.pane.is_some())
+            .field("eq", &self.eq.is_some())
             .finish()
     }
 }
@@ -1502,6 +1649,7 @@ impl DecodedFrames {
         DecodedFrames {
             titlebar: one(&theme.frames.titlebar, "titlebar"),
             pane: one(&theme.frames.pane, "pane"),
+            eq: one(&theme.frames.eq, "eq"),
         }
     }
 }
@@ -1518,6 +1666,7 @@ pub struct ThemeState {
     icons: Vec<Option<TextureHandle>>,
     frames: DecodedFrames,
     faces: BTreeMap<Icon, Face>,
+    digits: Option<(TextureHandle, String)>,
 }
 
 impl ThemeState {
@@ -1532,13 +1681,23 @@ impl ThemeState {
         let icons = load_icons(ctx, &themes, &current);
         let frames = DecodedFrames::load(ctx, &current);
         let faces = Faces::load(ctx, &current);
+        let digits = current
+            .digits
+            .as_ref()
+            .and_then(|d| Faces::load_digits(ctx, &current, d));
         Self {
             current,
             themes,
             icons,
             frames,
             faces,
+            digits,
         }
+    }
+
+    /// The theme's digit strip and its cell order, or `None` for a text label.
+    pub fn digits(&self) -> Option<(&TextureHandle, &str)> {
+        self.digits.as_ref().map(|(t, c)| (t, c.as_str()))
     }
 
     /// The theme's bitmap face for a slot, or `None` for the icon it replaces.
@@ -1566,6 +1725,7 @@ impl ThemeState {
         let slot = match which {
             Surface::Titlebar => &self.frames.titlebar,
             Surface::Pane => &self.frames.pane,
+            Surface::Eq => &self.frames.eq,
         };
         slot.as_ref().map(|(t, s)| (t, *s))
     }

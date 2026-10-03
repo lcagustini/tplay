@@ -14,6 +14,16 @@ pub fn equalizer_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui
     let gains = app.eq().gains();
     let layout = theme.layout;
 
+    // The pane's own 9-sliced backdrop, when the theme ships one. Painted into the
+    // background layer so nothing the pane draws can land under it, and before
+    // any child is allocated so it cannot land over them either.
+    if let Some((tex, st)) = themes.frame(theme::Surface::Eq) {
+        let rect = ui.max_rect();
+        let mut painter = ui.ctx().layer_painter(egui::LayerId::background());
+        painter.set_clip_rect(rect);
+        theme::nine_slice(&painter, rect, tex.clone(), st);
+    }
+
     // Header — grouped controls; the tab already names the pane. Measured via a
     // scope so the content height recorded under `tplay.pane_content_h` below is
     // exact, not guessed.
