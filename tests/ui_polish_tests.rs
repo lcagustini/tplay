@@ -20,6 +20,11 @@ fn palette() -> serde_json::Value {
 
 /// Load a theme through the real loader, with `extra` merged beside the palette.
 ///
+/// `name` is the fixture's own directory. It has to be explicit: the first
+/// version derived it from the JSON's byte length, which is not a hash, so two
+/// fixtures that happened to serialise to the same number of bytes overwrote
+/// each other's `theme.json` and the suite read whichever was written last.
+///
 /// **`Theme` is a struct literal nowhere in this suite, on purpose.** A struct
 /// literal would make every fixture break at compile time the moment a group was
 /// added to the theme system, which is a compile error about the *tests* rather
@@ -27,34 +32,45 @@ fn palette() -> serde_json::Value {
 /// already plays the role of "the canonical minimal valid theme.json". Building
 /// through the loader means a new group costs nothing here, and each fixture is
 /// exactly the file a theme author writes.
-fn load(extra: serde_json::Value) -> std::sync::Arc<Theme> {
+fn load(name: &str, extra: serde_json::Value) -> std::sync::Arc<Theme> {
     let mut v = json!({ "id": "test", "name": "Test", "base": "dark", "palette": palette() });
     if let serde_json::Value::Object(m) = extra {
         v.as_object_mut().unwrap().extend(m);
     }
-    // One directory per fixture, keyed by the JSON's own bytes, so two fixtures
-    // with different extras never collide and cargo's parallel tests never race.
+    // The counter is load-bearing on top of the name: two tests call
+    // `fixture_theme()`, cargo runs them in parallel, and a shared directory means
+    // one wipes the `theme.json` the other is about to read.
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::temp_dir()
         .join(format!("tplay-test-{}", std::process::id()))
         .join("ui-polish")
-        .join(sha(&serde_json::to_string(&v).unwrap()));
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("theme.json"), serde_json::to_string(&v).unwrap()).unwrap();
+        .join(format!("{name}-{n}"));
+    // Wiped first: a fixture that ran against a stale `theme.json` from an
+    // earlier layout of this suite would read the old tokens and pass or fail
+    // for the wrong reason.
+    let _ = std::fs::remove_dir_all(&dir);
+    // The file goes one level *down*. `Themes::load_from` scans its argument for
+    // subdirectories and reads `<subdir>/theme.json` — a theme is a folder, since
+    // it also carries `icons/` and `frames/`. Writing the file straight into the
+    // directory being scanned loads nothing and reports nothing.
+    let theme_dir = dir.join(name);
+    std::fs::create_dir_all(&theme_dir).unwrap();
+    std::fs::write(
+        theme_dir.join("theme.json"),
+        serde_json::to_string(&v).unwrap(),
+    )
+    .unwrap();
     Themes::load_from(std::slice::from_ref(&dir))
         .get("test")
         .cloned()
         .expect("fixture theme loaded")
 }
 
-/// A directory name from the JSON, without pulling in a hashing dependency.
-fn sha(s: &str) -> String {
-    s.len().to_string()
-}
-
 /// A theme whose JSON says nothing but its palette — the back-compatibility
 /// case, since every bundled theme and any hand-written one looks like this.
 fn fixture_theme() -> std::sync::Arc<Theme> {
-    load(json!({}))
+    load("palette-only", json!({}))
 }
 
 #[test]
@@ -82,10 +98,13 @@ fn a_theme_with_only_a_palette_still_renders_as_it_did_before_the_token_groups()
 /// which is how `row_tint_alpha` could not be switched off.
 #[test]
 fn a_meaningful_zero_token_survives_loading() {
-    let t = load(json!({
-        "chrome": { "radius": 0, "motion": 0 },
-        "rows": { "tint_alpha": 0, "stripe_w": 0 }
-    }));
+    let t = load(
+        "zero-tokens",
+        json!({
+            "chrome": { "radius": 0, "motion": 0 },
+            "rows": { "tint_alpha": 0, "stripe_w": 0 }
+        }),
+    );
     assert_eq!(
         t.chrome.radius, 0.0,
         "square corners are a Winamp skin's whole look"
@@ -104,31 +123,34 @@ fn a_meaningful_zero_token_survives_loading() {
 
 #[test]
 fn every_token_group_round_trips_from_json() {
-    let t = load(json!({
-        "type": { "family": "monospace", "mono": "proportional", "heading": 20,
-                  "body": 14, "meta": 11, "time": 12 },
-        "chrome": { "radius": 3, "border_w": 2, "fg_w": 2, "focus_w": 2,
-                    "button_border": "#ff0000", "cursor_w": 1, "handle_aspect": 0.5,
-                    "disabled_alpha": 0.4, "expansion": 2, "weak_text": "#777777",
-                    "text_edit_bg": "#101010", "window_stroke": "#00ff00",
-                    "window_radius": 9, "backdrop": "#00000080", "motion": 0.2,
-                    "item_gap": 5, "button_pad": 4, "menu_pad": 3 },
-        "rows": { "height": 28, "radius": 1, "stripe_w": 2, "inset": 8, "gap": 6,
-                  "dim": 0.6, "tint_alpha": 0.25, "header_h": 20, "title_floor": 30,
-                  "cell_gap": 3, "trailing_w": 120, "columns": [0, 80, 120, 50] },
-        "panes": { "topbar_h": 26, "logo": 20, "chrome_icon": 14, "transport_icon": 20,
-                   "small_icon": 11, "toolbar_icon": 18, "volume_icon": 12, "folder_icon": 16,
-                   "tiny_icon": 9, "sidebar_w": 130, "sidebar_row_h": 20, "sidebar_row_w": 110,
-                   "sidebar_server_w": 95, "sidebar_form_w": 90, "breadcrumb_h": 20,
-                   "breadcrumb_max_w": 60, "field_w": 200, "seek_min_w": 50, "meta_w": 140,
-                   "gap": 6, "pad": 10, "eq_band_w_max": 70, "confirm_w": 240, "edit_w": 300,
-                   "edit_label_w": 60, "edit_star": 26, "nocover_frac": 0.5 },
-        "dock": { "tab_h": 26, "tab_radius": 0, "tab_bg": "#111111", "tab_bg_active": "#222222",
-                  "tab_stroke": "#333333", "drag_fill": "#444444", "tab_text": "#555555",
-                  "tab_text_active": "#ffffff", "split_w": 6, "split_color": "#00aaaa",
-                  "split_color_active": "#00ffff" },
-        "viz": { "bg": "#001122", "accent": "#ff00ff" }
-    }));
+    let t = load(
+        "round-trip",
+        json!({
+            "type": { "family": "monospace", "mono": "proportional", "heading": 20,
+                      "body": 14, "meta": 11, "time": 12 },
+            "chrome": { "radius": 3, "border_w": 2, "fg_w": 2, "focus_w": 2,
+                        "button_border": "#ff0000", "cursor_w": 1, "handle_aspect": 0.5,
+                        "disabled_alpha": 0.4, "expansion": 2, "weak_text": "#777777",
+                        "text_edit_bg": "#101010", "window_stroke": "#00ff00",
+                        "window_radius": 9, "backdrop": "#00000080", "motion": 0.2,
+                        "item_gap": 5, "button_pad": 4, "menu_pad": 3 },
+            "rows": { "height": 28, "radius": 1, "stripe_w": 2, "inset": 8, "gap": 6,
+                      "dim": 0.6, "tint_alpha": 0.25, "header_h": 20, "title_floor": 30,
+                      "cell_gap": 3, "trailing_w": 120, "columns": [0, 80, 120, 50] },
+            "panes": { "topbar_h": 26, "logo": 20, "chrome_icon": 14, "transport_icon": 20,
+                       "small_icon": 11, "toolbar_icon": 18, "volume_icon": 12, "folder_icon": 16,
+                       "tiny_icon": 9, "sidebar_w": 130, "sidebar_row_h": 20, "sidebar_row_w": 110,
+                       "sidebar_server_w": 95, "sidebar_form_w": 90, "breadcrumb_h": 20,
+                       "breadcrumb_max_w": 60, "field_w": 200, "seek_min_w": 50, "meta_w": 140,
+                       "gap": 6, "pad": 10, "eq_band_w_max": 70, "confirm_w": 240, "edit_w": 300,
+                       "edit_label_w": 60, "edit_star": 26, "nocover_frac": 0.5 },
+            "dock": { "tab_h": 26, "tab_radius": 0, "tab_bg": "#111111", "tab_bg_active": "#222222",
+                      "tab_stroke": "#333333", "drag_fill": "#444444", "tab_text": "#555555",
+                      "tab_text_active": "#ffffff", "split_w": 6, "split_color": "#00aaaa",
+                      "split_color_active": "#00ffff" },
+            "viz": { "bg": "#001122", "accent": "#ff00ff" }
+        }),
+    );
 
     assert_eq!(t.type_.family, Family::Monospace);
     assert_eq!(t.type_.mono, Family::Proportional);
@@ -156,15 +178,18 @@ fn every_token_group_round_trips_from_json() {
 #[test]
 fn apply_maps_the_token_groups_onto_visuals_and_style() {
     let ctx = egui::Context::default();
-    let theme = load(json!({
-        "type": { "heading": 22, "body": 14, "meta": 11, "time": 12 },
-        "chrome": { "radius": 4, "border_w": 2, "fg_w": 3, "focus_w": 5,
-                    "button_border": "#ff00ff", "motion": 0.25, "item_gap": 3,
-                    "button_pad": 7, "menu_pad": 6, "weak_text": "#123456",
-                    "text_edit_bg": "#654321", "window_stroke": "#abcdef",
-                    "window_radius": 11, "disabled_alpha": 0.25, "cursor_w": 1,
-                    "expansion": 3, "handle_aspect": 0.5 }
-    }));
+    let theme = load(
+        "apply-maps",
+        json!({
+            "type": { "heading": 22, "body": 14, "meta": 11, "time": 12 },
+            "chrome": { "radius": 4, "border_w": 2, "fg_w": 3, "focus_w": 5,
+                        "button_border": "#ff00ff", "motion": 0.25, "item_gap": 3,
+                        "button_pad": 7, "menu_pad": 6, "weak_text": "#123456",
+                        "text_edit_bg": "#654321", "window_stroke": "#abcdef",
+                        "window_radius": 11, "disabled_alpha": 0.25, "cursor_w": 1,
+                        "expansion": 3, "handle_aspect": 0.5 }
+        }),
+    );
     apply(&ctx, &theme);
 
     let style = ctx.style_of(ctx.theme());
@@ -241,7 +266,10 @@ fn apply_maps_the_token_groups_onto_visuals_and_style() {
 #[test]
 fn apply_writes_both_styles_not_just_the_active_one() {
     let ctx = egui::Context::default();
-    let theme = load(json!({ "chrome": { "radius": 7, "motion": 0.1 } }));
+    let theme = load(
+        "apply-both",
+        json!({ "chrome": { "radius": 7, "motion": 0.1 } }),
+    );
     apply(&ctx, &theme);
     for t in [egui::Theme::Dark, egui::Theme::Light] {
         let s = ctx.style_of(t);
@@ -258,7 +286,10 @@ fn apply_writes_both_styles_not_just_the_active_one() {
 /// forever: the file is hand-editable and a typo in it is otherwise invisible.
 #[test]
 fn a_malformed_colour_token_does_not_take_the_theme_down() {
-    let t = load(json!({ "chrome": { "weak_text": "not-a-colour" } }));
+    let t = load(
+        "malformed-colour",
+        json!({ "chrome": { "weak_text": "not-a-colour" } }),
+    );
     assert_eq!(t.chrome.weak_text, None);
     assert_eq!(
         t.palette.bg,
@@ -272,9 +303,12 @@ fn a_malformed_colour_token_does_not_take_the_theme_down() {
 /// declaration — a short or long array must not be a panic on the way there.
 #[test]
 fn a_wrong_length_columns_array_fills_rather_than_panicking() {
-    let short = load(json!({ "rows": { "columns": [0, 80] } }));
+    let short = load("columns-short", json!({ "rows": { "columns": [0, 80] } }));
     assert_eq!(short.rows.columns, [0.0, 80.0, 100.0, 44.0]);
-    let long = load(json!({ "rows": { "columns": [0, 80, 120, 50, 60, 70] } }));
+    let long = load(
+        "columns-long",
+        json!({ "rows": { "columns": [0, 80, 120, 50, 60, 70] } }),
+    );
     assert_eq!(long.rows.columns, [0.0, 80.0, 120.0, 50.0]);
 }
 
