@@ -4136,7 +4136,7 @@ fn a_face_button_draws_its_face_and_takes_the_click() {
 /// the `image` crate decodes it, a texture is allocated, and the cell arithmetic
 /// lands on the right part of it — is invisible to a test that only reads tokens.
 #[test]
-fn the_winamp_theme_decodes_its_frames_its_digits_and_its_faces() {
+fn the_winamp_theme_decodes_its_frames_its_digits_its_faces_and_its_knobs() {
     let ctx = egui::Context::default();
     let themes = Themes::load();
     let winamp = themes.get("winamp").expect("the winamp theme ships");
@@ -4146,6 +4146,7 @@ fn the_winamp_theme_decodes_its_frames_its_digits_and_its_faces() {
         winamp.frames.eq.is_some(),
         winamp.digits.is_some(),
         winamp.faces.slots.len(),
+        winamp.knobs.slots.len(),
     );
     let state = ThemeState::load(&ctx, themes, "winamp");
     assert!(named.0, "theme.json names a titlebar");
@@ -4153,6 +4154,14 @@ fn the_winamp_theme_decodes_its_frames_its_digits_and_its_faces() {
     assert!(named.2, "theme.json names an eq backdrop");
     assert!(named.3, "theme.json names a digit strip");
     assert!(named.4 >= 5, "theme.json names the five transport marks");
+    // Every slider role, or one of them silently keeps egui's handle while the
+    // other four look like the theme — which is the kind of half-skinned thing a
+    // screenshot of one pane cannot see.
+    assert_eq!(
+        named.5,
+        tplay::gui::theme::Knob::ALL.len(),
+        "theme.json names a knob for every slider role"
+    );
 
     for surface in [Surface::Titlebar, Surface::Pane, Surface::Eq] {
         let (tex, stretch) = state
@@ -4199,6 +4208,15 @@ fn the_winamp_theme_decodes_its_frames_its_digits_and_its_faces() {
         assert!(face.normal.uv.width() > 0.0, "{icon:?} normal");
         assert!(face.disabled.uv.width() > 0.0, "{icon:?} disabled");
     }
+    for knob in tplay::gui::theme::Knob::ALL {
+        let face = state
+            .knob(knob)
+            .unwrap_or_else(|| panic!("{} decoded", knob.key()));
+        assert!(face.normal.uv.width() > 0.0, "{} normal", knob.key());
+        assert!(face.pressed.uv.width() > 0.0, "{} pressed", knob.key());
+        assert!(face.disabled.uv.width() > 0.0, "{} disabled", knob.key());
+    }
+
     // And the five marks are five different cells, which is what makes the grid
     // worth having rather than one image drawn five times.
     let mut seen: Vec<egui::Rect> = Vec::new();
@@ -4244,4 +4262,391 @@ fn a_digit_strip_that_lacks_a_character_asks_for_no_width() {
         (b - a * 2.0).abs() < 1e-4,
         "twice the height is twice the width"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Slider knobs
+// ---------------------------------------------------------------------------
+
+/// One real `egui::Slider`, headless: the rect this app would compute for it, and
+/// egui's own painted shapes.
+///
+/// The handle is forced **circular**, which is what makes egui's handle findable
+/// among the shapes: the rail and the trailing fill are both filled rects, and a
+/// circular handle is the one shape nothing else in a slider emits.
+fn real_slider(vertical: bool, value: f32, aspect: f32) -> (egui::Rect, Vec<egui::Shape>) {
+    let ctx = egui::Context::default();
+    let mut v = egui::Visuals::dark();
+    v.handle_shape = if aspect > 0.0 {
+        egui::style::HandleShape::Rect {
+            aspect_ratio: aspect,
+        }
+    } else {
+        egui::style::HandleShape::Circle
+    };
+    ctx.set_visuals(v);
+
+    let mut value = value;
+    let mut rect = egui::Rect::ZERO;
+    let out = ctx.run_ui(egui::RawInput::default(), |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
+            let at = ui.cursor().min;
+            let size = tplay::gui::theme::slider_size(ui, vertical);
+            let slider = eframe::egui::Slider::new(&mut value, 0.0..=1.0);
+            let s = if vertical { slider.vertical() } else { slider };
+            ui.add(s);
+            rect = egui::Rect::from_min_size(at, size);
+        });
+    });
+    let shapes: Vec<egui::Shape> = out.shapes.iter().map(|c| c.shape.clone()).collect();
+    out.drop_without_applying_deltas();
+    (rect, shapes)
+}
+
+/// egui's own handle is the one `CircleShape` in a circular-handle slider.
+fn egui_handle(shapes: &[egui::Shape], vertical: bool, aspect: f32) -> (egui::Pos2, f32) {
+    shapes
+        .iter()
+        .find_map(|s| match (aspect, s) {
+            // A circular handle paints a circle; a Rect one paints a rect that
+            // *outlines* itself with a `StrokeKind::Inside`. Either way the handle
+            // is the only **stroked** shape a slider emits — the rail and the
+            // trailing fill are `rect_filled`, and the clip shapes carry no stroke
+            // — so that is what identifies it, rather than a size derived from the
+            // very formula under test.
+            (0.0, eframe::egui::Shape::Circle(c)) => Some((c.center, c.radius)),
+            (a, eframe::egui::Shape::Rect(r))
+                if a > 0.0 && r.stroke.width > 0.0 && r.rect.is_positive() =>
+            {
+                // The half-extent on the **cross** axis, which egui leaves
+                // unmultiplied — the aspect goes on the travel axis.
+                let cross = if vertical {
+                    r.rect.width()
+                } else {
+                    r.rect.height()
+                };
+                Some((r.rect.center(), cross / 2.0))
+            }
+            _ => None,
+        })
+        .expect("a slider paints exactly one handle")
+}
+
+/// **`knob_center` must agree with egui.** It mirrors egui's private geometry
+/// because egui does not expose where it put the handle, and a bitmap knob has to
+/// land on the same spot. The alternative is reimplementing `egui::Slider`, which
+/// costs the value readout, keyboard handling and every layout behaviour the app
+/// gets for free.
+///
+/// A mirror that drifts puts every knob in the app a few pixels off its own rail,
+/// and the symptom is "the knob looks slightly wrong" with nothing reporting it —
+/// so this drives the mirror against the original: real sliders, real painted
+/// handles. Both orientations and both ends, because the vertical case is flipped
+/// and that asymmetry is exactly what a mirror gets wrong.
+#[test]
+fn a_knob_lands_on_eguis_own_handle() {
+    // `0.0` is a circular handle; `0.75` is what egui's dark theme ships, so the
+    // aspect path is pinned on the case that actually renders by default.
+    for aspect in [0.0_f32, 0.75] {
+        for vertical in [false, true] {
+            for value in [0.0_f32, 0.25, 0.5, 0.75, 1.0] {
+                let (rect, shapes) = real_slider(vertical, value, aspect);
+                let (egui_center, egui_radius) = egui_handle(&shapes, vertical, aspect);
+
+                let mine = tplay::gui::theme::knob_center(rect, value, vertical, aspect);
+                assert!(
+                    (mine - egui_center).length() < 0.01,
+                    "{vertical} {aspect} at {value}: knob at {mine:?}, egui's handle at {egui_center:?}"
+                );
+
+                // The cross-axis half-extent too, since the default knob box is
+                // built from it — a matching centre on a wrong-sized knob is still
+                // a knob that does not sit on its handle. egui leaves *this* one
+                // unmultiplied and puts the aspect on the travel axis.
+                let want = if vertical {
+                    rect.width()
+                } else {
+                    rect.height()
+                } / 2.5;
+                assert!(
+                    (want - egui_radius).abs() < 0.01,
+                    "{vertical} {aspect} at {value}: half-extent {want} vs egui's {egui_radius}"
+                );
+            }
+        }
+    }
+}
+
+/// The handle does not reach the ends of the widget: egui shrinks the travel range
+/// by the handle radius, so a knob computed without that shrink sits flush at the
+/// edge and claims a value the slider is not at. Both ends, both orientations.
+///
+/// Stated as "one handle-radius in from the end it points at" rather than as a
+/// min/max pair, because the two orientations disagree about which end zero is —
+/// a vertical slider's zero is its *bottom* — and a test that hardcoded one
+/// convention would pass against a knob mirrored the other way.
+#[test]
+fn a_knob_stops_short_of_the_ends_by_the_handle_radius() {
+    for vertical in [false, true] {
+        let (rect, _) = real_slider(vertical, 0.0, 0.0);
+        let r = if vertical {
+            rect.width()
+        } else {
+            rect.height()
+        } / 2.5;
+        let axis = |v: f32| {
+            let c = tplay::gui::theme::knob_center(rect, v, vertical, 0.0);
+            if vertical {
+                c.y
+            } else {
+                c.x
+            }
+        };
+        // egui shrinks the travel range by one radius at *both* ends, and the
+        // vertical case shrinks from the other side: its zero is the bottom.
+        let (zero_at, one_at) = if vertical {
+            (rect.max.y - r, rect.min.y + r)
+        } else {
+            (rect.min.x + r, rect.max.x - r)
+        };
+
+        assert!(
+            (axis(0.0) - zero_at).abs() < 0.01,
+            "zero: {} vs {zero_at}",
+            axis(0.0)
+        );
+        assert!(
+            (axis(1.0) - one_at).abs() < 0.01,
+            "one: {} vs {one_at}",
+            axis(1.0)
+        );
+        // And the midpoint is the midpoint, so the travel range really is the
+        // widget minus one radius at each end rather than two moved copies of it.
+        let mid = (axis(0.0) + axis(1.0)) / 2.0;
+        assert!(
+            (axis(0.5) - mid).abs() < 0.01,
+            "midpoint: {} vs {mid}",
+            axis(0.5)
+        );
+    }
+}
+
+/// **`slider_size` must agree with egui**, and it cannot be checked from the handle
+/// centre alone — a rect that is wrong in both directions by the same amount puts
+/// the centre in the right place at `t == 0.5` and the wrong place at the ends.
+/// So this checks the travel range, which is the rect.
+#[test]
+fn the_computed_slider_rect_spans_egui_s_travel() {
+    for vertical in [false, true] {
+        let (lo_rect, shapes_lo) = real_slider(vertical, 0.0, 0.0);
+        let (hi_rect, shapes_hi) = real_slider(vertical, 1.0, 0.0);
+        let (lo, _) = egui_handle(&shapes_lo, vertical, 0.0);
+        let (hi, _) = egui_handle(&shapes_hi, vertical, 0.0);
+
+        let mine_lo = tplay::gui::theme::knob_center(lo_rect, 0.0, vertical, 0.0);
+        let mine_hi = tplay::gui::theme::knob_center(hi_rect, 1.0, vertical, 0.0);
+        assert!((mine_lo - lo).length() < 0.01, "lo: {mine_lo:?} vs {lo:?}");
+        assert!((mine_hi - hi).length() < 0.01, "hi: {mine_hi:?} vs {hi:?}");
+    }
+}
+
+/// `theme::slider` paints one knob, centred on the handle, and paints nothing at
+/// all when the theme ships none — so a theme without a knob keeps egui's handle
+/// rather than losing it, and the two cases are the same call site.
+#[test]
+fn a_knob_paints_one_cell_over_the_handle_and_nothing_without_one() {
+    let ctx = egui::Context::default();
+    // A circular handle, so the default knob box is square and "covers egui's
+    // handle exactly" is a claim about numbers rather than about an aspect ratio.
+    let mut v = egui::Visuals::dark();
+    v.handle_shape = egui::style::HandleShape::Circle;
+    ctx.set_visuals(v);
+    let img = egui::ColorImage::new([30, 6], vec![egui::Color32::WHITE; 30 * 6]);
+    let tex = ctx.load_texture("knob", img, egui::TextureOptions::NEAREST);
+    let cell = |i: u32| tplay::gui::theme::Cell {
+        tex: tex.clone(),
+        uv: tplay::gui::theme::cell_to_rect([30, 6], Some([3, 1]), i).unwrap(),
+    };
+    let face = tplay::gui::theme::Face {
+        normal: cell(0),
+        pressed: cell(1),
+        disabled: cell(0),
+        lit: cell(0),
+    };
+    let (slider_rect, _) = real_slider(false, 0.5, 0.0);
+
+    let out = ctx.run_ui(egui::RawInput::default(), |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
+            tplay::gui::theme::slider(
+                ui,
+                egui::Slider::new(&mut 0.5_f32, 0.0..=1.0),
+                0.5,
+                false,
+                Some(&face),
+            );
+            tplay::gui::theme::slider(
+                ui,
+                egui::Slider::new(&mut 0.5_f32, 0.0..=1.0),
+                0.5,
+                false,
+                None,
+            );
+        });
+    });
+    let shapes = out.shapes.clone();
+    out.drop_without_applying_deltas();
+
+    let drawn: Vec<egui::Rect> = shapes
+        .iter()
+        .filter_map(|c| match &c.shape {
+            eframe::egui::Shape::Mesh(m) if m.texture_id == tex.id() => {
+                Some(m.vertices.iter().fold(egui::Rect::NOTHING, |acc, v| {
+                    acc.union(egui::Rect::from_min_size(v.pos, egui::vec2(0.0, 0.0)))
+                }))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        drawn.len(),
+        1,
+        "one knob drawn, and the `None` knob drew nothing"
+    );
+    assert!(
+        drawn[0].center().distance(slider_rect.center()) < 0.01,
+        "the knob is on the slider it was passed: {:?} vs {slider_rect:?}",
+        drawn[0]
+    );
+    // The default box is egui's own handle box, so the knob covers it exactly and
+    // egui's handle shows nowhere around it.
+    let d = slider_rect.height() / 2.5 * 2.0;
+    assert!(
+        (drawn[0].height() - d).abs() < 0.01,
+        "{} vs {d}",
+        drawn[0].height()
+    );
+}
+
+/// Every role name is stable and distinct, because they are the keys a theme
+/// writes — a table that could collide or drift is a table where one slider
+/// silently loses its knob.
+#[test]
+fn the_knob_roles_are_distinct_and_named() {
+    let keys: Vec<&str> = tplay::gui::theme::Knob::ALL
+        .iter()
+        .map(|k| k.key())
+        .collect();
+    assert_eq!(
+        keys,
+        ["volume", "balance", "seek", "eq", "crossfade"],
+        "one role per slider in the app, so no slider is unreachable"
+    );
+    let mut sorted = keys.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(sorted.len(), keys.len(), "no two roles share a name");
+}
+
+/// Every `.rs` file under `src/gui`, paired with its text, comment lines removed.
+///
+/// **Comment lines are stripped** so a view or a pane may *explain* a rule it
+/// follows without tripping the several source-reading tests that grep for the
+/// forbidden spelling.
+fn gui_sources() -> Vec<(std::path::PathBuf, String)> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let p = entry.unwrap().path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_none_or(|e| e != "rs") {
+                continue;
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/gui");
+    let mut files = Vec::new();
+    walk(&root, &mut files);
+    files.sort();
+    files
+        .into_iter()
+        .map(|p| {
+            let code = std::fs::read_to_string(&p)
+                .unwrap_or_else(|e| panic!("{}: {e}", p.display()))
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            (p, code)
+        })
+        .collect()
+}
+
+/// **Every slider in the app goes through `theme::slider`.**
+///
+/// A source-reading test, because the failure has no other shape: a call site
+/// that reverts to `ui.add(Slider::new(..))` compiles, passes every behavioural
+/// test in this file, and renders a slider with no knob on it — one slider in a
+/// themed player that quietly is not themed. The winamp decode test says every
+/// *role* resolves; only this says every *call site* asks.
+///
+/// **Counted per file rather than per line, and that is load-bearing.**
+/// `theme::slider`'s slider is its second argument, so the `egui::Slider::new` and
+/// the `theme::slider` that must agree are routinely on different lines — a
+/// per-line check flagged all five correct sites. Per file the claim is simply
+/// that no file builds more sliders than it builds through the helper, which is
+/// what "one of these was rewritten" looks like.
+#[test]
+fn no_slider_is_added_outside_the_knob_helper() {
+    let (mut sliders, mut through_helper) = (0, 0);
+    for (path, code) in gui_sources() {
+        let s = code.matches("egui::Slider::new").count();
+        let k = code.matches("theme::slider(").count();
+        assert!(
+            s <= k,
+            "{}: {s} sliders but only {k} built through theme::slider, so one of them has no knob",
+            path.display()
+        );
+        sliders += s;
+        through_helper += k;
+    }
+    assert_eq!(
+        sliders,
+        tplay::gui::theme::Knob::ALL.len(),
+        "one slider per role, and a sixth one has no role to answer for it"
+    );
+    assert_eq!(
+        through_helper, sliders,
+        "every slider goes through the helper, and the sites were rewritten rather than deleted"
+    );
+}
+
+/// **Every knob role is asked for at some call site.**
+///
+/// One role per slider and every slider going through the helper still leave a
+/// role reachable only from the enum: a theme author who fills in
+/// `knobs.crossfade` would see nothing change, and no screenshot of the other
+/// four sliders would show it.
+///
+/// **`theme.rs` is excluded, and that exclusion is the whole test.** The enum's
+/// own `Knob::Crossfade => "crossfade"` arm is a mention of the name, so sweeping
+/// the definition in made every role pass the moment it was declared — verified
+/// by deleting the coordinator's `themes.knob(Knob::Crossfade)` and watching this
+/// stay green. What is wanted is a *caller*, so the definition is not one.
+#[test]
+fn every_knob_role_is_asked_for_at_a_call_site() {
+    let callers: String = gui_sources()
+        .into_iter()
+        .filter(|(path, _)| !path.ends_with("theme.rs"))
+        .map(|(_, code)| code)
+        .collect::<Vec<_>>()
+        .join("\n");
+    for knob in tplay::gui::theme::Knob::ALL {
+        assert!(
+            callers.contains(&format!("Knob::{knob:?}")),
+            "{} is asked for somewhere outside the enum, so a theme that sets it sees no change",
+            knob.key()
+        );
+    }
 }

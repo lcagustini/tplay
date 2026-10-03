@@ -198,6 +198,58 @@
       "disabled": 14
     }
   },
+  "knobs": {
+    "volume": {
+      "src": "knobs.bmp",
+      "grid": [
+        3,
+        1
+      ],
+      "cell": 0,
+      "pressed": 1,
+      "disabled": 2
+    },
+    "balance": {
+      "src": "knobs.bmp",
+      "grid": [
+        3,
+        1
+      ],
+      "cell": 0,
+      "pressed": 1,
+      "disabled": 2
+    },
+    "seek": {
+      "src": "knobs.bmp",
+      "grid": [
+        3,
+        1
+      ],
+      "cell": 0,
+      "pressed": 1,
+      "disabled": 2
+    },
+    "eq": {
+      "src": "knobs.bmp",
+      "grid": [
+        3,
+        1
+      ],
+      "cell": 0,
+      "pressed": 1,
+      "disabled": 2
+    },
+    "crossfade": {
+      "src": "knobs.bmp",
+      "grid": [
+        3,
+        1
+      ],
+      "cell": 0,
+      "pressed": 1,
+      "disabled": 2
+    }
+  },
   "digits": {
     "src": "numbers.bmp",
     "chars": "0123456789: "

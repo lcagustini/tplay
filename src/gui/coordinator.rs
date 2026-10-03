@@ -405,13 +405,17 @@ pub fn update_ui(
                 ui.label("Crossfade");
                 // Crossfade duration always visible and editable (constant menu height).
                 let mut cf_secs = app.prefs().crossfade_secs();
-                if ui
-                    .add(
-                        egui::Slider::new(&mut cf_secs, 0.0..=MAX_CROSSFADE_SECS)
-                            .suffix("s")
-                            .trailing_fill(true),
-                    )
-                    .changed()
+                let pos = cf_secs / MAX_CROSSFADE_SECS;
+                if theme::slider(
+                    ui,
+                    egui::Slider::new(&mut cf_secs, 0.0..=MAX_CROSSFADE_SECS)
+                        .suffix("s")
+                        .trailing_fill(true),
+                    pos,
+                    false,
+                    themes.knob(theme::Knob::Crossfade),
+                )
+                .changed()
                 {
                     app.prefs_mut().set_crossfade_secs(cf_secs);
                 }

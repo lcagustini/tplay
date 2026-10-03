@@ -131,11 +131,13 @@ pub fn equalizer_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui
                 ui.spacing_mut().slider_width = slider_h;
                 ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
                     ui.push_id(i, |ui| {
+                        let pos = (gain - EQ_GAIN_MIN_DB) / (EQ_GAIN_MAX_DB - EQ_GAIN_MIN_DB);
                         let slider = egui::Slider::new(&mut gain, EQ_GAIN_MIN_DB..=EQ_GAIN_MAX_DB)
                             .show_value(true)
                             .vertical()
                             .trailing_fill(true);
-                        let resp = ui.add(slider);
+                        let resp =
+                            theme::slider(ui, slider, pos, true, themes.knob(theme::Knob::Eq));
                         if resp.changed() {
                             app.eq_mut().set_band(i, gain);
                         }

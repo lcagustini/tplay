@@ -850,6 +850,8 @@ pub struct Theme {
     pub frames: Frames,
     /// What `faces` said, before any file was read.
     pub faces: Faces,
+    /// The slider knobs, in the same shape as `faces` and keyed by `Knob`.
+    pub knobs: Knobs,
     /// The digit strip, if the theme names one. A sibling of `faces` rather than
     /// one of its slots, because it addresses characters rather than icons.
     pub digits: Option<Digits>,
@@ -898,6 +900,7 @@ impl Theme {
         let group = |k: &str| v.get(k).cloned().unwrap_or(serde_json::Value::Null);
         let frames = Frames::from_json(&group("frames"));
         let faces = Faces::from_json(&group("faces"));
+        let knobs = Knobs::from_json(&group("knobs"));
         let digits = {
             let d = group("digits");
             match (
@@ -950,6 +953,7 @@ impl Theme {
             palette,
             frames,
             faces,
+            knobs,
             digits,
             icons_dir,
             frames_dir,
@@ -1302,48 +1306,103 @@ pub struct Faces {
     /// Keyed by `Icon::face_key`. Public so a test can count what a theme named
     /// without reading the decoded `ThemeState` map, which only holds the ones
     /// that resolved.
-    pub slots: std::collections::BTreeMap<String, FaceSlot>,
+    pub slots: BTreeMap<String, FaceSlot>,
+}
+
+/// Which slider a knob belongs to.
+///
+/// **One role per slider in the app, and no more.** `Eq` is one role serving ten
+/// sliders: the bands are identical in size and shape, so a theme wanting ten
+/// different knob bitmaps would need a per-band index — and no Winamp skin has one.
+/// A role per slider means a theme can reach every knob in the player, which is
+/// the whole point of the group.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Knob {
+    Volume,
+    Balance,
+    Seek,
+    Eq,
+    Crossfade,
+}
+
+impl Knob {
+    pub const ALL: [Knob; 5] = [
+        Knob::Volume,
+        Knob::Balance,
+        Knob::Seek,
+        Knob::Eq,
+        Knob::Crossfade,
+    ];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Knob::Volume => "volume",
+            Knob::Balance => "balance",
+            Knob::Seek => "seek",
+            Knob::Eq => "eq",
+            Knob::Crossfade => "crossfade",
+        }
+    }
+}
+
+/// A theme's slider knobs, in the same shape as `faces`.
+///
+/// A knob is a *face* by another name: one cell of a grid, four states. The only
+/// difference is what it decorates and how it is looked up — by slider rather than
+/// by icon — because a `Face` is a button's whole chrome and a knob is a handle's.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Knobs {
+    pub slots: BTreeMap<String, FaceSlot>,
+}
+
+/// The `src`/`grid`/index table a `faces` or `knobs` group is, as a map.
+///
+/// **One reader for both.** The shape is identical and the fallback rules live in
+/// the decoder below, so two copies of either would be two copies to keep in
+/// step — and a knob table that disagreed with a face table would be the kind of
+/// drift nothing else can see.
+fn slot_table(v: &serde_json::Value) -> BTreeMap<String, FaceSlot> {
+    let mut slots = BTreeMap::new();
+    if let Some(map) = v.as_object() {
+        for (k, f) in map {
+            let Some(src) = f.get("src").and_then(|x| x.as_str()) else {
+                continue;
+            };
+            let num = |key: &str| f.get(key).and_then(|x| x.as_u64()).map(|n| n as u32);
+            let grid = f
+                .get("grid")
+                .and_then(|x| x.as_array())
+                .and_then(|a| Some([a.first()?.as_u64()? as u32, a.get(1)?.as_u64()? as u32]));
+            slots.insert(
+                k.clone(),
+                FaceSlot {
+                    src: src.to_string(),
+                    grid,
+                    cell: num("cell"),
+                    pressed: num("pressed"),
+                    disabled: num("disabled"),
+                    lit: num("lit"),
+                },
+            );
+        }
+    }
+    slots
 }
 
 impl Faces {
     fn from_json(v: &serde_json::Value) -> Faces {
-        // `digits` is a sibling key, so it must not be read as an Icon slot.
-        let v = v
-            .as_object()
-            .map(|m| {
-                serde_json::Value::Object(
-                    m.iter()
-                        .filter(|(k, _)| k.as_str() != "digits")
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect(),
-                )
-            })
-            .unwrap_or(serde_json::Value::Null);
-        let mut slots = std::collections::BTreeMap::new();
-        if let Some(map) = v.as_object() {
-            for (k, f) in map {
-                let Some(src) = f.get("src").and_then(|x| x.as_str()) else {
-                    continue;
-                };
-                let num = |key: &str| f.get(key).and_then(|x| x.as_u64()).map(|n| n as u32);
-                let grid = f
-                    .get("grid")
-                    .and_then(|x| x.as_array())
-                    .and_then(|a| Some([a.first()?.as_u64()? as u32, a.get(1)?.as_u64()? as u32]));
-                slots.insert(
-                    k.clone(),
-                    FaceSlot {
-                        src: src.to_string(),
-                        grid,
-                        cell: num("cell"),
-                        pressed: num("pressed"),
-                        disabled: num("disabled"),
-                        lit: num("lit"),
-                    },
-                );
-            }
+        Faces {
+            slots: slot_table(v),
         }
-        Faces { slots }
+    }
+}
+
+impl Knobs {
+    fn from_json(v: &serde_json::Value) -> Knobs {
+        Knobs {
+            slots: slot_table(v),
+        }
     }
 }
 
@@ -1412,84 +1471,121 @@ impl Faces {
     }
 
     fn load(ctx: &egui::Context, theme: &Theme) -> BTreeMap<Icon, Face> {
-        let mut out = BTreeMap::new();
-        let Some(dir) = theme.faces_dir.as_deref() else {
-            return out;
+        decode_slots(ctx, theme, &theme.faces.slots, "faces", Icon::from_face_key)
+    }
+}
+
+/// Decode a `faces` or `knobs` table, resolving each key through `key_of`.
+///
+/// **One decoder for both, on purpose.** The fallback rules — each state defaults
+/// to `cell`, `lit` to `pressed` — are small, and two copies of them are two
+/// copies to keep in step. A theme's knob table cannot drift from its face table.
+///
+/// A slot missing its file, or naming an index outside its grid, is skipped rather
+/// than fatal: the button keeps the icon it had and the slider keeps egui's
+/// handle, which is what a theme that got the table slightly wrong should look like.
+fn decode_slots<K: Ord>(
+    ctx: &egui::Context,
+    theme: &Theme,
+    slots: &BTreeMap<String, FaceSlot>,
+    what: &str,
+    key_of: impl Fn(&str) -> Option<K>,
+) -> BTreeMap<K, Face> {
+    let mut out = BTreeMap::new();
+    let Some(dir) = theme.faces_dir.as_deref() else {
+        return out;
+    };
+    // One decode per file, however many slots name it — a grid is the whole
+    // reason a theme can ship five transport marks in one image.
+    let mut textures: BTreeMap<String, TextureHandle> = BTreeMap::new();
+    for (key, slot) in slots {
+        let Some(k) = key_of(key) else {
+            log::warn!("{what}.{key} is not a slot this app knows; ignoring it");
+            continue;
         };
-        // One decode per file, however many slots name it — a grid is the whole
-        // reason a theme can ship five transport marks in one image.
-        let mut textures: BTreeMap<String, TextureHandle> = BTreeMap::new();
-        for (key, slot) in &theme.faces.slots {
-            let Some(icon) = Icon::from_face_key(key) else {
-                log::warn!("faces.{key} is not an icon slot; ignoring it");
-                continue;
-            };
-            if !textures.contains_key(&slot.src) {
-                let path = dir.join(&slot.src);
-                match std::fs::read(&path)
-                    .map_err(|e| e.to_string())
-                    .and_then(|bytes| {
-                        let fmt =
-                            image::ImageFormat::from_path(&path).map_err(|e| e.to_string())?;
-                        image::load_from_memory_with_format(&bytes, fmt)
-                            .map(|i| i.into_rgba8())
-                            .map_err(|e| e.to_string())
-                    }) {
-                    Ok(img) => {
-                        let (w, h) = (img.width() as usize, img.height() as usize);
-                        textures.insert(
-                            slot.src.clone(),
-                            ctx.load_texture(
-                                format!("tplay-face-{}-{}", theme.id, slot.src),
-                                egui::ColorImage::from_rgba_premultiplied([w, h], img.as_raw()),
-                                // Nearest by default, like every other bitmap a
-                                // theme ships: this is 1x art on a HiDPI screen.
-                                egui::TextureOptions::NEAREST,
-                            ),
-                        );
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "face art {} did not decode ({e}); keeping the icons",
-                            path.display()
-                        );
-                        continue;
-                    }
+        if !textures.contains_key(&slot.src) {
+            let path = dir.join(&slot.src);
+            match decode_bitmap(&path).map(|(w, h, px)| {
+                ctx.load_texture(
+                    format!("tplay-{what}-{}-{}", theme.id, slot.src),
+                    egui::ColorImage::from_rgba_premultiplied([w, h], &px),
+                    // Nearest by default, like every other bitmap a theme ships:
+                    // this is 1x art on a HiDPI screen.
+                    egui::TextureOptions::NEAREST,
+                )
+            }) {
+                Ok(tex) => {
+                    textures.insert(slot.src.clone(), tex);
+                }
+                Err(e) => {
+                    log::warn!(
+                        "{what} art {} did not decode ({e}); keeping the default",
+                        path.display()
+                    );
+                    continue;
                 }
             }
-            let tex = textures[&slot.src].clone();
-            let cell = |i: u32| {
-                cell_to_rect(tex.size(), slot.grid, i).map(|uv| Cell {
-                    tex: tex.clone(),
-                    uv,
-                })
-            };
-            let Some(normal) = slot.cell.and_then(cell) else {
-                log::warn!("faces.{key} names no usable cell; keeping the icon");
-                continue;
-            };
-            out.insert(
-                icon,
-                Face {
-                    pressed: slot
-                        .pressed
-                        .and_then(cell)
-                        .unwrap_or_else(|| normal.clone()),
-                    disabled: slot
-                        .disabled
-                        .and_then(cell)
-                        .unwrap_or_else(|| normal.clone()),
-                    lit: slot
-                        .lit
-                        .and_then(cell)
-                        .or_else(|| slot.pressed.and_then(cell))
-                        .unwrap_or_else(|| normal.clone()),
-                    normal,
-                },
-            );
         }
-        out
+        let tex = textures[&slot.src].clone();
+        let cell = |i: u32| {
+            cell_to_rect(tex.size(), slot.grid, i).map(|uv| Cell {
+                tex: tex.clone(),
+                uv,
+            })
+        };
+        let Some(normal) = slot.cell.and_then(cell) else {
+            log::warn!("{what}.{key} names no usable cell; keeping the default");
+            continue;
+        };
+        out.insert(
+            k,
+            Face {
+                pressed: slot
+                    .pressed
+                    .and_then(cell)
+                    .unwrap_or_else(|| normal.clone()),
+                disabled: slot
+                    .disabled
+                    .and_then(cell)
+                    .unwrap_or_else(|| normal.clone()),
+                lit: slot
+                    .lit
+                    .and_then(cell)
+                    .or_else(|| slot.pressed.and_then(cell))
+                    .unwrap_or_else(|| normal.clone()),
+                normal,
+            },
+        );
     }
+    out
+}
+
+impl Knobs {
+    fn load(ctx: &egui::Context, theme: &Theme) -> BTreeMap<Knob, Face> {
+        decode_slots(ctx, theme, &theme.knobs.slots, "knobs", |k| {
+            Knob::ALL.into_iter().find(|n| n.key() == k)
+        })
+    }
+}
+
+/// Read a bitmap as RGBA bytes with its size.
+///
+/// Format from the extension rather than sniffed: a theme author chose `.bmp` or
+/// `.png` deliberately, and a sniff would silently accept a mislabelled file
+/// instead of naming the mismatch.
+fn decode_bitmap(path: &Path) -> Result<(usize, usize, Vec<u8>), image::ImageError> {
+    let fmt = image::ImageFormat::from_path(path)?;
+    let img = image::load_from_memory_with_format(
+        &std::fs::read(path).map_err(|_| {
+            image::ImageError::IoError(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                path.display().to_string(),
+            ))
+        })?,
+        fmt,
+    )?;
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    Ok((w, h, img.into_rgba8().into_raw()))
 }
 
 /// The characters a digit strip carries, in cell order.
@@ -1564,6 +1660,153 @@ pub fn digits_button(
         x += cell;
     }
     Some(resp)
+}
+
+/// The size egui gives a slider that carries nothing but the slider.
+///
+/// **A mirror of two private rules**, and both are made of public API: `Slider`
+/// asks for `spacing().slider_width` across its travel axis, and across the other
+/// one for `text_style_height(Body)` floored at `spacing().interact_size.y`. The
+/// app already sets `slider_width` per slider for layout reasons (the seek bar
+/// spans its row, an EQ band is `eq_band_w_max` tall), so reading it back is the
+/// same number egui used rather than a second guess at it.
+///
+/// Needed because **a `Slider`'s `Response.rect` is not the slider.** egui wraps
+/// the widget in a `horizontal`/`vertical` layout and unions the two responses, so
+/// the rect that comes back spans the whole available row or column. `knob`
+/// captures the cursor instead, which is the slider's own top-left.
+pub fn slider_size(ui: &egui::Ui, vertical: bool) -> egui::Vec2 {
+    let cross = ui
+        .text_style_height(&egui::TextStyle::Body)
+        .max(ui.spacing().interact_size.y);
+    if vertical {
+        egui::vec2(cross, ui.spacing().slider_width)
+    } else {
+        egui::vec2(ui.spacing().slider_width, cross)
+    }
+}
+
+/// Where egui put a slider's handle, for a value already normalised to 0..=1.
+///
+/// **Also a mirror of egui's private geometry, and it is pinned rather than
+/// hopeful.** `Slider::position_range` shrinks the slider rect by `handle_radius`
+/// and lerps along what is left, and `marker_center` drops the handle onto the
+/// rail's centre line — none of which egui hands out, so a bitmap knob has no
+/// other way to line up with the widget it decorates. The alternative is
+/// reimplementing `egui::Slider` to own the geometry, which costs the value
+/// readout, keyboard handling and every layout behaviour the app gets for free.
+///
+/// The risk a mirror carries is drift, so the drift is made into a test:
+/// `a_knob_lands_on_eguis_own_handle` renders real sliders, finds the shape egui
+/// painted for its handle, and asserts this agrees. If egui changes its formula
+/// that test fails and names this function — instead of every knob in the app
+/// sitting a few pixels off its own rail with nothing to say so.
+///
+/// `aspect` is `visuals.handle_shape`'s, and a `Rect` handle multiplies its radius
+/// by it exactly as egui does. `0.0` means a circular handle.
+pub fn knob_center(rect: egui::Rect, value01: f32, vertical: bool, aspect: f32) -> egui::Pos2 {
+    let t = value01.clamp(0.0, 1.0);
+    let cross = if vertical {
+        rect.width()
+    } else {
+        rect.height()
+    } / 2.5;
+    let radius = if aspect > 0.0 { cross * aspect } else { cross };
+    if vertical {
+        // egui: `y_range().shrink(r).flip()`, so the largest value is the lowest y.
+        let hi = rect.max.y - radius;
+        let lo = rect.min.y + radius;
+        egui::pos2(rect.center().x, hi + (lo - hi) * t)
+    } else {
+        let lo = rect.min.x + radius;
+        let hi = rect.max.x - radius;
+        egui::pos2(lo + (hi - lo) * t, rect.center().y)
+    }
+}
+
+/// Add a slider, then paint a knob over its handle if the theme ships one.
+///
+/// **Over, not instead of.** egui has already painted its handle by the time
+/// `Slider` returns, and suppressing it means either killing the rail as well —
+/// the rail is `widgets.inactive.bg_fill` and the handle is `interact(..).bg_fill`,
+/// so one clear hits both — or a per-widget `Style` clone with `bg_fill` and
+/// `fg_stroke` cleared on three interaction states. Painting over needs neither, and
+/// it means a theme with no knob, or a knob that failed to load, still gets egui's
+/// handle rather than no handle at all.
+///
+/// `value01` is the value already normalised, because the four roles have four
+/// different ranges and the knob only ever needs a position. `resp` is the slider's
+/// own response, so the pressed and disabled cells come from this frame's
+/// interaction rather than last frame's guess.
+pub fn slider(
+    ui: &mut egui::Ui,
+    slider: egui::Slider<'_>,
+    value01: f32,
+    vertical: bool,
+    knob: Option<&Face>,
+) -> egui::Response {
+    let at = ui.cursor().min;
+    let size = slider_size(ui, vertical);
+    let resp = ui.add(slider);
+    paint_knob(
+        ui,
+        egui::Rect::from_min_size(at, size),
+        &resp,
+        value01,
+        vertical,
+        knob,
+        None,
+    );
+    resp
+}
+
+/// Paint one knob cell centred on a slider's handle.
+///
+/// `size` is the drawn size in points; `None` uses the handle's own box, so a knob
+/// with no explicit size sits exactly over what it covers.
+pub fn paint_knob(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    resp: &egui::Response,
+    value01: f32,
+    vertical: bool,
+    face: Option<&Face>,
+    size: Option<egui::Vec2>,
+) {
+    let Some(face) = face else { return };
+    let aspect = match ui.visuals().handle_shape {
+        egui::style::HandleShape::Circle => 0.0,
+        egui::style::HandleShape::Rect { aspect_ratio } => aspect_ratio,
+    };
+    let d = (if vertical {
+        rect.width()
+    } else {
+        rect.height()
+    } / 2.5)
+        * 2.0;
+    // egui draws a Rect handle as `Vec2::new(r*aspect, r)` on its side and
+    // `Vec2::new(r, r*aspect)` upright, doubled for the rect's extent — so the
+    // aspect lands on the **travel** axis in both cases, and the knob has to put
+    // it on the same one or it covers half of egui's handle and none of the rest.
+    let on_travel = d * if aspect > 0.0 { aspect } else { 1.0 };
+    let default = if vertical {
+        egui::vec2(d, on_travel)
+    } else {
+        egui::vec2(on_travel, d)
+    };
+    let cell = face.cell_for(
+        resp.enabled(),
+        resp.hovered(),
+        resp.is_pointer_button_down_on(),
+        false,
+    );
+    let center = knob_center(rect, value01, vertical, aspect);
+    ui.painter().image(
+        cell.tex.id(),
+        egui::Rect::from_center_size(center, size.unwrap_or(default)),
+        cell.uv,
+        Color32::WHITE,
+    );
 }
 
 /// Which of the theme's two frame surfaces a caller wants.
@@ -1666,6 +1909,7 @@ pub struct ThemeState {
     icons: Vec<Option<TextureHandle>>,
     frames: DecodedFrames,
     faces: BTreeMap<Icon, Face>,
+    knobs: BTreeMap<Knob, Face>,
     digits: Option<(TextureHandle, String)>,
 }
 
@@ -1681,6 +1925,7 @@ impl ThemeState {
         let icons = load_icons(ctx, &themes, &current);
         let frames = DecodedFrames::load(ctx, &current);
         let faces = Faces::load(ctx, &current);
+        let knobs = Knobs::load(ctx, &current);
         let digits = current
             .digits
             .as_ref()
@@ -1691,8 +1936,14 @@ impl ThemeState {
             icons,
             frames,
             faces,
+            knobs,
             digits,
         }
+    }
+
+    /// The theme's knob for a slider role, or `None` to keep egui's handle.
+    pub fn knob(&self, which: Knob) -> Option<&Face> {
+        self.knobs.get(&which)
     }
 
     /// The theme's digit strip and its cell order, or `None` for a text label.
@@ -1761,6 +2012,7 @@ impl ThemeState {
         self.icons = load_icons(ctx, &self.themes, &self.current);
         self.frames = DecodedFrames::load(ctx, &self.current);
         self.faces = Faces::load(ctx, &self.current);
+        self.knobs = Knobs::load(ctx, &self.current);
         true
     }
 }

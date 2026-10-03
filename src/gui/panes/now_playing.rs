@@ -148,10 +148,15 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                         // spacing().slider_width itself, so set that to span the
                         // leftover width.
                         ui.spacing_mut().slider_width = bar_w;
-                        ui.add(
+                        let pos = seek_normalized;
+                        theme::slider(
+                            ui,
                             egui::Slider::new(&mut seek_normalized, 0.0..=1.0)
                                 .show_value(false)
                                 .trailing_fill(true),
+                            pos,
+                            false,
+                            themes.knob(theme::Knob::Seek),
                         )
                     })
                     .inner;
@@ -288,13 +293,17 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
                         panes.volume_icon,
                     );
                     let mut volume = app.volume();
-                    if ui
-                        .add(
-                            egui::Slider::new(&mut volume, 0.0..=1.0)
-                                .show_value(false)
-                                .trailing_fill(true),
-                        )
-                        .changed()
+                    let pos = volume;
+                    if theme::slider(
+                        ui,
+                        egui::Slider::new(&mut volume, 0.0..=1.0)
+                            .show_value(false)
+                            .trailing_fill(true),
+                        pos,
+                        false,
+                        themes.knob(theme::Knob::Volume),
+                    )
+                    .changed()
                     {
                         app.set_volume(volume);
                     }
@@ -307,10 +316,18 @@ pub fn now_playing_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.label(meta("Balance", &theme, &meta_font));
                 let mut balance = app.prefs().balance();
-                let bal_response = ui.add(
+                // Centre-detent: a two-sided knob needs the halfway point to be
+                // where the pointer is, so normalise to the travel rather than the
+                // sign.
+                let pos = (balance + 1.0) / 2.0;
+                let bal_response = theme::slider(
+                    ui,
                     egui::Slider::new(&mut balance, -1.0..=1.0)
                         .show_value(false)
                         .trailing_fill(true),
+                    pos,
+                    false,
+                    themes.knob(theme::Knob::Balance),
                 );
                 if bal_response.changed() {
                     app.prefs_mut().set_balance(balance);
