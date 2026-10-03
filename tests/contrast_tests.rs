@@ -77,8 +77,10 @@ fn bundled(id: &str) -> Arc<Theme> {
         .clone()
 }
 
-/// The three themes this suite guards.
-const BUNDLED: [&str; 3] = ["dark", "retro", "neon"];
+/// The themes this suite guards. `winamp` is here for the same reason as the
+/// others and more: it is the theme that sets **every** token group, so a token
+/// this suite does not read is a token whose only example is unchecked.
+const BUNDLED: [&str; 4] = ["dark", "retro", "neon", "winamp"];
 
 /// A token that a theme may leave out. Only pairs the theme actually declares are
 /// asserted: an absent `dock.tab_bg` is egui's own grey, and egui is responsible

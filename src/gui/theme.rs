@@ -828,6 +828,16 @@ pub struct Theme {
     pub layout: Layout,
     /// `<theme_dir>/icons`, when the folder exists.
     pub icons_dir: Option<PathBuf>,
+    /// `<theme_dir>/frames`, when the folder exists.
+    ///
+    /// **Its own field, not derived from `icons_dir`.** The first version walked
+    /// up from the icons folder, so a theme that shipped frames and no icons got
+    /// nothing — which is the whole point of a frame, since a theme whose art is
+    /// 9-sliced bitmaps has no use for 24 per-icon SVGs and falls back to the
+    /// default theme's. Icons fall back to another theme; frames never do, because
+    /// a frame is a whole surface and borrowing another theme's would be a picture
+    /// from a skin nobody chose.
+    pub frames_dir: Option<PathBuf>,
     /// What `frames` said, before any file was read.
     pub frames: Frames,
     /// `<theme_dir>/<font>`, when the theme names a font file that exists. Not
@@ -876,6 +886,8 @@ impl Theme {
         let frames = Frames::from_json(&group("frames"));
         let icons_dir = dir.join("icons");
         let icons_dir = icons_dir.is_dir().then_some(icons_dir);
+        let frames_dir = dir.join("frames");
+        let frames_dir = frames_dir.is_dir().then_some(frames_dir);
         let layout = {
             // Every token is optional; an absent one arrives as 0.0 and is
             // filled in by `with_defaults` on the way out.
@@ -909,6 +921,7 @@ impl Theme {
             palette,
             frames,
             icons_dir,
+            frames_dir,
             font_file,
             type_: Type::from_json(&group("type")),
             chrome: Chrome::from_json(&group("chrome")),
@@ -1174,13 +1187,12 @@ impl DecodedFrames {
     /// does not decode says so, because that is a theme author's mistake rather
     /// than a theme that simply does not use frames.
     fn load(ctx: &egui::Context, theme: &Theme) -> DecodedFrames {
-        let dir = theme.icons_dir.as_ref().and_then(|icons| icons.parent());
-        let Some(dir) = dir else {
+        let Some(dir) = theme.frames_dir.as_deref() else {
             return DecodedFrames::default();
         };
         let one = |f: &Option<Frame>, name: &str| -> Option<(TextureHandle, Stretch)> {
             let f = f.as_ref()?;
-            let path = dir.join("frames").join(&f.src);
+            let path = dir.join(&f.src);
             let Ok(bytes) = std::fs::read(&path) else {
                 return None;
             };

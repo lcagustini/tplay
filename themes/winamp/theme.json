@@ -1,0 +1,140 @@
+{
+  "id": "winamp",
+  "name": "Winamp",
+  "base": "dark",
+  "palette": {
+    "bg": "#1c1c1c",
+    "panel_bg": "#262626",
+    "text_primary": "#00e000",
+    "text_secondary": "#8fbf8f",
+    "accent": "#00ff00",
+    "border": "#3f3f3f",
+    "progress_fill": "#00ff00",
+    "slider_track": "#101010",
+    "slider_handle": "#00ff00",
+    "row_even": "#080808",
+    "row_odd": "#101010",
+    "btn_hover": "#3a3a3a",
+    "focus_ring": "#00ff00"
+  },
+  "type": {
+    "family": "proportional",
+    "mono": "monospace",
+    "heading": 14,
+    "body": 12,
+    "meta": 11,
+    "time": 11
+  },
+  "chrome": {
+    "radius": 0,
+    "border_w": 1,
+    "fg_w": 1,
+    "focus_w": 1,
+    "button_border": "#6a6a6a",
+    "cursor_w": 1,
+    "handle_aspect": 1.0,
+    "disabled_alpha": 0.5,
+    "expansion": 0,
+    "weak_text": "#9a9a9a",
+    "text_edit_bg": "#000000",
+    "window_stroke": "#6a6a6a",
+    "window_radius": 0,
+    "backdrop": "#00000099",
+    "motion": 0,
+    "item_gap": 6,
+    "button_pad": 4,
+    "menu_pad": 4
+  },
+  "rows": {
+    "height": 18,
+    "radius": 0,
+    "stripe_w": 2,
+    "inset": 4,
+    "gap": 4,
+    "dim": 0.7,
+    "tint_alpha": 0.25,
+    "header_h": 18,
+    "title_floor": 30,
+    "cell_gap": 3,
+    "trailing_w": 110,
+    "columns": [
+      0,
+      70,
+      80,
+      36
+    ]
+  },
+  "panes": {
+    "topbar_h": 20,
+    "logo": 18,
+    "chrome_icon": 14,
+    "transport_icon": 16,
+    "small_icon": 12,
+    "toolbar_icon": 14,
+    "volume_icon": 13,
+    "folder_icon": 14,
+    "tiny_icon": 9,
+    "sidebar_w": 110,
+    "sidebar_row_h": 16,
+    "sidebar_row_w": 92,
+    "sidebar_server_w": 82,
+    "sidebar_form_w": 94,
+    "breadcrumb_h": 16,
+    "breadcrumb_max_w": 60,
+    "field_w": 180,
+    "seek_min_w": 36,
+    "meta_w": 130,
+    "gap": 3,
+    "pad": 5,
+    "eq_band_w_max": 70,
+    "confirm_w": 240,
+    "edit_w": 300,
+    "edit_label_w": 52,
+    "edit_star": 20,
+    "nocover_frac": 0.42
+  },
+  "dock": {
+    "tab_h": 18,
+    "tab_radius": 0,
+    "tab_bg": "#2a2a2a",
+    "tab_bg_active": "#000000",
+    "tab_stroke": "#4a4a4a",
+    "drag_fill": "#3a3a3a",
+    "tab_text": "#9a9a9a",
+    "tab_text_active": "#00ff00",
+    "split_w": 3,
+    "split_color": "#1e1e1e",
+    "split_color_active": "#00ff00"
+  },
+  "viz": {
+    "bg": "#000000",
+    "accent": "#00ff00"
+  },
+  "layout": {
+    "eq_slider_min_h": 50,
+    "eq_slider_max_h": 180,
+    "eq_band_w_min": 30,
+    "eq_header_gap": 4,
+    "eq_band_gap": 2
+  },
+  "frames": {
+    "titlebar": {
+      "src": "titlebar.bmp",
+      "stretch": {
+        "left": 3,
+        "top": 3,
+        "right": 3,
+        "bottom": 3
+      }
+    },
+    "pane": {
+      "src": "pane.bmp",
+      "stretch": {
+        "left": 10,
+        "top": 10,
+        "right": 10,
+        "bottom": 10
+      }
+    }
+  }
+}

@@ -9,7 +9,9 @@ use tplay::audio;
 use tplay::audio::eq::EqShared;
 use tplay::audio::viz::{VizBuf, VIZ_BANDS, WAVE_BUCKETS};
 use tplay::gui::panes::visualizer::views::SHADER_VIEWS;
-use tplay::gui::theme::{rasterize_icon, Base, Family, Icon, Layout, Themes, DEFAULT_THEME_ID};
+use tplay::gui::theme::{
+    rasterize_icon, Base, Family, Icon, Layout, Surface, ThemeState, Themes, DEFAULT_THEME_ID,
+};
 
 /// One headless frame, with the output disposed of.
 ///
@@ -3749,16 +3751,56 @@ fn a_zero_inset_collapses_that_column_rather_than_using_the_default() {
     }
 }
 
-/// `frames` is optional and a theme without one is the normal case, so an absent
-/// group must not touch the surfaces at all.
+/// `frames` is optional, and three of the four bundled themes name none — which is
+/// the back-compatibility case: a `theme.json` with no `frames` group must leave
+/// both surfaces alone rather than reaching for another theme's art.
 #[test]
-fn a_theme_without_frames_names_none() {
+fn a_theme_without_a_frames_group_names_none() {
     let themes = Themes::load();
     for theme in themes.list() {
+        if theme.id == "winamp" {
+            continue; // the one theme that does ship frames; see below
+        }
         assert!(
             theme.frames.titlebar.is_none() && theme.frames.pane.is_none(),
             "{} ships no frame files yet",
             theme.id
+        );
+    }
+}
+
+/// The theme that uses every group must reach both frame surfaces. This is the
+/// end-to-end check on the whole path — `theme.json` names a `.bmp`, the loader
+/// resolves it inside the theme's folder, the `image` crate decodes it, and a
+/// texture is allocated — and every step of it is invisible to a test that only
+/// reads the token struct.
+#[test]
+fn the_winamp_theme_decodes_both_of_its_frames() {
+    let ctx = egui::Context::default();
+    let themes = Themes::load();
+    let named = themes.get("winamp").expect("the winamp theme ships");
+    let json_titles = named.frames.titlebar.is_some();
+    let json_panes = named.frames.pane.is_some();
+    let state = ThemeState::load(&ctx, themes, "winamp");
+
+    assert!(json_titles, "theme.json names a titlebar");
+    assert!(json_panes, "theme.json names a pane");
+
+    for surface in [Surface::Titlebar, Surface::Pane] {
+        let (tex, stretch) = state
+            .frame(surface)
+            .unwrap_or_else(|| panic!("{surface:?} decoded"));
+        assert!(
+            tex.size()[0] > 0 && tex.size()[1] > 0,
+            "{surface:?} has pixels"
+        );
+        // The insets must fit inside the source, or `nine_slice` is being asked
+        // for a cut the image cannot supply and clamps it away.
+        let [w, h] = tex.size();
+        assert!(
+            (stretch.left + stretch.right) as usize <= w
+                && (stretch.top + stretch.bottom) as usize <= h,
+            "{surface:?}: insets {stretch:?} fit inside {w}x{h}"
         );
     }
 }
