@@ -128,6 +128,10 @@ fn add_pane(tree: &mut DockState<Pane>, pane: Pane) {
         .rev()
         .find_map(|(idx, node)| node.is_leaf().then_some(NodeIndex(idx)));
     if let Some(leaf) = bottom_leaf {
+        log::info!(
+            "opened the {pane_title} pane",
+            pane_title = pane_title(pane).text()
+        );
         tree.main_surface_mut().split_below(leaf, 0.5, vec![pane]);
     }
 }
@@ -144,6 +148,10 @@ fn remove_pane(tree: &mut DockState<Pane>, pane: Pane) {
         .find(|(_, t)| **t == pane)
         .map(|(path, _)| path);
     if let Some(path) = target {
+        log::info!(
+            "closed the {pane_title} pane",
+            pane_title = pane_title(pane).text()
+        );
         tree.remove_tab(path);
     }
 }

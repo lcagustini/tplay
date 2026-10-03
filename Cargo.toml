@@ -9,6 +9,10 @@ path = "src/lib.rs"
 
 [dependencies]
 eframe    = "0.36"
+# The logging facade. Already in the tree via eframe -> winit, so nothing new
+# compiles. It is here so wgpu's own pipeline diagnostics reach a human: nothing
+# else installs a logger, and `log` records are dropped when no one does.
+log       = "0.4"
 # symphonia-all enables MP3, FLAC, OGG, WAV, AAC decoding
 rodio     = { version = "0.22", features = ["symphonia-all"] }
 # Direct symphonia access so we can probe MP3 duration ourselves

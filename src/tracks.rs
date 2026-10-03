@@ -454,15 +454,14 @@ impl TagReader {
                 Err(e) => {
                     failed += 1;
                     if failed <= MAX_TAG_FAILURES_LOGGED {
-                        eprintln!("tplay: could not read tags for {uri}: {e}");
+                        log::warn!("could not read the tags of {uri}: {e}");
                     }
                 }
             }
         }
         if failed > MAX_TAG_FAILURES_LOGGED {
-            eprintln!(
-                "tplay: {failed} more remote track(s) failed to read; \
-                 see the first error above"
+            log::warn!(
+                "{failed} more remote tracks failed to read tags; see the first error above"
             );
         }
     }

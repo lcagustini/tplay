@@ -6,6 +6,7 @@ pub mod config;
 pub mod gui;
 pub mod library;
 pub mod library_db;
+pub mod logging;
 pub mod network;
 pub mod playlist;
 pub mod tracks;

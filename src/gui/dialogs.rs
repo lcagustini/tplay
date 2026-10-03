@@ -447,7 +447,7 @@ fn edit_modal(app: &mut TPlayApp, themes: &ThemeState, ctx: &egui::Context) {
             armed.rating = rating_now;
         }
         Err(e) => {
-            eprintln!("tplay: could not edit {}: {e}", armed.track.display());
+            log::error!("could not edit {}: {e}", armed.track.display());
             armed.error = Some(e);
         }
     }

@@ -355,8 +355,9 @@ pub fn load_from(p: Option<&Path>) -> Config {
         Err(e) => {
             let kept = p.with_extension("json.broken");
             let _ = std::fs::write(&kept, &text);
-            eprintln!(
-                "tplay: {} is malformed ({e}); original kept at {}",
+            log::error!(
+                "{} is malformed ({e}); every setting returns to its default. \
+                 The original is kept at {}",
                 p.display(),
                 kept.display()
             );

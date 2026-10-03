@@ -6,6 +6,7 @@ mod config;
 mod gui;
 mod library;
 mod library_db;
+mod logging;
 mod network;
 mod playlist;
 mod tracks;
@@ -82,6 +83,10 @@ impl eframe::App for TPlay {
 }
 
 fn main() -> eframe::Result<()> {
+    // Before anything that can log: `config::load` below reports a malformed
+    // file and the theme loader reports a skipped one, and both of those are
+    // the records a user sends to find out why their settings are wrong.
+    logging::init();
     let config = config::load();
     // A too-small buffer is the classic cause of ALSA "underrun occurred" at
     // track transitions (the crossfade/gapless arm decodes two files at once).
@@ -93,7 +98,14 @@ fn main() -> eframe::Result<()> {
             .open_stream()
     }) {
         Ok(s) => s,
-        Err(_) => DeviceSinkBuilder::open_default_sink().expect("No audio output device found"),
+        Err(_) => {
+            log::warn!(
+                "the device rejected a fixed buffer of {} samples, using its default; \
+                 a small buffer is the usual cause of an underrun at a track change",
+                config.buffer_size.clamp(512, 65536)
+            );
+            DeviceSinkBuilder::open_default_sink().expect("No audio output device found")
+        }
     };
 
     let native_options = eframe::NativeOptions {
@@ -118,9 +130,9 @@ fn main() -> eframe::Result<()> {
             // default; see `gui::panes::visualizer::gpu::init`.
             match cc.wgpu_render_state.as_ref() {
                 Some(r) => gui::panes::visualizer::gpu::init(&r.device, &r.queue, r.target_format),
-                None => eprintln!(
-                    "tplay: no wgpu render state, so every visualizer view draws its \
-                     background. This build needs eframe's wgpu backend."
+                None => log::error!(
+                    "no wgpu render state, so every visualizer view draws its background. \
+                     This build needs eframe's wgpu backend."
                 ),
             }
             // App-wide text fallback: a system font appended after egui's bundled

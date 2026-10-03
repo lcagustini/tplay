@@ -274,8 +274,14 @@ impl Network {
             return;
         }
         match self.servers.iter_mut().find(|s| s.host == host) {
-            Some(s) => s.username = username,
-            None => self.servers.push(ServerCfg { host, username }),
+            Some(s) => {
+                s.username = username;
+                log::info!("updated the saved user for {host}");
+            }
+            None => {
+                log::info!("saved the server {host}");
+                self.servers.push(ServerCfg { host, username })
+            }
         }
     }
 
@@ -283,6 +289,7 @@ impl Network {
     /// cleared on exit.
     pub fn remove_server(&mut self, host: &str) {
         self.servers.retain(|s| s.host != host);
+        log::info!("forgot the server {host}");
     }
 
     /// Session-memory password for a host (never persisted) — set at add-time
@@ -400,6 +407,7 @@ impl Network {
             error: None,
         });
         let creds = self.creds_for(&host);
+        log::info!("listing the shares of {host}");
         self.send(SmbCmd::ListShares {
             host,
             creds,
@@ -418,6 +426,7 @@ impl Network {
             b.error = None;
         }
         let host = split_uri(&uri).map(|(h, _, _)| h).unwrap_or_default();
+        log::info!("listing {uri}");
         self.send(SmbCmd::ListDir {
             uri,
             creds: self.creds_for(&host),
@@ -428,6 +437,7 @@ impl Network {
     /// Exit network mode — the Library back to its local folder browser.
     pub fn leave_network(&mut self) {
         self.browse = None;
+        log::info!("left the network browser");
     }
 
     /// Request playback of `uri`: spool it now and mark it pending (the app
@@ -463,6 +473,7 @@ impl Network {
     /// supersedes the first.
     pub fn fetch(&mut self, uri: String) {
         self.fetch_req = Some(uri.clone());
+        log::info!("downloading the playlist at {uri}");
         let host = split_uri(&uri).map(|(h, _, _)| h).unwrap_or_default();
         self.send(SmbCmd::Spool {
             uri,
@@ -475,6 +486,7 @@ impl Network {
     /// `drain` reports the outcome, so the UI thread never blocks on the LAN.
     pub fn save(&mut self, uri: String, data: String) {
         let host = split_uri(&uri).map(|(h, _, _)| h).unwrap_or_default();
+        log::info!("writing {} bytes to {uri}", data.len());
         self.saving += 1;
         self.send(SmbCmd::Save {
             uri,
@@ -512,6 +524,10 @@ impl Network {
             by_host.entry(host).or_default().push(uri);
         }
         for (host, group) in by_host {
+            // Inside the loop, not above it: the share browser re-asks for every
+            // uncached track every frame, so a record at the top of this function
+            // would be a 60 Hz line for work that found nothing.
+            log::info!("reading the tags of {} track(s) on {host}", group.len());
             self.send(SmbCmd::Tags {
                 uris: group,
                 creds: self.creds_for(&host),
@@ -533,10 +549,12 @@ impl Network {
                             b.busy = false;
                             match result {
                                 Ok(entries) => {
+                                    log::info!("{host} offers {} share(s)", entries.len());
                                     b.entries = entries;
                                     b.error = None;
                                 }
                                 Err(e) => {
+                                    log::warn!("listing the shares of {host} failed: {e}");
                                     b.entries = Vec::new();
                                     b.error = Some(e);
                                 }
@@ -555,10 +573,12 @@ impl Network {
                             b.busy = false;
                             match result {
                                 Ok(entries) => {
+                                    log::info!("{uri} holds {} item(s)", entries.len());
                                     b.entries = entries;
                                     b.error = None;
                                 }
                                 Err(e) => {
+                                    log::warn!("listing {uri} failed: {e}");
                                     b.entries = Vec::new();
                                     b.error = Some(e);
                                 }
@@ -741,7 +761,7 @@ fn spawn_worker(rx: Receiver<SmbCmd>) -> thread::JoinHandle<()> {
         {
             Ok(rt) => rt,
             Err(e) => {
-                eprintln!("tplay: smb worker runtime failed: {e}");
+                log::error!("the smb worker runtime failed, so the Network pane cannot work: {e}");
                 return;
             }
         };

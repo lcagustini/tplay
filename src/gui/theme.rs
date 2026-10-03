@@ -260,7 +260,7 @@ impl Themes {
                     .ok()
                     .and_then(|json| Theme::from_json(&json, &theme_dir))
                 else {
-                    eprintln!("tplay: skipping invalid theme in {}", theme_dir.display());
+                    log::warn!("skipping the invalid theme in {}", theme_dir.display());
                     continue;
                 };
                 // First dir scanned wins; later (lower-priority) dirs can't override.
@@ -452,6 +452,7 @@ impl ThemeState {
         if theme.id == self.current.id {
             return false;
         }
+        log::info!("switched to the {} theme", theme.name);
         self.current = Arc::clone(theme);
         self.icons = load_icons(ctx, &self.themes, &self.current);
         true

@@ -259,6 +259,7 @@ impl TPlayApp {
         }
         self.saved_config.note_written(&json, now);
         config::save(&config);
+        log::info!("wrote config.json");
     }
 
     /// The library database's half of the same policy. Same throttle, same
@@ -278,6 +279,7 @@ impl TPlayApp {
         // against next frame, or every frame after this would look changed.
         self.saved_db
             .note_written(&self.db.persist(now_epoch()), now);
+        log::info!("wrote library.json");
     }
 
     /// The database: the tag cache every pane reads, and the play history. No
@@ -340,6 +342,7 @@ impl TPlayApp {
     /// sites if it bites; it is not normalized here because that would also
     /// silently drop a file deleted between listing and add.
     pub fn add_files(&mut self, paths: Vec<PathBuf>) {
+        let requested = paths.len();
         let mut added_count = 0;
         for path in paths {
             if !self.playlist.iter().any(|p| p == &path) {
@@ -349,6 +352,10 @@ impl TPlayApp {
         }
         if added_count > 0 {
             self.playlist_dirty = true;
+            log::info!(
+                "added {added_count} of {requested} track(s); the playlist holds {}",
+                self.playlist.len()
+            );
             // Tag the new tracks in the background (dedup handles repeats).
             self.ensure_tags(self.playlist.clone());
         }
@@ -390,7 +397,7 @@ impl TPlayApp {
         let file = match tracks::open(&track) {
             Some(f) => f,
             None => {
-                eprintln!("tplay: no file for {}", track.display());
+                log::warn!("no file for {}", track.display());
                 self.current_path = None;
                 self.total_duration = None;
                 return;
@@ -399,7 +406,7 @@ impl TPlayApp {
         let decoder = match Decoder::try_from(file) {
             Ok(d) => d,
             Err(e) => {
-                eprintln!("tplay: decode error: {e}");
+                log::warn!("decode error on {}: {e}", track.display());
                 self.current_path = None;
                 self.total_duration = None;
                 return;
@@ -415,12 +422,14 @@ impl TPlayApp {
         let balance_source =
             audio::balance::BalanceSource::new(tap_source, self.prefs.balance_shared());
         self.sink.append(balance_source);
+        log::info!("playing {}", track.display());
         self.current_path = Some(track);
     }
 
     /// Cancel any live crossfade/gapless: stop the xf sink and restore main volume.
     fn cancel_xf(&mut self) {
         if let Some(xf) = self.xf_sink.take() {
+            log::info!("cancelled a live crossfade");
             xf.stop();
         }
         self.xf_out_total = None;
@@ -576,6 +585,7 @@ impl TPlayApp {
             // Landed in place: TrackPosition reports the new position, so the
             // slow path's skip offset no longer applies.
             self.position_offset = Duration::ZERO;
+            log::info!("seeked to {} in place", Self::fmt_duration(Some(target)));
             return;
         }
 
@@ -588,14 +598,14 @@ impl TPlayApp {
         let file = match tracks::open(&path) {
             Some(f) => f,
             None => {
-                eprintln!("seek: no file for {}", path.display());
+                log::warn!("seek: no file for {}", path.display());
                 return;
             }
         };
         let source = match Decoder::try_from(file) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("seek decode: {e}");
+                log::warn!("seek: decode error on {}: {e}", path.display());
                 return;
             }
         };
@@ -614,6 +624,10 @@ impl TPlayApp {
         if was_paused {
             self.sink.pause();
         }
+        log::info!(
+            "seeked to {} by decoding to it; the track is not seekable",
+            Self::fmt_duration(Some(target))
+        );
     }
 
     pub fn advance(&mut self) {
@@ -722,6 +736,15 @@ impl TPlayApp {
                 }
                 self.current_path = Some(armed.track);
                 self.seek_target = None;
+                log::info!(
+                    "crossfaded into playlist index {} ({})",
+                    armed.index,
+                    if self.prefs.gapless() {
+                        "gapless"
+                    } else {
+                        "crossfade"
+                    }
+                );
                 return;
             }
         }
@@ -773,11 +796,13 @@ impl TPlayApp {
             if let Some(xf) = &self.xf_sink {
                 xf.play();
             }
+            log::info!("resumed");
         } else if self.current_path.is_none() && self.network.pending().is_some() {
             // A track is already requested and on its way — it starts on its own
             // when it lands. Without this arm the fresh empty sink and the `None`
             // current_path would fall through to `play_first_track` and start a
             // *different* track out from under the pending one. Empty by design.
+            log::info!("waiting for a track that is still downloading");
         } else if let Some(path) = self.current_path.clone() {
             // Replay. Goes through `play_now`, never `start_track`:
             // `current_path` is an `smb://` URI for a remote track, and opening
@@ -807,6 +832,7 @@ impl TPlayApp {
         if let Some(xf) = &self.xf_sink {
             xf.pause();
         }
+        log::info!("paused");
     }
 
     /// Stop playback and reset song + playlist state: the current track is
@@ -824,6 +850,7 @@ impl TPlayApp {
         self.reset_shuffle();
         // A spooled track loads on arrival — stop cancels that intent.
         self.network.discard_pending();
+        log::info!("stopped");
     }
 
     pub fn set_volume(&mut self, volume: f32) {
@@ -968,6 +995,10 @@ impl TPlayApp {
     /// A direct open (`play_file`) has no index to follow and must not acquire
     /// one, or the track drops into the playlist's sequential flow.
     fn playlist_reordered(&mut self) {
+        // One line for every reorder — sort, reverse, randomize, a drag and a
+        // remove all land here, and which one did it is not the question this
+        // record answers.
+        log::info!("reordered the playlist to {} track(s)", self.playlist.len());
         self.playlist_dirty = true;
         // A pending crossfade's incoming track is pinned to an index that just
         // moved, so it goes the same way a seek or a remove sends it.
@@ -1002,14 +1033,19 @@ impl TPlayApp {
                 Ok(text) => {
                     self.network.save(path.to_string_lossy().into_owned(), text);
                 }
-                Err(e) => eprintln!("tplay: could not serialize playlist: {e}"),
+                Err(e) => log::error!("could not serialize playlist for {path:?}: {e}"),
             }
             return;
         }
         if let Err(e) = library::write_playlist(&path, &self.playlist) {
-            eprintln!("tplay: could not write playlist {}: {}", path.display(), e);
+            log::error!("could not write playlist {}: {}", path.display(), e);
             return;
         }
+        log::info!(
+            "wrote {} track(s) to {}",
+            self.playlist.len(),
+            path.display()
+        );
         self.playlist_file = Some(path);
         self.playlist_dirty = false;
     }
@@ -1048,7 +1084,7 @@ impl TPlayApp {
     fn load_fetched_playlist(&mut self, uri: String, local: PathBuf) {
         let base = network::uri_parent(&uri);
         let Some(paths) = library::read_playlist(&local, std::path::Path::new(base)) else {
-            eprintln!("tplay: could not parse playlist {uri}");
+            log::error!("could not parse the playlist at {uri}");
             return;
         };
         self.apply_playlist(paths, Some(PathBuf::from(uri)));
@@ -1095,6 +1131,13 @@ impl TPlayApp {
         playlist::dedup(&mut self.playlist);
         self.stop();
         self.ensure_tags(self.playlist.clone());
+        log::info!(
+            "loaded {} track(s) into the playlist{}",
+            self.playlist.len(),
+            file.as_ref()
+                .map(|f| format!(" from {}", f.display()))
+                .unwrap_or_default()
+        );
         self.playlist_file = file;
         self.playlist_dirty = false;
     }
@@ -1106,6 +1149,7 @@ impl TPlayApp {
         self.playlist.clear();
         self.playlist_file = None;
         self.playlist_dirty = false;
+        log::info!("started a new empty playlist");
     }
 
     /// The `.tplay` file this playlist is saved to / was loaded from, if any.
@@ -1154,6 +1198,7 @@ impl TPlayApp {
         // whoever adds the first sortable field, and this repo has already deleted
         // one of those for losing data silently.
         self.library.apply_sort(self.db.cache());
+        log::info!("wrote new tags to {}", track.display());
         Ok(())
     }
 
@@ -1178,9 +1223,10 @@ impl TPlayApp {
     /// Starting that scan stays here, because the tag cache and the `TagReader`
     /// are the app's, shared with the other two panes.
     pub fn navigate_to(&mut self, dir: PathBuf) {
-        let Some(scan) = self.library.open(dir, self.db.cache()) else {
+        let Some(scan) = self.library.open(dir.clone(), self.db.cache()) else {
             return;
         };
+        log::info!("browsed {}", dir.display());
         self.ensure_tags(scan);
     }
 
@@ -1221,6 +1267,10 @@ impl TPlayApp {
     /// Common playback start: set current_index and play the track.
     fn start(&mut self, idx: usize) {
         self.current_index = Some(idx);
+        // The one place the playlist flow begins a track, so one line here covers
+        // Play, Next, Prev, a row click and a natural advance alike. The transport
+        // button that caused it is a record of its own, so the sequence reads.
+        log::info!("playlist index {idx} of {}", self.playlist.len());
         let track = self.playlist[idx].clone();
         self.play_now(track);
     }
@@ -1255,6 +1305,7 @@ impl TPlayApp {
             self.fresh_sink();
             self.current_path = None;
             self.total_duration = None;
+            log::info!("downloading {} from the server", track.display());
             self.network.spool(track);
         }
     }
@@ -1455,27 +1506,28 @@ impl TPlayApp {
                 network::Event::Spooled { uri, result } => match result {
                     Ok(_) => self.start_track(PathBuf::from(uri)),
                     Err(e) => {
-                        eprintln!("tplay: spool {uri} failed: {e}");
+                        log::error!("spool of {uri} failed: {e}");
                         self.current_path = None;
                         self.total_duration = None;
                     }
                 },
                 network::Event::Fetched { uri, result } => match result {
                     Ok(local) => self.load_fetched_playlist(uri, local),
-                    Err(e) => eprintln!(
-                        "tplay: could not fetch playlist {uri}: {e} (no session password for \
-                         that share yet — log in from the Library's Network section)"
+                    Err(e) => log::error!(
+                        "could not fetch the playlist at {uri}: {e}. A share needs a login \
+                         once per session; enter it in the Library's Network section."
                     ),
                 },
                 network::Event::Saved { uri, result } => match result {
                     // Only now is the save real: track the URI, clear dirty,
                     // and re-list so the file appears in the share.
                     Ok(()) => {
+                        log::info!("wrote the playlist to {uri}");
                         self.playlist_file = Some(PathBuf::from(uri));
                         self.playlist_dirty = false;
                         self.refresh_network_dir();
                     }
-                    Err(e) => eprintln!("tplay: could not save playlist to {uri}: {e}"),
+                    Err(e) => log::error!("could not save the playlist to {uri}: {e}"),
                 },
                 network::Event::Tagged(results) => {
                     // Same cache the local scan fills, keyed by URI, so rows

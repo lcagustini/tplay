@@ -128,7 +128,7 @@ pub fn seek_or_skip(
         }
         Err(e) => {
             // Any other error: best-effort fallback to skip.
-            eprintln!("tplay: seek error {e:?}, falling back to skip");
+            log::warn!("seek failed ({e:?}), decoding to the position instead");
             Box::new(decoder.skip_duration(target))
         }
     }
@@ -199,7 +199,10 @@ pub fn build_gapless_next(
     let decoder = match Decoder::try_from(file) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("tplay: gapless/crossfade: decode {}: {e}", track.display());
+            log::warn!(
+                "crossfade: could not decode {} ({e}), so the next track starts with a gap",
+                track.display()
+            );
             return None;
         }
     };

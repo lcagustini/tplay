@@ -455,8 +455,8 @@ impl TrackDb {
                 Err(e) => {
                     let kept = p.with_extension("json.broken");
                     let _ = std::fs::write(&kept, &text);
-                    eprintln!(
-                        "tplay: {} is malformed ({e}); play history kept at {}",
+                    log::error!(
+                        "{} is malformed ({e}); the original is kept at {}",
                         p.display(),
                         kept.display()
                     );

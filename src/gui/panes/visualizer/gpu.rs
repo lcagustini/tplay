@@ -603,11 +603,10 @@ static GPU: LazyLock<Mutex<Option<Gpu>>> = LazyLock::new(|| Mutex::new(None));
 /// else. Everything else about the callback API is self-sufficient; this is the
 /// one hole in it.
 ///
-/// Returns whether there is a wgpu renderer to draw with. False means the
-/// program runs and every view shows the pane's background, with the reason on
-/// stderr — which is the honest outcome for a machine with no wgpu adapter, and
-/// not something to crash over.
-/// Take the three things the harness needs, and nothing else.
+/// Take the three things the harness needs, and nothing else. A machine with no
+/// wgpu adapter never reaches here at all: `main.rs` reports the missing render
+/// state and every view shows the pane's background, which is the honest outcome
+/// rather than something to crash over.
 ///
 /// The surface's **format** is the one input the callback API cannot hand a view:
 /// a `PaintCallback` is told its rect in points and nothing about the surface it
@@ -710,7 +709,10 @@ const OFFSCREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// driver round trip and a log line. This is also why the blank pane was such a
 /// bad symptom to debug by eye: a broken shader and a working one both render as
 /// the background, so the failure is indistinguishable from the success case by
-/// anything you can see. `eprintln!` goes to stderr, which is where to look.
+/// anything you can see. The driver's own reason reaches stderr through
+/// `crate::logging`, which installs the `log` facade that wgpu writes to — the
+/// `None` itself has no message, because `create_render_pipeline` reports
+/// through wgpu's error scope rather than as a value.
 fn entry(
     gpu: &mut Gpu,
     helpers: &'static str,
