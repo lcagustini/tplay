@@ -64,6 +64,53 @@ const PSEUDO_FSTYPES: &[&str] = &[
 /// Boot/ESP mountpoints to exclude — system partitions, not user volumes.
 const BOOT_MOUNTPOINTS: &[&str] = &["/efi", "/boot", "/boot/efi"];
 
+/// Decode the escapes **two different subsystems** apply to a volume's name.
+///
+/// `/proc/self/mounts` escapes as **octal** `\NNN`: `\040` is a space, `\011` a
+/// tab, `\012` a newline, `\134` a backslash. `/dev/disk/by-label/` escapes as
+/// **hex** `\xNN`: the same iPod's label is the directory entry
+/// `LUCAS\x27S\x20IPO`, which blkid writes because a raw quote and a raw space
+/// would not survive a symlink name.
+///
+/// **The escaped text is not the name, and using it as one is two separate
+/// failures with the same cause.** Used as a path, the sidebar's **Volumes** row
+/// for the device points at a directory that does not exist: the row draws, it
+/// highlights, and clicking it navigates nowhere. Drawn as a label, it reads
+/// `LUCAS\x27S\x20IPO` — which is not a display glitch but the reader being shown
+/// the encoding instead of the name.
+///
+/// Both escape a literal backslash *first* (`\134`, `\x5C`), which is what makes
+/// decoding unconditional and safe: a real backslash never arrives here
+/// unescaped, so a `\` that is not followed by three octal digits or a `x` and
+/// two hex digits is a backslash the name genuinely had — pinned by
+/// `a_backslash_that_is_not_an_escape_survives`.
+fn unescape(field: &str) -> String {
+    let bytes = field.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        // Hex first. The two forms cannot collide — `\134` starts with a digit,
+        // `\x5C` with an `x` — so the order is readability, not correctness.
+        if bytes[i] == b'\\' && i + 3 < bytes.len() && bytes[i + 1] == b'x' {
+            if let Ok(value) = u8::from_str_radix(&field[i + 2..i + 4], 16) {
+                out.push(value);
+                i += 4;
+                continue;
+            }
+        }
+        if bytes[i] == b'\\' && i + 3 < bytes.len() {
+            if let Ok(value) = u8::from_str_radix(&field[i + 1..i + 4], 8) {
+                out.push(value);
+                i += 4;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Device basename (e.g. "sdc1") -> label (e.g. "25-ssd-2"), from
 /// /dev/disk/by-label/ symlinks.
 fn read_disk_labels() -> std::collections::HashMap<String, String> {
@@ -121,18 +168,25 @@ impl Volume {
                 continue;
             }
 
-            let path = PathBuf::from(mountpoint);
+            let path = PathBuf::from(unescape(mountpoint));
             let dev_name = Path::new(device)
                 .file_name()
                 .and_then(|s| s.to_str())
                 .unwrap_or(device);
-            let label = disk_labels.get(dev_name).cloned().unwrap_or_else(|| {
-                path.file_name()
-                    .and_then(|s| s.to_str())
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| dev_name.to_string())
-            });
+            // Decoded **here**, at the point it is read, and not on the finished
+            // label: the fallback below is built from `path`, which `unescape`
+            // has already decoded, so decoding that a second time would corrupt a
+            // path that genuinely contains something like `\x41`.
+            let label = disk_labels
+                .get(dev_name)
+                .map(|raw| unescape(raw))
+                .unwrap_or_else(|| {
+                    path.file_name()
+                        .and_then(|s| s.to_str())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| dev_name.to_string())
+                });
 
             vols.push(Volume { label, path });
         }

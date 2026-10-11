@@ -943,6 +943,108 @@ fn both_lists_emit_the_rows_that_fit() {
 /// `closeable` is a **no-op** in 0.21: it compiles, it reads
 /// `// Hide via dropdown only`, and the right-click "Close" item and the
 /// middle-click on a tab still remove a pane.
+/// The remove-from-iPod affordances exist only for a folder that is on a device.
+///
+/// `Source` makes the invalid combination unrepresentable in the signature, but
+/// nothing stops a future edit from arming a removal from a share row — and the
+/// cost of that mistake is a spool-cache file deleted because the user clicked
+/// the wrong icon. It is the same shape of claim as
+/// `no_pane_draws_a_close_button`: a property about *where a name appears*, which
+/// no runtime measurement can see.
+#[test]
+fn the_remove_button_is_reachable_only_from_a_device_folder() {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/gui/panes/library/listing.rs"),
+    )
+    .expect("read listing.rs");
+
+    assert_eq!(
+        src.matches("Some(FileAct::Remove) => action = Some(Act::Remove(")
+            .count(),
+        1,
+        "exactly one row arm *produces* a removal"
+    );
+    let arm = src
+        .find("Some(FileAct::Remove) => action = Some(Act::Remove(")
+        .expect("premise: a row arm exists");
+    assert!(
+        src[..arm].contains("removable = source == Source::Device"),
+        "the row button is only destructive for a device row"
+    );
+
+    // The header derives its direction from the same check, and that check asks
+    // where the file is rather than whether some iPod is plugged in.
+    assert!(
+        src.contains("let on_device = browsing_device(app.library().dir());"),
+        "premise: the header uses the shared device check"
+    );
+    assert!(
+        src.contains("fn browsing_device(dir: &Path) -> bool"),
+        "premise: the check is one named function"
+    );
+
+    // The share browser must drop it, which is a claim about a match arm no count
+    // can see: `Act::Remove` is a real variant, so `remote_list_ui`'s `match`
+    // naming it at all means the row button was offered there.
+    assert!(
+        src.contains("Some(Act::Edit(_)) | Some(Act::Remove(_)) => {}"),
+        "the share browser names Remove as unreachable, and says why"
+    );
+
+    // **What is deliberately not asserted here:** that `remove_track` refuses a
+    // path off the device before it unlinks anything. It was, as a text check on
+    // the order of two strings — and mutation testing killed it: replacing the
+    // guard with `if false` left every string in place and the test green, since
+    // a text check cannot see dead code. The property is real and it is covered,
+    // by `a_path_off_the_device_is_refused_and_left_alone` in `ipod_tests.rs`,
+    // which fails on that same mutation because it checks the file is still
+    // there. A check that passes for the wrong reason is worse than no check.
+}
+
+/// The dialogs' claim about where the backup goes is true.
+///
+/// A string saying "kept beside it" is a **user-visible claim about what the code
+/// does**, and it survived a change that made it false: the backup moved from the
+/// device to the app's cache directory and the dialogs went on saying "beside it",
+/// which is now not merely wrong but wrong about the one thing the sentence
+/// exists to reassure the user of. Nothing else could catch it — a screenshot
+/// shows the dialog rather than the truth, and the tests exercised the code.
+#[test]
+fn no_dialog_claims_a_backup_the_app_does_not_keep_there() {
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/gui");
+    let mut offenders = Vec::new();
+    for file in [
+        "panes/library/listing.rs",
+        "panes/playlist.rs",
+        "dialogs.rs",
+    ] {
+        let src = std::fs::read_to_string(base.join(file)).expect("read gui source");
+        for (n, line) in src.lines().enumerate() {
+            let code = line.trim_start();
+            // Comments describe the code, and are allowed to say "beside".
+            if code.starts_with("//") || code.starts_with("///") || code.starts_with('*') {
+                continue;
+            }
+            let lowered = code.to_lowercase();
+            if lowered.contains("beside it") || lowered.contains(".bak") {
+                offenders.push(format!("{file}:{}: {line}", n + 1));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these claim where the backup is kept; check them against Device::backups:\n{}",
+        offenders.join("\n")
+    );
+
+    // And the sentence that replaced them says something the user can act on.
+    let listing = std::fs::read_to_string(base.join("panes/library/listing.rs")).unwrap();
+    assert!(
+        listing.contains("kept in tplay's cache folder"),
+        "premise: the iPod dialogs name where the backup actually goes"
+    );
+}
+
 #[test]
 fn no_pane_draws_a_close_button() {
     let src = std::fs::read_to_string(

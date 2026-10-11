@@ -13,7 +13,9 @@ use super::dir_name;
 use crate::app::TPlayApp;
 use crate::gui::dialogs;
 use crate::gui::panes::row_visible;
+use crate::gui::panes::IpodDirection;
 use crate::gui::theme::{self, ThemeState};
+use crate::ipod::remove;
 use crate::library;
 use crate::network;
 use eframe::egui;
@@ -165,6 +167,32 @@ enum FileAct {
     Add,
     /// Open the track editor for the row's track.
     Edit,
+    /// Take the row's track off an iPod. Only ever returned for a
+    /// [`Source::Device`] row — the shared list widget is handed the source, not
+    /// a guess.
+    Remove,
+}
+
+/// Which browser is drawing this list.
+///
+/// A share row is read-only where a device row is not: its ratings come from a
+/// spool-cache copy rather than the track, and it is never a file this app may
+/// delete. A device row is the reverse — it is the one list whose row button
+/// means something destructive. One enum rather than two `bool`s because the two
+/// facts are not independent, and `true, true` is a combination no caller means
+/// and no reader would believe.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Source {
+    Local,
+    Share,
+    Device,
+}
+
+impl Source {
+    /// Whether a row can open the track editor.
+    fn editable(self) -> bool {
+        !matches!(self, Self::Share)
+    }
 }
 
 /// What the user asked for by clicking a file-list row.
@@ -190,6 +218,9 @@ enum Act {
     /// same reason `file_list_ui` is a reader: one `&mut` here would force the
     /// caller to clone the folder's whole entry list to pass a borrow alongside it.
     Sort(usize),
+    /// Take this track off an iPod: its file, its record, its playlist entries.
+    /// The **caller** carries it out, because only it can arm the confirm modal.
+    Remove(PathBuf),
 }
 
 // Nine arguments, and a params struct would be longer than the call sites it
@@ -205,6 +236,7 @@ fn draw_file_row(
     info: Option<&library::TrackInfo>,
     star_on: Option<&egui::TextureHandle>,
     star_off: Option<&egui::TextureHandle>,
+    source: Source,
 ) -> Option<FileAct> {
     let p = theme.palette;
     let rows = theme.rows;
@@ -294,15 +326,29 @@ fn draw_file_row(
         None => rating_resp,
     };
 
+    // One row button, two meanings: on a folder of an iPod the useful action is
+    // "take this off the device", and adding a second button to a row whose
+    // width is already accounted for to the pixel is the wrong trade for it. The
+    // `✕` is the Playlist pane's own spelling of the same verb.
+    let removable = source == Source::Device;
+    let (glyph, hover) = if removable {
+        ("✕", "Remove from the iPod")
+    } else {
+        ("+", "Add to playlist")
+    };
     let add_clicked = row
-        .add(egui::Button::new("+").small().frame(false))
-        .on_hover_text_at_pointer("Add to playlist")
+        .add(egui::Button::new(glyph).small().frame(false))
+        .on_hover_text_at_pointer(hover)
         .clicked();
 
     if title_resp.clicked() {
         Some(FileAct::Play)
     } else if add_clicked {
-        Some(FileAct::Add)
+        if removable {
+            Some(FileAct::Remove)
+        } else {
+            Some(FileAct::Add)
+        }
     } else if rating_resp.clicked() {
         Some(FileAct::Edit)
     } else {
@@ -329,9 +375,11 @@ fn draw_file_row(
 /// directory reads as a hung pane.
 ///
 /// Returns the row the user clicked, if any; the caller carries it out, since only
-/// it knows whether a `Nav` means `navigate_to` or `browse_open`. `remote` says
-/// which browser this is — the share list's paths are `smb://` URIs, so arming a
-/// playlist load needs to know which transport to run it through.
+/// it knows whether a `Nav` means `navigate_to` or `browse_open`. `source` says
+/// which browser this is, and it is one enum rather than two `bool`s because the
+/// two facts are not independent: a share list's paths are `smb://` URIs that are
+/// never a device's own files, so arming a playlist load or a removal has to know
+/// which transport it is running through.
 /// **`&TPlayApp`, and that is the whole reason the caller does not clone the entry
 /// list.** It needed `&mut` for exactly one call — `set_library_sort` from the
 /// header — and that one mutation is now returned as an [`Act::Sort`] for the
@@ -346,7 +394,7 @@ fn file_list_ui(
     theme: &theme::Theme,
     entries: &[library::Entry],
     scan_note: Option<String>,
-    remote: bool,
+    source: Source,
 ) -> Option<Act> {
     let p = theme.palette;
     let folder_tex = themes.icon(theme::Icon::Folder).cloned();
@@ -492,7 +540,7 @@ fn file_list_ui(
                                 ui.ctx(),
                                 dialogs::ConfirmAction::LoadPlaylist {
                                     path: path.to_path_buf(),
-                                    remote,
+                                    remote: source == Source::Share,
                                 },
                                 "Load playlist",
                                 &format!("Replace the current playlist with '{stem}'?"),
@@ -522,15 +570,17 @@ fn file_list_ui(
                         info,
                         star_on.as_ref(),
                         star_off.as_ref(),
+                        source,
                     ) {
                         Some(FileAct::Play) => action = Some(Act::Play(path.to_path_buf())),
                         Some(FileAct::Add) => action = Some(Act::Add(path.to_path_buf())),
+                        Some(FileAct::Remove) => action = Some(Act::Remove(path.to_path_buf())),
                         // Display-only on a share. The cell still shows the rating
                         // the cached copy carries, and the click is dropped here
                         // rather than refused later: `tracks::write_tags` also
                         // refuses, so a future caller that forgets this guard still
                         // cannot write to a spool cache.
-                        Some(FileAct::Edit) if remote => {}
+                        Some(FileAct::Edit) if !source.editable() => {}
                         Some(FileAct::Edit) => action = Some(Act::Edit(path.to_path_buf())),
                         None => {}
                     }
@@ -571,7 +621,19 @@ pub fn local_list_ui(
     // A borrow, not a clone. The clone existed only because both calls below
     // wanted `&mut TPlayApp` while `entries` came out of it; both are readers
     // now, so the folder is not walked at all.
-    list_header_right(app, ui, theme.palette, Counts::of(app.library().entries()));
+    let on_device = browsing_device(app.library().dir());
+    let source = if on_device {
+        Source::Device
+    } else {
+        Source::Local
+    };
+    list_header_right(
+        app,
+        ui,
+        theme.palette,
+        Counts::of(app.library().entries()),
+        on_device,
+    );
     ui.add_space(theme.panes.gap);
     let scanning = app.library_scanning();
     let act = file_list_ui(
@@ -581,7 +643,7 @@ pub fn local_list_ui(
         theme,
         app.library().entries(),
         scanning.then(|| "Scanning…".to_string()),
-        false,
+        source,
     );
     match act {
         Some(Act::Nav(dir)) => app.navigate_to(dir),
@@ -590,8 +652,41 @@ pub fn local_list_ui(
         Some(Act::LoadPlaylist(path)) => app.load_playlist_from(path),
         Some(Act::Edit(path)) => arm_edit(ui, app, path),
         Some(Act::Sort(key)) => app.set_library_sort(key),
+        Some(Act::Remove(path)) => arm_remove(ui, path),
         None => {}
     }
+}
+
+/// Whether this folder is **on** an iPod, rather than merely beside one.
+///
+/// An ancestor holding `iPod_Control` is the whole test, and it is a path walk
+/// rather than `device::find()` — which reads `/proc/self/mounts` and probes
+/// every mounted volume, and this runs on every frame of a pane. The check is
+/// also the honest one: it asks where the file is, not whether a device happens
+/// to be plugged in, so the button appears for a folder that *is* the device's
+/// even if some other iPod is the one that would be written to.
+fn browsing_device(dir: &Path) -> bool {
+    dir.ancestors().any(|a| a.join("iPod_Control").is_dir())
+}
+
+/// Arm the remove-from-iPod confirm for one row's track.
+fn arm_remove(ui: &egui::Ui, path: PathBuf) {
+    let name = path.file_name().map_or_else(
+        || path.to_string_lossy().into_owned(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    dialogs::ask(
+        ui.ctx(),
+        dialogs::ConfirmAction::RemoveFromIpod {
+            paths: vec![path],
+            what: name.clone(),
+        },
+        "Remove from the iPod",
+        &format!(
+            "Take '{name}' off the iPod?\n\nIts file, its library entry and its playlist entries \
+             all go. A copy of the previous database is kept in tplay's cache folder."
+        ),
+    );
 }
 
 /// Arm the track editor for a local row, carrying the tags the file has now so
@@ -662,7 +757,13 @@ impl Counts {
     }
 }
 
-fn list_header_right(app: &mut TPlayApp, ui: &mut egui::Ui, p: theme::Palette, c: Counts) {
+fn list_header_right(
+    app: &mut TPlayApp,
+    ui: &mut egui::Ui,
+    p: theme::Palette,
+    c: Counts,
+    on_device: bool,
+) {
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
         if ui
             .button("Add All")
@@ -680,6 +781,65 @@ fn list_header_right(app: &mut TPlayApp, ui: &mut egui::Ui, p: theme::Palette, c
                 .map(|e| e.path().to_path_buf())
                 .collect();
             app.add_files(files);
+        }
+        // The same button in both directions: browsing the device's own folder is
+        // what makes "take these off" meaningful, and a permanently-greyed button
+        // beside an enabled one reads as a broken app rather than as an
+        // inapplicable action.
+        let direction = if on_device {
+            IpodDirection::Remove
+        } else {
+            IpodDirection::Add
+        };
+        if super::super::ipod_button(ui, app, p, direction) {
+            // Every playable file under this folder, at any depth. **Recursive
+            // because the folder the user browsed to is not always an album**:
+            // `iPod_Control/Music` holds fifty `Fnn` folders and no files at all,
+            // so a one-level walk found zero tracks and the button did nothing.
+            // Walked on the click, for the same reason `Add All` walks then: a
+            // list handed to a dialog that may never open is a list built sixty
+            // times a second for nothing.
+            let files = remove::audio_files_under(app.library().dir());
+            let name = app.library().dir().file_name().map_or_else(
+                || match direction {
+                    IpodDirection::Remove => "this folder".to_string(),
+                    IpodDirection::Add => "this album".to_string(),
+                },
+                |n| n.to_string_lossy().into_owned(),
+            );
+            let n = files.len();
+            if direction == IpodDirection::Remove {
+                dialogs::ask(
+                    ui.ctx(),
+                    dialogs::ConfirmAction::RemoveFromIpod {
+                        paths: files,
+                        what: name.clone(),
+                    },
+                    "Remove from the iPod",
+                    &format!(
+                        "Take {n} track{} off the iPod from '{name}'?\n\n\
+                         Everything in this folder and its subfolders goes: the files, their \
+                         library entries and their playlist entries. A copy of the previous \
+                         database is kept in tplay's cache folder.",
+                        if n == 1 { "" } else { "s" }
+                    ),
+                );
+            } else {
+                dialogs::ask(
+                    ui.ctx(),
+                    dialogs::ConfirmAction::PushToIpod {
+                        tracks: files,
+                        playlist: None,
+                    },
+                    "Copy to the iPod",
+                    &format!(
+                        "Copy {n} track{} from '{name}' to the connected iPod?\n\n\
+                         Everything in this folder and its subfolders is included. Its database \
+                         is rewritten and the previous one is kept in tplay's cache folder.",
+                        if n == 1 { "" } else { "s" }
+                    ),
+                );
+            }
         }
         // "1 track" stays singular. The three counts arrive as numbers: they are
         // identical for both callers, and counting them here meant either a slice
@@ -841,9 +1001,11 @@ pub fn remote_list_ui(
         }
     });
 
-    list_header_right(app, ui, p, Counts::of(&entries));
+    // A share is never a device's own folder, so the direction is fixed here rather
+    // than by a second check.
+    list_header_right(app, ui, p, Counts::of(&entries), false);
     ui.add_space(theme.panes.gap);
-    let act = file_list_ui(app, themes, ui, theme, &entries, note, true);
+    let act = file_list_ui(app, themes, ui, theme, &entries, note, Source::Share);
 
     match act {
         Some(Act::Nav(path)) => {
@@ -864,10 +1026,10 @@ pub fn remote_list_ui(
         // The header is the shared one, so the sort is the same call as on disk —
         // `sort_entries` reads a track id and an `smb://` URI is one.
         Some(Act::Sort(key)) => app.set_library_sort(key),
-        // Unreachable: `file_list_ui` drops an `Edit` when `remote` is set, since a
-        // spool-cache copy is not the track. Named so that is a compile-time fact
-        // rather than a comment.
-        Some(Act::Edit(_)) => {}
+        // Unreachable: `file_list_ui` drops an `Edit` on a share, since a spool-cache
+        // copy is not the track, and a `Remove` is only ever returned for a device
+        // row. Named so that is a compile-time fact rather than a comment.
+        Some(Act::Edit(_)) | Some(Act::Remove(_)) => {}
         None => {}
     }
 }

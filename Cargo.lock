@@ -3373,6 +3373,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
+name = "rusty_aac"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be358888c3ae0cc16d17f50c76b76d8ce903845a97413559cecf38db1ca9c62d"
+
+[[package]]
 name = "same-file"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4152,8 +4158,10 @@ dependencies = [
  "log",
  "resvg",
  "rodio",
+ "rusty_aac",
  "serde",
  "serde_json",
+ "sha1",
  "smb2",
  "symphonia",
  "tokio",

@@ -676,3 +676,31 @@ fn text_tags_are_written_and_an_emptied_one_is_removed() {
 
     fs::remove_dir_all(&dir).unwrap();
 }
+
+/// The tag generator can write a title with an accent in it.
+///
+/// **Every title in this suite was ASCII, which is how the generator shipped a
+/// broken encoding unnoticed.** `write_tagged_mp3` declared its ID3v2.3 frames
+/// ISO-8859-1 and wrote UTF-8 bytes into them, so `ç` came back as `Ã§` and a
+/// hyphen U+2010 could not be written at all. Nothing failed, because ASCII is
+/// the one text where the two encodings agree byte for byte — and a helper that
+/// cannot express a case is a case no test can cover.
+///
+/// It mattered for real rather than theoretical reasons: the first track on the
+/// device this app was written against is `Renascença`, and the bug it let
+/// through was in the iPod push's duplicate detection, where the two halves of a
+/// comparison disagreed about case and every accented song failed to match
+/// *itself*.
+#[test]
+fn a_generated_mp3_carries_its_accented_title() {
+    let dir = common::test_dir("accented_title");
+    let path = dir.join("acentuada.mp3");
+    common::write_tagged_mp3(&path, "Renascença", "Zé Ramalho", "O‑Além");
+
+    let info = tplay::tracks::info(&path).expect("the file reads back");
+    assert_eq!(info.title, "Renascença", "ç is one character, not two");
+    assert_eq!(info.artist, "Zé Ramalho");
+    assert_eq!(info.album, "O‑Além", "U+2010 HYPHEN survives");
+
+    fs::remove_dir_all(&dir).unwrap();
+}

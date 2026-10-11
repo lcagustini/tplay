@@ -3,6 +3,7 @@
 //! tests are hermetic (the real `/dev/disk/by-label/` is machine-specific).
 
 use std::collections::HashMap;
+use std::path::Path;
 use tplay::library::Volume;
 
 /// Matches this machine's `/dev/disk/by-label/` (used by `parse_real_mount_table`).
@@ -14,6 +15,123 @@ fn real_labels() -> HashMap<String, String> {
     m.insert("sda2".into(), "35-hdd".into());
     m.insert("nvme0n1p2".into(), "endeavouros".into());
     m
+}
+
+/// The kernel escapes four characters in a mount point, and the escaped text is
+/// not a path.
+///
+/// A user's iPod is labelled `LUCAS'S IPO`, udisks mounts it at
+/// `/run/media/lucas/LUCAS_S IPO`, and `/proc/self/mounts` reports that as
+/// `/run/media/lucas/LUCAS_S\040IPO`. Used verbatim, the sidebar's **Volumes**
+/// row for the device points at a directory that does not exist: the row draws
+/// and highlights, and clicking it navigates nowhere. This is the real line from
+/// the machine the iPod was written against, escape and all.
+#[test]
+fn a_mount_point_with_an_escaped_character_is_a_real_path() {
+    let line = r#"/dev/sde1 /run/media/lucas/LUCAS_S\040IPO vfat rw,relatime 0 0"#;
+    let volumes = Volume::parse_mounts_with_labels(line, &HashMap::new());
+    assert_eq!(volumes.len(), 1);
+    assert_eq!(
+        volumes[0].path,
+        Path::new("/run/media/lucas/LUCAS_S IPO"),
+        "the octal escape must be decoded back to the character"
+    );
+    assert!(
+        volumes[0].path.is_dir(),
+        "and the decoded path has to be the directory that exists"
+    );
+}
+
+/// All four escapes the kernel emits, not just the space. A tab or a newline in
+/// a volume label produces the same kind of dead path.
+#[test]
+fn every_escape_the_kernel_emits_is_decoded() {
+    let line = "/dev/sdb1 /mnt/a\\040b\\011c\\012d\\134e ext4 rw 0 0";
+    let volumes = Volume::parse_mounts_with_labels(line, &HashMap::new());
+    assert_eq!(volumes[0].path, Path::new("/mnt/a b\tc\nd\\e"));
+}
+
+/// A backslash that is not one of the four escapes stays a backslash. Anything
+/// else would corrupt a path rather than decode it.
+#[test]
+fn a_backslash_that_is_not_an_escape_survives() {
+    let line = r#"/dev/sdb1 /mnt/a\99b ext4 rw 0 0"#;
+    let volumes = Volume::parse_mounts_with_labels(line, &HashMap::new());
+    assert_eq!(volumes[0].path, Path::new(r"/mnt/a\99b"));
+}
+
+/// The **same** volume, read from the other side, and the label is escaped in a
+/// *different* syntax.
+///
+/// `/dev/disk/by-label/` entries are written by blkid, which escapes as hex
+/// `\xNN` rather than the kernel's octal `\040`. So the one device whose label
+/// has a quote and a space in it arrives as two different encoded strings, and
+/// only the mountpoint one was being decoded — the sidebar drew
+/// `LUCAS\x27S\x20IPO` while navigating correctly on the line below it.
+#[test]
+fn a_disk_label_is_decoded_from_blkids_hex_escapes() {
+    let line = r#"/dev/sde1 /run/media/lucas/LUCAS_S\040IPO vfat rw,relatime 0 0"#;
+    // The real directory entry, copied out of `/dev/disk/by-label/`.
+    let labels = HashMap::from([("sde1".to_string(), r"LUCAS\x27S\x20IPO".to_string())]);
+    let volumes = Volume::parse_mounts_with_labels(line, &labels);
+    assert_eq!(volumes.len(), 1);
+    assert_eq!(volumes[0].label, "LUCAS'S IPO");
+    assert_eq!(volumes[0].path, Path::new("/run/media/lucas/LUCAS_S IPO"));
+}
+
+/// Both schemes, one decoder. They cannot collide — `\134` starts with a digit,
+/// `\x5C` with an `x` — so one function is right, and a second one would be a
+/// second thing to get the escaping rules of wrong.
+#[test]
+fn one_decoder_handles_both_escape_schemes() {
+    // Octal: space, tab, newline, backslash.
+    let line = "/dev/sdb1 /mnt/a\\040b\\011c\\012d\\134e ext4 rw 0 0";
+    // Hex: the same four characters, the way blkid spells them.
+    let labels = HashMap::from([("sdb1".to_string(), r"a\x20b\x09c\x0ad\x5Ce".to_string())]);
+    let volumes = Volume::parse_mounts_with_labels(line, &labels);
+    assert_eq!(volumes[0].label, "a b\tc\nd\\e");
+    assert_eq!(volumes[0].path, Path::new("/mnt/a b\tc\nd\\e"));
+}
+
+/// A backslash that is not an escape survives in the *label* too, and this is
+/// where the second scheme earns the check: `\99` is not valid hex and must not
+/// be read as octal by the arm that happens to come second.
+#[test]
+fn a_backslash_that_is_not_an_escape_survives_in_a_label() {
+    let line = "/dev/sdb1 /mnt/plain ext4 rw 0 0";
+    let labels = HashMap::from([("sdb1".to_string(), r"a\99b".to_string())]);
+    let volumes = Volume::parse_mounts_with_labels(line, &labels);
+    assert_eq!(volumes[0].label, r"a\99b");
+}
+
+/// A `\x` that is not two hex digits stays literal, and the rest of the label is
+/// untouched — the near-miss that a decoder written with `unwrap_or(0)` instead
+/// of a failed parse would turn into a NUL.
+#[test]
+fn a_hex_escape_that_is_not_hex_stays_literal() {
+    let line = "/dev/sdb1 /mnt/plain ext4 rw 0 0";
+    let labels = HashMap::from([("sdb1".to_string(), r"a\xZZb\x2".to_string())]);
+    let volumes = Volume::parse_mounts_with_labels(line, &labels);
+    assert_eq!(volumes[0].label, r"a\xZZb\x2");
+}
+
+/// The fallback label comes from the mountpoint, which is *already* decoded, so
+/// it must not be run through the decoder a second time.
+///
+/// A mountpoint whose real name contains the text `\x41` — a backslash and an
+/// `x` and two hex digits — is exactly what double-decoding corrupts: it would
+/// come back as `A`, and the row would name a directory that does not exist.
+#[test]
+fn a_mount_point_label_is_not_decoded_twice() {
+    // `\134` in the file is the escape for a backslash, followed by the literal
+    // text `x41`. Decoded once, that leaf is `\x41`.
+    let line = r#"/dev/sdb1 /mnt/\134x41 ext4 rw 0 0"#;
+    let volumes = Volume::parse_mounts_with_labels(line, &HashMap::new());
+    assert_eq!(volumes[0].path, Path::new(r"/mnt/\x41"));
+    assert_eq!(
+        volumes[0].label, r"\x41",
+        "the leaf was decoded once already"
+    );
 }
 
 const FIXTURE_REAL: &str = r#"/dev/nvme0n1p2 / ext4 rw,noatime 0 0

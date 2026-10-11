@@ -4,6 +4,7 @@ pub mod app;
 pub mod audio;
 pub mod config;
 pub mod gui;
+pub mod ipod;
 pub mod library;
 pub mod library_db;
 pub mod logging;

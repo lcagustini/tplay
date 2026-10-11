@@ -4,6 +4,7 @@ mod app;
 mod audio;
 mod config;
 mod gui;
+mod ipod;
 mod library;
 mod library_db;
 mod logging;

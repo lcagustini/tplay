@@ -1,6 +1,8 @@
 # Audio fixtures
 
 Eight real encoded files, one per format, used by `tests/audio_fixtures.rs`.
+A ninth family lives in `ipod/` — see `ipod/README.md` — and the reasoning there
+is the same one, so it is not repeated.
 
 ## Why these are files and not generated
 

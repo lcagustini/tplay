@@ -48,6 +48,23 @@ pub enum ConfirmAction {
     /// value because a rule is plain data — an armed one must survive the modal
     /// waiting for an answer, and a view can be deleted meanwhile.
     LoadSmartView(SmartView),
+    /// Copy tracks to a connected iPod, and optionally add them as a playlist
+    /// under `playlist`'s name. The tracks are captured here because the Library
+    /// can be navigated while the modal waits, and a push aimed at whatever
+    /// folder happens to be open is worse than no push.
+    PushToIpod {
+        tracks: Vec<PathBuf>,
+        playlist: Option<String>,
+    },
+    /// Take `paths` **off** the iPod. Captured for the same reason as
+    /// [`ConfirmAction::PushToIpod`], and with the same hazard behind it: the
+    /// Library can be navigated while the modal waits, and a removal aimed at
+    /// whatever folder happens to be open by then is a different set of files.
+    RemoveFromIpod {
+        paths: Vec<PathBuf>,
+        /// The name to name in the question — a folder, or one track.
+        what: String,
+    },
 }
 
 /// An armed Yes/No, waiting for an answer.
@@ -219,6 +236,13 @@ fn run(app: &mut TPlayApp, ctx: &egui::Context, action: ConfirmAction) {
             } else {
                 app.load_playlist_from(path);
             }
+        }
+        ConfirmAction::PushToIpod { tracks, playlist } => {
+            let what = playlist.clone().unwrap_or_else(|| "this album".to_string());
+            app.ipod_mut().start(what, tracks, playlist);
+        }
+        ConfirmAction::RemoveFromIpod { paths, what } => {
+            app.ipod_mut().start_remove(what, paths);
         }
         ConfirmAction::DeleteLayout(path) => {
             let _ = std::fs::remove_file(&path);

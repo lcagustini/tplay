@@ -1,6 +1,7 @@
 use crate::app::TPlayApp;
 use crate::gui::dialogs;
 use crate::gui::panes::row_visible;
+use crate::gui::panes::IpodDirection;
 use crate::gui::theme::{self, Icon, ThemeState};
 use crate::library;
 use crate::network;
@@ -151,6 +152,27 @@ pub fn playlist_pane(app: &mut TPlayApp, themes: &ThemeState, ui: &mut egui::Ui)
                 } else {
                     app.new_playlist();
                 }
+            }
+            // Inside the right-to-left block, so it sits with the other file
+            // actions and reads after them — Create → Save → iPod.
+            if crate::gui::panes::ipod_button(ui, app, theme.palette, IpodDirection::Add) {
+                let tracks = app.playlist().to_vec();
+                let n = tracks.len();
+                let name = app.playlist_name();
+                let desc = format!(
+                    "Copy {n} track{} to the iPod and add them as the playlist '{name}'?\n\n\
+                     Its database is rewritten and the previous one is kept in tplay's cache folder.",
+                    if n == 1 { "" } else { "s" },
+                );
+                dialogs::ask(
+                    ui.ctx(),
+                    dialogs::ConfirmAction::PushToIpod {
+                        tracks,
+                        playlist: Some(name),
+                    },
+                    "Copy to the iPod",
+                    &desc,
+                );
             }
         });
     });

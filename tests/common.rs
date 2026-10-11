@@ -112,8 +112,21 @@ pub fn write_minimal_flac(path: &Path) {
 fn id3v2(title: &str, artist: &str, album: &str) -> Vec<u8> {
     let mut frames = Vec::new();
     for (id, text) in [("TIT2", title), ("TPE1", artist), ("TALB", album)] {
-        let mut body = vec![0u8]; // latin1 encoding byte
-        body.extend_from_slice(text.as_bytes());
+        // **Encoding 2 — UTF-16BE, no BOM.** The obvious choice for a v2.3 frame
+        // is 0, ISO-8859-1, and this used to use it — with `text.as_bytes()`,
+        // which is UTF-8. The result was a frame that claims latin1 and carries
+        // two bytes per accented character, so "ç" came back as "Ã§" and a title
+        // like `Ne‐Yo` could not be written at all.
+        //
+        // It went unnoticed because every title here was ASCII, where the two
+        // encodings agree byte for byte. That is exactly the kind of gap a bug
+        // hides in: the helper could not express the case that mattered, so no
+        // test could use it — and a test that could not be written is a test
+        // that cannot fail.
+        let mut body = vec![0x02u8];
+        for unit in text.encode_utf16() {
+            body.extend_from_slice(&unit.to_be_bytes());
+        }
         frames.extend_from_slice(id.as_bytes());
         frames.extend_from_slice(&(body.len() as u32).to_be_bytes()); // v2.3: plain u32
         frames.extend_from_slice(&[0, 0]); // frame flags

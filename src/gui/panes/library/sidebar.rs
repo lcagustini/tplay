@@ -28,6 +28,12 @@ const LIB_PLACES: &str = "tplay.library.places";
 struct SidebarDirs {
     places: Vec<(String, PathBuf)>,
     volumes: Vec<library::Volume>,
+    /// iPods udisks can see, **mounted or not**.
+    ///
+    /// Cached for the same reason as the other two, and it costs far more: each
+    /// entry is three `udisksctl` processes, so drawing this inline would spawn
+    /// one hundred and eighty a second on a 60 Hz frame.
+    ipods: Vec<crate::ipod::device::Plugged>,
 }
 
 impl SidebarDirs {
@@ -35,6 +41,7 @@ impl SidebarDirs {
         Self {
             places: library::quick_folders(),
             volumes: library::Volume::mounted_volumes(),
+            ipods: crate::ipod::device::plugged(),
         }
     }
 }
@@ -172,14 +179,19 @@ pub fn sidebar_ui(
             .show(ui, |ui| {
                 let mut jump: Option<PathBuf> = None;
 
-                // Read once per session, not once per frame — see `SidebarDirs`.
+                // Read once per session, not once per frame — see `SidebarDirs`. The
+                // epoch is the exception: a mount or an eject **is** the one
+                // thing in that list that changes mid-session, so a finished job
+                // re-reads rather than leaving the button saying "Mount" to a
+                // device that is now mounted.
+                let epoch = app.ipod().epoch();
                 let dirs = ui.ctx().memory_mut(|m| {
                     let id = egui::Id::new(LIB_PLACES);
-                    match m.data.get_temp::<SidebarDirs>(id) {
-                        Some(d) => d,
-                        None => {
+                    match m.data.get_temp::<(u64, SidebarDirs)>(id) {
+                        Some((seen, d)) if seen == epoch => d,
+                        _ => {
                             let d = SidebarDirs::read();
-                            m.data.insert_temp(id, d.clone());
+                            m.data.insert_temp(id, (epoch, d.clone()));
                             d
                         }
                     }
@@ -219,10 +231,87 @@ pub fn sidebar_ui(
                     ui.add_space(theme.panes.pad);
                 }
 
-                // Volumes: local block partitions from /proc/self/mounts.
-                if !dirs.volumes.is_empty() {
+                // iPods: their own section, and **not** in Volumes below.
+                //
+                // A mass-storage iPod is a FAT partition on a USB stick, so it was
+                // already in that list and needed no work at all — which is also why
+                // it belonged nowhere in it: the row offered no way to mount a
+                // device that was plugged in but unmounted, and no way to eject
+                // one that was mounted. Here both are the row's whole job.
+                if !dirs.ipods.is_empty() {
+                    section_label(ui, theme, p, "iPod");
+                    let busy = app.ipod().busy();
+                    for ipod in &dirs.ipods {
+                        // Two shapes, because the two states are different
+                        // questions. Mounted: an ordinary row, so clicking it
+                        // browses the device like any other volume. Unmounted:
+                        // there is nothing to browse, so the row *is* the mount
+                        // button and says so rather than looking inert.
+                        let Some(root) = ipod.mount.clone() else {
+                            let clicked = if busy {
+                                ui.add_enabled(false, egui::Button::new("Mount")).clicked()
+                            } else {
+                                ui.button("Mount")
+                                    .on_hover_text("Mount this iPod so tplay can copy to it")
+                                    .clicked()
+                            };
+                            if clicked {
+                                app.ipod_mut().start_mount(ipod.clone());
+                            }
+                            ui.label(
+                                egui::RichText::new(ipod.name())
+                                    .small()
+                                    .color(p.text_secondary),
+                            );
+                            ui.add_space(theme.panes.gap);
+                            continue;
+                        };
+
+                        if matches!(
+                            sidebar_row(
+                                ui,
+                                themes,
+                                theme,
+                                Row {
+                                    label: ipod.name(),
+                                    path: &root,
+                                    active: current_local.as_deref() == Some(root.as_path()),
+                                    removable: false,
+                                }
+                            ),
+                            Some(RowClick::Jump)
+                        ) {
+                            jump = Some(root.clone());
+                        }
+                        // Eject is a second line, not a second column: the sidebar
+                        // is a fixed `panes.sidebar_w` wide and a button beside
+                        // the label would squeeze the name out of it.
+                        let ejected = if busy {
+                            ui.add_enabled(false, egui::Button::new("Eject"))
+                                .on_hover_text("Wait for the current iPod job")
+                                .clicked()
+                        } else {
+                            ui.button("Eject")
+                                .on_hover_text("Unmount and power off — safe to unplug")
+                                .clicked()
+                        };
+                        if ejected {
+                            app.ipod_mut().start_eject(ipod.clone());
+                        }
+                    }
+                    ui.add_space(theme.panes.pad);
+                }
+
+                // Volumes: local block partitions from /proc/self/mounts, **minus
+                // any iPod**, which has its own section above.
+                let volumes: Vec<_> = dirs
+                    .volumes
+                    .iter()
+                    .filter(|v| !dirs.ipods.iter().any(|p| p.mount.as_ref() == Some(&v.path)))
+                    .collect();
+                if !volumes.is_empty() {
                     section_label(ui, theme, p, "Volumes");
-                    for vol in &dirs.volumes {
+                    for vol in &volumes {
                         let active = current_local.as_deref() == Some(vol.path.as_path());
                         if matches!(
                             sidebar_row(

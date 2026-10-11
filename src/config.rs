@@ -467,6 +467,16 @@ impl Persisted {
 /// rescues a file that was *already* damaged; this is what stops the next write
 /// from being the one that damages it.
 pub fn atomic_write(path: &Path, content: &str) {
+    atomic_write_bytes(path, content.as_bytes())
+}
+
+/// [`atomic_write`] for bytes.
+///
+/// The iPod's database is a binary tree, so the string form cannot carry it, and
+/// the reason the write is a rename applies to it harder: a truncated
+/// `iTunesDB` is a file the device cannot read and the player cannot recover,
+/// and the audio it describes stays on the disk invisible until it comes back.
+pub fn atomic_write_bytes(path: &Path, content: &[u8]) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }

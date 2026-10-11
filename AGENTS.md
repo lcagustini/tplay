@@ -39,6 +39,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window. LAN-
 - `src/library.rs` — pure logic: directory listing, tag/duration/**star-rating** reading via `lofty` (a rating is a Popularimeter *in the file*, not app state — see **Library**), background scan thread (`scan_files` + mpsc), `TrackInfo` cache, sorting (`sort_key` with DEL prefix for empty values), **playlist file formats** (`PLAYLIST_EXTENSIONS` — `.tplay`/`.m3u`/`.m3u8`/`.pls`; one read and one write dispatcher, see **One playlist file format**), **local volume discovery** (`Volume::parse_mounts`/`parse_mounts_with_labels`/`mounted_volumes` from `/proc/self/mounts` + `/dev/disk/by-label/` — pretty filesystem labels win over UUID mountpoint names; `PSEUDO_FSTYPES` + `BOOT_MOUNTPOINTS` (`/efi`, `/boot`, `/boot/efi`) excluded).
 - `src/library_db.rs` — the persistent library database, `~/.config/tplay/library.json`. `TrackDb` owns **two maps with no shared insert path** — `tags` (the tag cache, reached through `cache()`/`cache_mut()`) and `stats` (`HashMap<PathBuf, PlayStats>` — plays, last played, first seen); the full rationale is under **Non-obvious machinery** → *Two maps, no shared insert path*. Plus `note_played`/`stats_of`/`PlayStats::describe` (the row tooltip's wording), `snapshot` (the borrowed serialize side `DbFileRef`, the content the write throttle compares), `at`/`load`/`load_from` (a database carries **its own** file path, and `new` has none — so a test's `TPlayApp` physically cannot reach the developer's real library), `persist` (stamp first seen, then `config::atomic_write`), and malformed → `library.json.broken`, exactly as `config::load_from` does. **Smart Views** are `Rule` + `SmartView` + `presets()` + `TrackDb::{views, add_view, remove_view, select}` — see **Library** → *Smart Views*. `snapshot` borrows (`DbFileRef`) because the two directions are not symmetric: `DbFile` owns its keys because deserializing into a long-lived `TrackDb` needs that, and serializing needs only a walk — the owned form meant deep-cloning every `PathBuf` and `TrackInfo` to discover nothing had changed. `equal_databases_serialize_identically` pins the mechanism the throttle rests on: equal content must serialize equal, or the file is rewritten forever and the symptom is a file that looks fine plus a compare that is never equal, which no behavioural test can see.
 - `src/network.rs` — built-in SMB browsing client (pure Rust via `smb2`, no system mount): `smb://host/share/rel/path` URI model (`is_remote`/`split_uri`/`share_uri`/`dir_uri`/`child_uri`), a spool cache (`spool_key` FNV-1a 64 + `cache_path` under `<cache>/tplay/smb/` — extension kept from the URI so rodio can sniff it), `SmbCmd`/`SmbReply` channels, the smb2 ops (`run_list_shares`/`run_list_dir`/`run_spool`), and the `Network` state object owning ALL network state (servers, session passwords, browse position, pending spool, worker channels) with the browse/spool/drain API. Playback is **spool-then-play**: download the whole file to the cache before decoding, so the rodio pipeline never touches the network.
+- `src/ipod/` — copying albums and playlists onto a mass-storage iPod, taking them off again, and mounting and ejecting the device (see **iPod** below). Six modules: `device` (find a mounted one, find an *unmounted* one through udisks, and the key its database is signed with), `db` (the chunk tree, one reader for both `iTunesDB` and `ArtworkDB`), `hash58` (the signature), `artwork` (the pixels and the record naming them), `remove` (the other direction), and `push` (the work, plus `Job` — the one thread and the one busy flag all four directions share).
 - `src/tracks.rs` — **the source-agnostic track surface** (see **Tracks: one surface per source** below). The single place that knows a track can be local or remote, and the only module that touches the filesystem for a track: readers that take a track id and return the *thing* asked for (`open`/`info`/`probe`/`cover`) plus `is_ready` (the pre-buffer predicate), **`write_tags`** (the one *writer*), `normalize` (playlist entry → the id everything stores), `split_for_tags` (batch → the two tag transports, **skipping what the cache already has**), and `TagReader` (owns the local scan receiver and applies remote tag results). The cache test lives inside `split_for_tags` rather than in the caller, and that is the point: the share browser asks for every uncached row *every frame*, so filtering into a `missing` vector first meant a `PathBuf` clone per row per frame before the split even began. One pass, and a remote row costs the one `String` the worker command needs. The local half still clones — it moves into a spawned thread and must be `'static` — which is the floor without changing `scan_files` to take references, which would only move the clone.
 - `src/playlist.rs` — **the playlist's content operations, and nothing else** (egui-free, no state): `sort_tracks` (delegates to `library::sort_key` over the same `SORT_OPTIONS` columns, so the playlist and the file list order alike), `shuffle_tracks` (Fisher-Yates), `dedup` (one-pass, first occurrence wins — `Vec::dedup` is adjacent-only and the repeats that actually arrive come from a loaded file with other entries between them), and the XorShift64 RNG (`rand_u64`/`rand_usize`, moved out of `app.rs` because every draw it serves is a playlist shuffle). Three things are deliberately **not** here, and the split is the point: the **file formats** stay in `library.rs` (`playlist_text`/`read_playlist`/`is_playlist` over `PLAYLIST_EXTENSIONS`), the **state** stays on `TPlayApp` (the list itself plus `playlist_dirty`/`current_index`/`played`, and the `cancel_xf()` a reorder owes a live crossfade), and **shuffle navigation** stays in `app.rs` beside `played` (the peek/commit split is a load-bearing invariant documented there). Same shape as `transition::arm_plan` — the decision is pure and tested alone, the effects stay where the state is.
 - `src/audio/mod.rs` — file-level helpers, no playback logic:
@@ -103,6 +104,7 @@ Desktop audio player. Rust, eframe/egui GUI, rodio playback. Single window. LAN-
 | image (png+jpeg) | decodes album covers (PNG/JPEG, format sniffed from bytes) in the Album Cover pane |
 | resvg (`default-features = false`) | rasterizes the per-theme icon SVGs into egui textures, synchronously at startup / skin switch. The flag is load-bearing: it drops `text` + `system-fonts`, and with them `fontdb` + `rustybuzz` + `ttf-parser`. **No icon SVG contains a glyph of text**, and letting usvg scan system fonts would fight `theme::install_fallback_fonts` over egui's two font families |
 | lofty | audio tag reading for every pane's track display — ID3v2, Vorbis comments, MP4 ilst, RIFF INFO (artist/album/track + duration) |
+| sha1 | the iPod database's HASH58 signature (`ipod/hash58.rs`). **Already in the tree via smb2**, which signs every SMB request with HMAC-SHA1, so declaring it compiles nothing new — same crate, same version. It is a direct dependency only because `ipod` names it |
 | smb2 | built-in SMB client for the Network pane (Phase 2) — `list_shares`/`connect_share`/`list_directory` for browsing, `read_file_pipelined` for spooling, `write_file_pipelined` for saving a playlist to a share. Pure Rust, no external `mount` helper. LAN-only by design — no internet services |
 | tokio (`rt`,`net`,`time`) | async runtime for the smb2 client — a single current-thread runtime owned by the SMB worker thread (one operation at a time, sequential `rx.recv()`) |
 | `log` (`0.4`) | **the facade, and the only route a driver's own diagnostics have to a human.** Already in the tree via eframe → winit, so nothing new compiles. `log` records go nowhere when no logger is installed, and nothing installed one until `src/logging.rs` — which is why a wgpu pipeline failure used to be indistinguishable from a working one. `tracing` is also in the tree but unused; do not reach for it |
@@ -360,7 +362,8 @@ branches on where a track came from**.
 - **Playlist files as rows**: playlist files (see Playlist) are listed interleaved with the songs (`library::is_playlist` widens `list_dir`'s filter, and it matches `.tplay`/`.m3u`/`.m3u8`/`.pls` alike). A playlist row shows its full filename plus a "Playlist" tag right after the name (not floated to the far right), no tag cells and no `+`. Click → confirm (only if the current playlist has unsaved edits) → `load_playlist_from`, dumping the saved tracks into the Playlist pane for editing. Playlists are **not** tag-scanned (`navigate_to`/`library_scanning` exclude them, or "Scanning…" would stick) and **Add All** skips them — a playlist file isn't audio.
 - **Places**: a fixed section above Favorites listing common user folders (`library::quick_folders` — Home + XDG Music/Downloads/Desktop, missing dirs skipped, dupes dropped). It is a free function in `library.rs` because it reads no app state, and the sidebar calls it **directly** — the one thing that used to need a `TPlayApp` delegate over it, which existed only for uniformity. Same row style as favorites without the ✕. (Volumes below does the same with `library::Volume::mounted_volumes`.)
 - **Volumes**: local block partitions from `/proc/self/mounts` (`library::Volume::mounted_volumes`) — pretty disk labels win over UUID mountpoint names; click to jump (same row style as Places, no ✕).
-- **Places and Volumes are read once per session, into egui memory under `LIB_PLACES`** (`SidebarDirs` in `sidebar.rs`). Both are pure functions of the filesystem, which is exactly why they were being re-read: drawing them inline cost `read_to_string("/proc/self/mounts")` plus a `read_dir("/dev/disk/by-label")` plus three `is_dir` probes — about six syscalls *per frame*, 60×/sec, for data that changes about never. A rescan happens on the next launch. The general rule this pins: **a per-frame draw must not call a filesystem reader** unless the answer can change within the session — that is the same reasoning as `is_ready` vs `local_file_in` over on the track side.
+- **Places, Volumes and the iPod are read once per session, into egui memory under `LIB_PLACES`** (`SidebarDirs` in `sidebar.rs`). All are pure functions of the filesystem — or of udisks, for the iPod — which is exactly why they were being re-read: drawing them inline cost `read_to_string("/proc/self/mounts")` plus a `read_dir("/dev/disk/by-label")` plus three `is_dir` probes, and the iPod section adds **three `udisksctl` processes** — about six syscalls *per frame*, 60×/sec, for data that changes about never. **The one exception is a finished iPod job**, which bumps `ipod::Job::epoch` and re-reads: a mount or an eject is exactly the thing in that list that does change mid-session, and a cache that never re-reads leaves the row saying "Mount" to a device that is now mounted. Otherwise a rescan happens on the next launch. The general rule this pins: **a per-frame draw must not call a filesystem reader** unless the answer can change within the session — that is the same reasoning as `is_ready` vs `local_file_in` over on the track side, and the epoch is the escape hatch for the case where the answer *does* change.
+- **Volumes** — `Volume::parse_mounts_with_labels` reads `/proc/self/mounts` (`mounted_volumes` is the real-file wrapper), keeps only `/dev/*` block devices, drops pseudo filesystems (`PSEUDO_FSTYPES`) and boot/ESP mountpoints (`BOOT_MOUNTPOINTS`), and prefers pretty disk labels over UUID mountpoint names — `read_disk_labels` maps `/dev/disk/by-label/` symlinks back to a device basename, so a volume named `LUCAS'S IPO` shows as that rather than `sde1`. **The mount point goes through `unescape_mount`, and that is load-bearing.** The kernel escapes four characters as `\040`, `\011`, `\012` and `\134`, and the escaped text is **not a path**: udisks mounts the iPod at `/run/media/lucas/LUCAS_S IPO` and `/proc/self/mounts` reports `/run/media/lucas/LUCAS_S\040IPO`. Used verbatim, the row draws, it highlights, and clicking it navigates to a directory that does not exist — which is how the whole iPod feature was unreachable until a real device was plugged in and the row was clicked. Pinned by `a_mount_point_with_an_escaped_character_is_a_real_path`, which asserts the decoded path `is_dir()`, plus `every_escape_the_kernel_emits_is_decoded` (all four) and `a_backslash_that_is_not_an_escape_survives` (a `\99` stays a backslash, since decoding it would corrupt the path rather than fix it).
 - **Network**: built-in SMB browsing (no mount). The sidebar's "+" opens a **host-only** add-server form (a bare host **or** a full `smb://host/share[/dir]` URI via `network::parse_server_input`, scheme optional): the host alone is saved and listed, while a named share drops straight into that share via `browse_open` — the GNOME-Files path that skips `list_shares` (IPC$ + srvsvc RPC) entirely, so servers that need it are still reachable. **Credentials are prompted for in the main pane, not the sidebar** (`login_form_ui`, rendered by `remote_list_ui` whenever the error is `LOGON_FAILURE`/`ACCESS_DENIED`), so a saved address is reused as-is and only the login is retyped. The prompt is keyed per host in egui memory (`(NET_LOGIN, host)`) and prefills the saved username; Connect calls `network_mut().add_server` (username is persisted) + `network_mut().set_password` (**password is session-memory only, never written to config**) and then retries **the stage it was on** (`browse_server`, or `browse_open` back into the share/dir) rather than bouncing out to the share list. A **blank username is not a guest account** — most NAS boxes reject it at SessionSetup, which is exactly what the prompt exists for. Cancel returns to the local browser (`leave_network`). Clicking a saved server swaps the main column for `remote_list_ui`: a breadcrumb (Local / host / share / dir segments — Local exits back to the folder browser), a "Connecting…" spinner or an error + hint line, then the **shared file list** — search box, sortable 4-column tag header, and folder/track/playlist rows — over entries whose `path` is each file's `smb://` URI (see **One file list, two sources**). Rows that are neither audio nor a playlist file are not listed, same as a local folder. `.` and `..` are dropped in `run_list_dir` (`network::is_self_or_parent`), because servers routinely include them and they are navigation artifacts, not content: they pass the `is_dir` filter, become real folder rows, inflate the "N folders" count, and produce a URI with a `.` segment the server rejects. This is **not** a hidden-file filter — a real `.config`-style folder stays reachable, because the share browser has no "show hidden" toggle to reveal it with, unlike the local browser's. This is a *different* `.`/`..` from the locally-drawn up-row that `file_list_ui` no longer has. At the share-list stage there is no directory, so the breadcrumb's "Local" plus a flat list of share names is all that's drawn. Add All, the composition counts and the search box all work here too, and add `smb://` URIs to the playlist unchanged. **Tags for a share are downloaded, not guessed** (see **Remote tags** below), so rows start as filenames and fill in — with a live count — as the files arrive. **Exactly one sidebar row is active at a time.** The server row highlights from `browse().host`, but the local rows (Places / Volumes / Favorites) must be gated on `!network_mode` — entering network mode does *not* change the browsed dir, so comparing against it directly left the last local folder lit *alongside* the server. That gate is computed once as `current_local: Option<PathBuf>` and compared by the three local rows. The reverse direction already worked: clicking a local folder calls `leave_network`, so the server row un-highlights. The server form state (`NET_FORM`) and remote browse state (`network::NetworkBrowse`) support the same click navigation as the folder browser. All network state (servers, session passwords, browse position, pending spool, in-flight tags, worker channels) lives in one `network::Network` object; the app exposes it via `TPlayApp::network()`/`network_mut()` and the GUI drives it **directly** — the one-line app wrappers over it (`add_network_server`/`remove_network_server`, `set_network_password`, `fetch_remote_playlist`) are all gone, since persisting `servers` is the config compare's job and not a setter's.
   - **A share row's `path` is a full URI, never a bare name** — the single most bug-prone thing in this pane, and it shipped broken once. `remote_list_ui` builds entries with `path: child_uri(&dir, &e.name)`, so `Act::Nav` arrives carrying `smb://nas/media/music/Rock`. **Split it** (`split_uri` → `browse_open(uri, share, rel)`, a no-op round trip); never feed it to anything that appends a name. Doing that produced a `rel` of `music/smb://nas/media/music/Rock` and a **PATH_NOT_FOUND** from the server. The `child_browse(host, share, rel, name)` helper that invited the mistake — four loosely-typed positional args where a URI in the `name` slot compiles fine and only fails server-side — has been **deleted**; `child_uri(parent, name)` is the only way to build a child URI, and its argument types make the confusion impossible. Guarded by `nav_uri_round_trips_but_renaming_one_does_not`, which asserts both that splitting round-trips exactly and that the wrong construction is detectably different. The one deliberate exception is the share-list stage, whose rows are built from `RemoteEntry::name` and so really are bare names — it is the only place that calls `share_uri` directly, and its variable is named `share_name` for exactly this reason.
 - **Remote tags** — how a share's rows get titles, and why it downloads the files. `ensure_tags` splits its missing set: local paths to the `scan_files` thread, `smb://` URIs to `Network::fetch_tags`, which batches by host (credentials are per-command, so a playlist mixing two NAS boxes must not send one box's password to the other) and sends `SmbCmd::Tags` → `run_tags`. **`run_tags` spools the WHOLE file and reads tags from the cache copy** via `run_spool` + `library::read_info`. That is deliberate, and it replaced a header-prefix read that could not deliver parity:
@@ -394,6 +397,439 @@ branches on where a track came from**.
 - **Per-session init flag**: `tplay.library.init` in egui memory ensures `navigate_to` runs once on the first frame.
 
 ---
+
+## iPod
+
+Copying albums and playlists onto an iPod Classic in disk mode, taking them off
+again, and mounting and ejecting the device. Everything below
+was measured from a real device — see `tests/fixtures/ipod/README.md` — and three
+of the constants contradict the only public description of the format.
+
+### Mounting and ejecting
+
+- **An unmounted iPod cannot be found by looking at its filesystem, and the
+  reason is worth stating before anything else.** `iPod_Control` lives on the
+  filesystem, so a device with nothing mounted has nothing to read — an unmounted
+  FAT stick carries no marker at all. **What knows is udisks**, from the USB
+  product string: `udisksctl status` lists the drive as `Apple iPod` with serial
+  `000A27002158F9D4`, **which is the FireWire GUID**. So the device is
+  identifiable, and keyable, before one byte of its filesystem is readable — no
+  user picker, and nothing to guess about.
+- **`udisksctl` rather than a D-Bus crate**, because `device.rs` already shells
+  out to `udevadm` for the GUID and this is the same shape of answer. No new
+  dependency, and udisks2 is the mechanism the desktop already uses for every
+  other removable disk.
+- **Three calls, because each step needs one thing.** `status` is the only cheap
+  enumeration and it is a plain table; `info -b` is the only flat key/value
+  listing — `dump` carries the same data but spreads a property's value over
+  continuation lines, which is a parser nobody should trust for a device they
+  cannot replace. `udisksctl -p` is **not** used: it wants exactly the object
+  paths `dump` prints, and it rejects them.
+- **The status table is read from the right, not counted from the left.** Three
+  of its four columns are single words; the model is not — the real output spells
+  it `Apple iPod`, and `WDC  WDS100T2B0A-00SM50` puts two words in one field with
+  the column's spacing rather than the text's. Counting four whitespace-separated
+  fields splits the model and **drops the one row that matters most**, which is
+  what the first version did on the real machine.
+- **A blank `MountPoints` means "not mounted",** and that is the answer the whole
+  feature turns on. Reading it as an empty string instead of absent is the one
+  mistake that would mount nothing and report success.
+- **Eject is unmount *and* power-off, in one button.** An unmount alone leaves
+  the drive spinning up, and pulling the cable then is what corrupts a FAT volume.
+  The second half only means anything after the first, which is why they are one
+  action rather than two. A drive that will not power off is **reported, not
+  swallowed** — the user has to know the cable is not yet safe.
+- **Both run on `Job`, and both need no `Device`** — one is what makes a device
+  and the other is what unmakes it, so `spawn`'s "find a mounted device first"
+  could not start either. `claim` returns two levels for that: `None` is
+  "refused, reason recorded", `Some(None)` is "accepted, but no mounted device".
+  Their outcome is `Outcome::Note`, a sentence rather than a payload, because
+  they report a fact and nothing downstream reads their numbers.
+- **The sidebar gets its own section, and the iPod leaves Volumes.** It was
+  *already* in Volumes and needed no work to appear there, which is exactly why
+  it belonged nowhere in it: that row offered no way to mount an unmounted
+  device and no way to eject a mounted one. Showing it in both would give one
+  device two sets of affordances and no way to say which is current.
+- **`SidebarDirs` is cached for the session, and a job's epoch is what re-reads
+  it.** That cache is six syscalls and three subprocesses per frame if drawn
+  inline, and the lists in it change about never — but a mount or an eject is
+  exactly the thing that does change mid-session, so a cache that never
+  re-reads leaves the row saying "Mount" to a device that is now mounted: a
+  button that does the wrong thing rather than one that does nothing. The epoch
+  moves on **both** endings, including a thread that died, because a job that
+  failed after half-changing the outside world still changed it.
+- **Not covered: `Apple MP3 Player`.** The model match is on `iPod` as a
+  substring, which catches `Apple iPod`, `Apple iPod Nano` and `Apple iPod
+  Shuffle` but not the pre-2004 devices that report as MP3 players. That is a
+  deliberate miss rather than an oversight: those are FAT16-era hardware this
+  app cannot copy to anyway.
+
+### The database
+
+- **The device does not read a folder.** `iPod_Control/iTunes/iTunesDB` is a tree
+  of length-prefixed binary chunks, and the firmware **never rebuilds it**. A
+  file copied into `iPod_Control/Music/F00/` is one the device will never notice,
+  so every tool that appears to add music — gtkpod, MediaMonkey, PodCenter —
+  rebuilds the database on the *computer* and writes it back. A sync here is a
+  file copy plus a database write, in that order: a file with no row is
+  invisible and harmless, a row naming a file that is not there is a track that
+  appears in a menu and will not play.
+
+- **It is not SQLite.** `iTunesDB` begins `mhbd`. The iOS-family devices use a
+  SQLite library in `iTunes Library.itlp/` and most tooling written about the
+  format targets one of those; a SQLite reader opens this file, fails on the
+  first query, and says nothing about the real cause. `db.rs` is a byte-level
+  reader and writer over `Chunk { ident, header, children, trailer }`, where the
+  tree is **owned rather than patched in place** because a new `mhit` grows its
+  `mhlt`, which grows its `mhsd`, which grows `mhbd`, and a resize invalidates an
+  offset held three frames deep. Owning the tree makes every length a function
+  of its children. What it does not understand is kept verbatim, so
+  `a_round_trip_returns_the_input_unchanged` can hold over the real 1.9 MB
+  fixture — that property is what stops this module silently rewriting a field
+  from a future iTunes.
+
+- **Three chunks count their children where the rest measure their length.**
+  `mhlt`, `mhla` and `mhlp` put a child *count* at offset 8, so their extent is
+  their parent's and every other chunk's is its own. Parse a count chunk by its
+  total and you read a plausible number of songs that has nothing to do with the
+  number of songs. The list holders under one `mhbd` are told apart by a type
+  number, never by position: albums (4), tracks (1), podcasts (3), playlists (2),
+  new playlists (5).
+
+- **hash58 is the part that has to be right, and it has a real oracle.** The
+  signature is an HMAC-SHA1 over the whole file keyed from the device's FireWire
+  GUID, stored at `mhbd` offset `0x58`, with the `db_id` at `0x18`, twenty bytes
+  at `0x32` and the signature itself zeroed, and the scheme byte at `0x30` set to
+  `1`. A wrong signature has exactly one symptom: **the device shows no music at
+  all**, the files are still on the disk, and nothing logs anything.
+  `hash58_reproduces_a_real_devices_signature` computes the HMAC over the
+  committed fixture with a key the code did not have and gets back the twenty
+  bytes the device stored — which a sign-then-verify round trip cannot do, since
+  that passes for any self-consistent algorithm. The two AES S-boxes are
+  **computed** rather than pasted, and `sbox_agrees_with_the_published_table`
+  pins the computation; 512 bytes of copied table is a reader's faith, not a
+  check. `sign` refuses a scheme it cannot write rather than converting a
+  `hashAB` device's database, because the refusal happens here and not on the
+  device where the symptom is "no music".
+
+- **The FireWire GUID is the USB serial, and `SysInfo` usually does not have it.**
+  The file that normally carries it, `iPod_Control/Device/SysInfo`, is **0 bytes
+  on the device this was written against** — and on every device that has never
+  been synced by iTunes, which on Linux is the common case rather than the exotic
+  one. So `device::guid_at` reads `SysInfo` and falls back to `udevadm info -q
+  property`, which reports it as `ID_SERIAL_SHORT`. The fixture keeps an empty
+  `SysInfo` for the same reason: so the fallback stays exercised against the one
+  device available. A reader that only looks in `SysInfo` cannot sign anything,
+  and the failure it produces names the wrong thing.
+
+- **The album link is at `mhit` offset 288, not 314.** The published table puts
+  `AlbumID` at 314; on this database that offset names no album for **any** of
+  its 1169 tracks, while 288 matches 1165 of them. `mhit` is also `0x270` (624)
+  bytes here against the `0x184` the table gives for iTunes 7.1, so fields past
+  roughly `0x100` have moved. A writer built from the table parses, signs, and
+  groups the track under no album.
+
+- **The packed file type at offset 24 is the readable name spelled backwards.**
+  `M4A ` is stored as the bytes `20 41 34 4D`. Read it forwards and every
+  template lookup comes back empty.
+
+- **Every record is cloned, never constructed.** The `mhit` header is 624 bytes
+  and the push sets about sixteen; the rest hold constants that vary by format,
+  by iTunes version, and by fields nobody has documented (`type1`/`type2` differ
+  between CBR and VBR MP3, `unk9` is `0xFFFF` for compressed audio, plus two more
+  8-byte fields of unknown derivation). So `template_for` finds a track already
+  on the device with the file type being added and the new record starts as a
+  copy of it: the unknown fields keep values a real iTunes wrote for a real file
+  of that type, and the code only has to be right about the fields it can name.
+  **A device with no track of the type being added is refused** rather than
+  guessed at, because there is no template and the format-specific constants are
+  exactly the part nobody can reconstruct.
+
+- **The album list is the one place with no precedent to copy.** A new album's
+  `mhia` carries three varying words that are almost certainly iTunes' content
+  hashes (a 4, a 4 and an 8, checked against MD5, SHA-1 and several prefixed
+  variants of the name — none). They are written as zero. The firmware cannot
+  check them: it has no key for them, and the key it would need is absent from
+  the device's empty `SysInfo`. So nothing outside iTunes can produce them and
+  nothing in the device can verify them.
+
+- **The `Fxx` folder does not need the rule.** iTunes distributes across fifty
+  folders with a hash that is not derivable from this database (checked against
+  `g_str_hash`, FNV-1a and CRC32 over three spellings of the path — all at
+  chance). It does not matter: the `mhod` type 2 location string is what the
+  device follows, so the folder here is `track_id % 50`, which spreads the same
+  way for the same reason a directory holding every track eventually runs out of
+  FAT32 entries. The four-letter filename comes from the track id rather than a
+  random draw, so a re-run writes the same name.
+
+- **Pushing the same songs twice adds nothing**, and it is the *whole* record
+  that is matched, not the filename. Before, every `add_track` allocated a fresh
+  track id, copied the file under a new four-letter name and added a second
+  `mhit` — so a second press of "To iPod" **doubled the device** and a third
+  tripled it. `Push::present` maps song identity to track id, built from the
+  device's own records at `open()`, and a hit returns **that id** rather than
+  refusing: a user whose songs are all on the iPod and who wants them as a
+  playlist has no other way to get one, so `push_playlist` still gets the ids
+  its playlist needs.
+  - **The identity is title + artist + album + file type, lower-cased**, and
+    **not the bytes**. A byte hash would survive a tag edit and costs reading
+    every audio file on the device — gigabytes on a full library. A byte *size*
+    is free and is **not an identity**: two CBR MP3s of the same duration are the
+    same size to the byte, so a fourteen-track album would come back as one song
+    fourteen times over. Tags are what a person means by "the same song", cost
+    nothing to read, and have no false positives.
+  - **What that gives up, stated plainly: a tag edit and a second push makes a
+    second copy.** That is the deliberate direction to fail in — a duplicate is
+    visible and removable, and the alternative is silently not putting a song on
+    the device at all. A push that *updated* the existing record is the follow-up
+    that needs a deliberate "replace" action; it is not something to infer from a
+    second "To iPod". `a_tag_edit_makes_a_second_copy_rather_than_silently_skipping`.
+  - **One `identity` function, because the first version had two and they
+    disagreed**: the side read off the device skipped the normalisation, so
+    **every accented song failed to match itself**. Same shape as
+    `remove::same_location` — two sides of one comparison need one rule.
+  - **Hidden records are not matched** (`M_VISIBLE` must be 1). A row the device
+    will not show is not one the user can see duplicated, so skipping it would
+    lose the song rather than avoid a copy.
+  - **The result line reads as success when nothing was copied**, because that is
+    what it means: `"0 on the iPod, 14 already there"` is a true sentence and a
+    useless one, and pressing the button twice is the *expected* path.
+
+- **Only MP3 and M4A are accepted, and the refusal names the file.** A 7G plays
+  neither FLAC, nor OGG, nor WAV. `push_album` reports them in
+  `Summary::refused` and copies the rest. **No transcoder**: that is a
+  dependency, a licensing question, and a second thing that can fail, for files
+  the device would refuse anyway.
+
+- **Every track needs an entry in the Library playlist** — the master `mhyp` —
+  or it is in the database and in no playlist, and nothing on the device can
+  reach it. `link_into_library` also recomputes that playlist's two header
+  counts, which unlike the lengths in the tree are not derived.
+
+- **`mhod` position is `1`, never `0`.** With a zero the track still lists in the
+  menus and the device refuses to play it. Every string in the fixture has it.
+
+- **A backup is kept, but never on the device.** `commit` copies the previous
+  database to `<cache>/tplay/ipod/<guid-hex>/iTunesDB`, and the artwork stores
+  take the same road — **not** a `.bak` beside each original, which is the
+  conventional place and is exactly wrong here. Three reasons, in order of how
+  much they hurt: the device is the object that gets unplugged and put in a
+  drawer, so a safety net stored on it is one nobody finds when they need it; it
+  is FAT, so every copy is a full 1.9 MB rewrite rather than a rename; and it is
+  visible clutter the user is expected to tidy up, which trains the eye to ignore
+  the next one. The artwork stores made it worst — **20 MB of backups, once per
+  new cover**.
+  - **The fix is in `commit`, not in the removal**, so it covers both directions
+    at once; `nothing_is_left_on_the_device_and_the_backup_is_reachable` walks
+    the mount point for a `.bak` after a push *and* a removal, and separately
+    asserts the copy is off the device and still verifies against the GUID.
+  - **Keyed on the FireWire GUID, not the volume label.** The label is what a user
+    changes and it is not unique, so a rename would orphan a backup and two
+    same-named volumes would overwrite each other's. **One file per device,
+    overwritten** — the backup is the state before the *last* write, which is what
+    undoes the thing the user just did. A history here is a separate decision.
+  - **`Device` carries `backups` as a field rather than taking it as an
+    argument**, because four functions commit a file and none should be able to
+    forget where the safety net goes — and because a test then *cannot* write into
+    the developer's real cache. There is no constructor that leaves it unset, which
+    is the same rule `library_db::TrackDb::at` follows for `library.json`. The
+    fixture's GUID is a fixed constant shared by every suite, so an uninjected
+    path would be both a write into the user's cache and a collision between them.
+
+- **A commit backs up before it writes, and checks the signature first.** The
+  database is the only thing standing between a device's library and a device
+  that shows none of it, so `commit` copies the old one aside, verifies the
+  finished bytes against the GUID (a rejected file looks exactly like a successful
+  push until the user looks at the iPod), and writes through
+  `config::atomic_write_bytes` — the bytes twin of the text-only `atomic_write`,
+  because a truncated `iTunesDB` is a file neither the device nor the player can
+  recover. **Nothing deletes files or rewrites `Play Counts`**, so a push is
+  additive and the play counts the device recorded survive it.
+
+- **The UI is two text buttons and no new icon.** `ipod_button` in
+  `gui/panes/mod.rs` sits beside "Add All" in the Library header and in the
+  Playlist toolbar's right-to-left group. It is text for the reason "Add All" is:
+  a new icon is four theme files, a `recolor_icons.py` row and an `Icon::DATA`
+  append. **The caller builds the track list, not the helper** — walking it every
+  frame to hand a `Vec<PathBuf>` to a dialog that may never open is the
+  `file_list_ui` defect, whose symptom was the whole application feeling slow.
+  A new `ConfirmAction::PushToIpod` arm holds the tracks in egui memory because
+  the Library can be navigated while the modal waits. `Job` runs the copy on a
+  thread in `TagReader`'s shape and `update` drains it.
+
+- **Not covered: iPod touch, iPhone, Nano 6G and later.** They are not mass
+  storage, their library is a signed SQLite database rather than this tree, and
+  the signature is `hashAB` — a white-box AES blob with no published
+  description. `sign` refuses rather than guessing.
+
+### Album art
+
+- **`ArtworkDB` is the same chunk tree under an `mhfd` root**, so `db::parse`
+  takes both magics rather than there being a second reader. **The grammar has
+  two more count-chunks**, `mhli` (the image list) and `mhlf` (the file list),
+  and the tell is arithmetic rather than a name: **a chunk's length is at least
+  its own header**, so a smaller number at offset 8 can only be a count. `mhli`
+  claims 84 against a 92-byte header, `mhlf` claims 3 against the same.
+
+- **A chunk's children are a table, not a guess.** `db::children_of` says which
+  idents may be a given chunk's children, because a leaf's bytes after its header
+  are arbitrary: an artwork `mhod`'s payload begins with the letters `mhaf`, and
+  a parser that walked greedily on "lowercase ASCII" marched into it and refused
+  the whole file. That is the right failure *once* something has gone wrong and
+  the wrong one to depend on.
+
+- **Where the picture lives: three `.ithmb` stores and a record.** Not one file.
+  `iPod_Control/Artwork/` holds `ArtworkDB` plus `F1055_1.ithmb`, `F1060_1.ithmb`
+  and `F1061_1.ithmb`. **All three hold the same images in the same order**, so
+  record *N* is slot *N* in every file and a new image is an append — verified by
+  decoding slot 0 of two stores and seeing the same cover.
+
+- **The pixel format was established by decoding and looking, not from a
+  table.** Slot 0 was rendered as a PNG under each candidate layout and only one
+  was a photograph: **RGB565, little-endian**. The three geometries divide out of
+  the real file lengths exactly (2 752 512 / 84, 17 203 200 / 84, 517 440 / 84),
+  and the third only resolves once its padding is accounted for — **55×55 with a
+  stride of 56**, a zeroed column per row, which a width of 56 turns into
+  horizontal streaks. `artwork::FORMATS` carries all of it and
+  `every_store_geometry_divides_out_of_a_real_file` derives each figure from the
+  measured length rather than copying the constant.
+
+- **`ArtworkDB` is not signed.** It declares hashing scheme `1` at offset `0x30`
+  and carries **twenty zero bytes** where `iTunesDB` carries its signature. So
+  `hash58::sign` is only ever applied to the track database, and adding artwork
+  needs no key.
+
+- **The link is `mhit` offset 352**, holding the artwork image id: it repeats
+  across an album's tracks, matches the `mhii` ids, and 170 of the fixture's 1169
+  tracks carry zero. `mhit` offset 164 is `has_artwork`, where **2 means "none"**
+  and 1 means "there is some" — so a track given no picture must say 2, and the
+  other way round is the device showing an empty frame.
+
+- **Records are cloned, and two fields inside are not understood.** An `mhii`
+  holds three store `mhod`s and one type-6 `mhod` that is zero in all 84 records
+  of a real device. In the type-2 payload, one field is the image size (verified
+  against every file length) and the other is **not understood**: constant per
+  store for two of the three and varying for the third, and not a CRC or an Adler
+  of the pixels. `artwork::add_image` copies a whole existing record and changes
+  only the identity, so those fields keep values the device wrote for a real
+  image. **A device with no artwork is refused rather than guessed at** — there is
+  no record to copy and the layout is undocumented. So is a store whose format
+  code is not in `FORMATS`, and a store whose length is not a whole number of
+  slots.
+
+- **One picture per cover, not per track.** `Push::covers` maps a hash of the
+  cover bytes to the image id it produced, so an album's twelve tracks add one
+  image. The cover comes from `tracks::cover`, the same call the Album Cover pane
+  makes, so no album grouping is needed and a playlist spanning four albums gets
+  each track's own.
+
+- **Nothing commits a store before every byte is computed.** Each store's length
+  is checked against `slot * format.byte_len()` while the original is untouched,
+  the finished `ArtworkDB` is re-parsed, and only then are the files backed up
+  (**into the cache directory, not beside themselves** — see the backup rule
+  above; the stores are 20 MB between them, so this is where it mattered most)
+  and written through `config::atomic_write_bytes`. **A push that fails after the
+  pixels land leaves a picture on the device that no track points at**, which the
+  firmware ignores — the opposite order would leave a track naming an image that
+  is not there.
+
+### Removal
+
+- **A track is four things, and the file is the easy one:** the audio file under
+  `iPod_Control/Music/Fnn/`, its `mhit` in the track list, its `mhip` in
+  **every** playlist that lists it, and the `mhia` once nothing else in that
+  album is left. Dropping only the record leaves the device showing a track in
+  three menus that plays nothing; dropping only the file leaves a row that
+  cannot play. `remove::Removed` counts all four so the pane can say what went.
+
+- **`mhip` offset 24 is the reference to the track it plays**, and that is how
+  the playlist sweep finds them. It was read off one record while writing this;
+  `every_playlist_entry_names_a_track_that_exists` is what turns it into a fact
+  about all 2338 entries of the fixture, and a device laying `mhip` out
+  differently would fail there rather than silently leave every playlist
+  pointing at a deleted track.
+
+- **A file is matched to its record by the location string** — the `mhod` at
+  field 2, `:iPod_Control:Music:F07:ABCD.mp3` — and **not** by filename, because
+  a file copied in by hand has no record at all and a filename match would delete
+  a file the database still lists. The separator is tolerated either way
+  (`:` is what iTunes writes, `/` what other tools do) and the comparison is
+  case-insensitive, because FAT is and the two sides disagree about it.
+
+- **A path that is not under the device root is refused**, before anything is
+  opened and before any unlink. The first version of this had that check
+  *branch into the unlink* rather than out of it, which meant a caller that
+  passed the wrong path deleted a file it was never asked about — the worst thing
+  in the module, and the reason the arm is worded the way it is.
+  `a_path_off_the_device_is_refused_and_left_alone` is behavioural on purpose: a
+  text check on the order of two strings passed when the guard was replaced by
+  `if false`, because a text check cannot see dead code.
+
+- **An album is dropped only when the removed track was its last**, computed
+  before the album list is borrowed. Both halves are tested, because the first
+  ("leave a shared album alone") is the mistake the second invites.
+
+- **The database is written before the file is unlinked**, because `commit`
+  leaves the previous one in the cache directory and the file is the only part
+  here that cannot be got back.
+
+- **Artwork is deliberately left alone.** Record *N* is slot *N* in each of the
+  three `.ithmb` stores, so removing a record would renumber every record after
+  it and put the wrong cover on every image added later. The bytes stay, the
+  record stays, nothing points at them. Reclaiming the space is a whole-device
+  rewrite rather than a per-track edit, and it is the only thing that can free it
+  safely — pinned by
+  `removing_a_track_leaves_the_artwork_records_alone`.
+
+- **`remove_paths` is the one entry point, it removes **exactly the files it is
+  handed**, and it does so in **one** database write.** The batching is the point
+  rather than an optimisation: each `commit` re-serialises, signs, backs up and
+  renames a whole 1.9 MB database, so "call it per track" cost a megabyte and a
+  half per track — over **two gigabytes of writes** for a real 1169-track
+  library, and a per-track backup that is the same file overwritten 1169 times,
+  so a failure halfway through loses 1168 removals' worth of work. The whole set
+  is therefore edited in one pass and written once.
+  `a_recursive_removal_reaches_every_depth_in_one_write` pins it by reading the
+  backup: it holds **every** track, where a per-track loop would leave only the
+  last track's worth. That also retired the old routing (one file / one folder /
+  refuse two folders) — there is no longer a directory that can be widened out
+  from under the caller, so a caller that hands over a whole `Music/` walk gets
+  the whole library *because it asked for it*.
+
+- **The recursion lives in `audio_files_under`, and it is a walk of the
+  *filesystem*, not of the database.** That is what makes it safe, and it is the
+  half that is easy to get wrong: it returns exactly the files that exist, so a
+  record whose file is missing is simply not in the batch — the app cannot unlink
+  what it cannot see, and the rest of the removal still happens. It uses
+  `DirEntry::file_type`, not `Path::is_dir`: the latter follows symlinks, so a
+  loop inside a music folder would hang the walk forever, and a symlinked folder
+  is skipped — which is also the honest answer, since its tracks live wherever
+  the link names. It collects **only playable files**, so a playlist, a `.jpg` or
+  a `.flac` sitting in a music folder survives.
+
+- **The header button is recursive because the browsed folder is not always an
+  album.** `iPod_Control/Music` holds fifty `Fnn` folders and no files at all, so
+  the one-level walk this replaced found **zero** tracks and the button silently
+  did nothing — which is what a user reports as "it doesn't work". The same walk
+  now feeds **both** directions, so "To iPod" no longer copies nothing from a
+  folder of album folders either.
+
+- **An empty batch writes nothing.** The header arms this from a walk that found
+  nothing, and re-serialising 1.9 MB to learn there was no work is the kind of
+  cost nobody notices until it is on a FAT device.
+
+- **The UI is one button that changes its verb, and one row button that changes
+  its glyph.** `IpodDirection` picks "To iPod" or "From iPod" from
+  `browsing_device` — an ancestor holding `iPod_Control`, which is a path walk
+  rather than `device::find()` (that reads `/proc/self/mounts` and runs on every
+  frame of the pane). The row's `+` becomes `✕` on a device folder, reusing the
+  Playlist pane's own spelling of the same verb rather than adding a second button
+  to a row whose width is already accounted for. **Which browser is drawing the
+  list is one `Source` enum, not two `bool`s** — a share row is never a device's
+  own file, so `true, true` is a combination no caller means and no reader would
+  believe. `the_remove_button_is_reachable_only_from_a_device_folder` reads the
+  source, because "the share browser names `Remove` as unreachable" is a claim
+  about a match arm that no runtime measurement can see.
 
 ## Themes (data-driven, dark / retro / neon / winamp)
 
@@ -729,10 +1165,11 @@ and per-track EQ are still to-do and live under *Future milestones* → **Deferr
 - **Every state change is a record, and stderr is the only destination.** There is no log file and no log pane: a `.desktop` launch writes into the systemd journal, so `journalctl -f tplay` reads the whole session. Where stderr goes nowhere, the log goes nowhere — accepted, and the reason there is no `~/.config/tplay/tplay.log`.
 - **The sink is `src/logging.rs`, and the `log` facade is the load-bearing half.** Nothing in the app or its dependencies installed a logger, and `log` records are dropped when nobody does, so every driver diagnostic was being discarded. That is the root cause of the "a broken shader and a working one both render as the background" class, not a missing `eprintln!`.
 - **Level means consequence, and the rule is two sentences:** `Error` — the user asked for something and did not get it (a malformed `config.json`, a failed playlist write, a refused tag edit). `Warn` — degraded, but the app continues (a decode or seek error on one track, unreadable remote tags, a spool failure, a skipped theme). `Info` — a state change.
-- **What is recorded:** playback (`start_track`, the transport, `seek` with which path it took, the crossfade arm and its cancel, the playlist index a track started at); playlist (add, reorder, new, load, save, tag edit); persistence (each real `config.json` and `library.json` write); network (share and directory listings, spool, playlist fetch, save, tag batches, saved servers); and the theme switch and each pane open/close.
+- **What is recorded:** playback (`start_track`, the transport, `seek` with which path it took, the crossfade arm and its cancel, the playlist index a track started at); playlist (add, reorder, new, load, save, tag edit); persistence (each real `config.json` and `library.json` write); network (share and directory listings, spool, playlist fetch, save, tag batches, saved servers); iPod (each database write, each removal with what it took — tracks, files, playlist entries, albums — and each artwork push); and the theme switch and each pane open/close.
+- **A removal needs its own record, because the one `commit` emits cannot tell the two directions apart.** `commit` logs the file it wrote and its size, and a push and a removal produce a **byte-for-byte identical** line from it: on the user's only music device, "took 1 track off" and "wiped the library" read the same. So `remove::remove_paths` records its own outcome, **once per removal and not once per track** — a thousand-track removal must not be a thousand lines — and **after** the commit, so a failure before it leaves no line claiming work that did not land. The two degraded cases are `Warn`: a file that could not be unlinked, and a file with no record to remove (hand-copied in, or left by a half-finished sync — it still goes). `a_removal_is_recorded_once_and_names_what_it_took` reads the source, because a record is only observable through the facade and installing a capturing sink in a suite would fight the one `log::set_logger` in the process.
 - **What is deliberately not recorded: any per-frame value.** The volume slider, the ten EQ sliders and the balance slider fire `changed()` on *every frame* of a drag, so a record there is 60 lines a second and nobody reads the log that follows. The one config record that does exist is safe for a different reason: `flush_config` only logs **after** the content compare has decided a write is real, so the existing 0.5 s debounce bounds it.
 - **`fetch_tags` records inside the loop that finds work, never at the top of the function.** The share browser re-asks for every uncached track every frame, so a record above the filters would print 60 lines a second for a call that found nothing.
-- **One place per event, not one per caller.** `playlist_reordered` covers sort, reverse, randomize, a drag and a remove; `start` covers Play, Next, Prev, a row click and a natural advance; `apply_playlist` covers every load path including a Smart View. The transport button that caused an event is a record of its own, so the sequence reads.
+- **One place per event, not one per caller.** `playlist_reordered` covers sort, reverse, randomize, a drag and a remove; `start` covers Play, Next, Prev, a row click and a natural advance; `apply_playlist` covers every load path including a Smart View; `remove_paths` covers the row's `✕` and the header's button, which is the same reason — the two are one event. The transport button that caused an event is a record of its own, so the sequence reads.
 
 ---
 
@@ -880,15 +1317,35 @@ and per-track EQ are still to-do and live under *Future milestones* → **Deferr
 | `MAX_CROSSFADE_SECS` | config.rs | `10.0` — longest crossfade the UI offers (the ☰ slider's range) and what a hand-edited larger `crossfade_secs` is clamped to on load by `Prefs::from_config` |
 | `spool_key` / `cache_path` | network.rs | FNV-1a 64 hex key + cache path for a `smb://` URI (`<cache>/tplay/smb/<key>.<ext>`) — so the **stem** is the identity, never the filename |
 | `select_evictions` / `evict_unplayed_in` | network.rs | the eviction policy (pure) and the wiring that actually unlinks, over an injectable dir so the two halves are separately testable |
+| `COUNTS_CHILDREN` / `id::MHBD` | ipod/db.rs | the five chunks that store a **child count** where every other chunk stores a total, and the file's first four bytes (`mhfd` for the artwork database, which is the same grammar). `mhlt`/`mhla`/`mhlp`/`mhli`/`mhlf`, and the tell is arithmetic: a chunk's length is at least its own header, so a smaller number in offset 8 can only be a count |
+| `M_ALBUM` = 288 | ipod/push.rs | the `mhit` offset holding the album id. **Not 314**, where the published table puts it — that offset matches no album for any of the fixture's 1169 tracks. Pinned by `the_album_link_is_not_where_the_published_table_says` |
+| `KINDS` | ipod/push.rs | the two file types a 7G plays, **each holding its packed code reversed** (`" 3PM"` is `MP3 `) because `mhit` offset 24 stores the readable name backwards |
+| `H_TRACK` = 24 | ipod/remove.rs | `mhip`'s reference to the track it plays — how a removal finds every playlist entry naming it. Read off one record; `every_playlist_entry_names_a_track_that_exists` is what makes it a fact about all 2338 |
+| `A_ID` = 16 | ipod/remove.rs | `mhia`'s album id in its own header. **Not 20**, which is `M_ALBUM`'s offset in an `mhit` — the two records agree about what an album is and disagree about where to read it |
+| `PLAYLIST_KINDS` | ipod/remove.rs | the three list-holder kinds a track can appear in (playlists, podcasts, new playlists). The sweep is over kinds, not over "the" playlist list, because the device ships all three |
+| `OFFSET_HASH58` / `OFFSET_SCHEME` | ipod/hash58.rs | `0x58` where the 20-byte signature lives and `0x30` where the device reads which scheme signed the file. The second is a refusal, not a constant: `1` is HASH58 and anything else is a device this cannot write |
+| `ipod_button` / `IpodDirection` | gui/panes/mod.rs | the iPod button plus the line that reports what it did, shared by the Library header and the Playlist toolbar. **One button, two verbs** — `Remove` browsing the device's own folder, `Add` anywhere else. It returns whether it was clicked rather than taking the track list, so neither caller walks its list for a dialog that may never open |
+| `Source` | gui/panes/library/listing.rs | `Local` / `Share` / `Device` — which browser is drawing the shared file list. One enum rather than two `bool`s: a share row is never a device's own file, and it is what makes the row's `✕` and the share browser's unreachable `Act::Remove` arm type-checkable rather than commented |
+| `browsing_device` | gui/panes/library/listing.rs | is the browsed folder **on** an iPod. An ancestor holding `iPod_Control`, so it is a path walk and not `device::find()` — which reads `/proc/self/mounts`, and this runs every frame |
+| `children_of` | ipod/db.rs | which chunks may be a given chunk's children. Load-bearing rather than a nicety: a leaf's bytes after its header are arbitrary, and an artwork `mhod` payload begins with the letters `mhaf` — walking greedily on "lowercase ASCII" marched into it and refused the whole file |
+| `Removed` / `remove_paths` | ipod/remove.rs | what a removal took off, and the one entry point both callers use. The **batching** is the load-bearing part: every file handed over is edited into the database in one pass and written once, because each `commit` is a whole 1.9 MB re-serialise |
+| `audio_files_under` | ipod/remove.rs | every playable file under a folder, at any depth — the recursion, and the count the confirm dialog shows. Walks the **filesystem**, so a record whose file is missing is not in the batch; `DirEntry::file_type` rather than `Path::is_dir` so a symlink loop cannot hang it |
+| `Device::backups` / `backup_of` | ipod/device.rs | where a device's backups go: `<root>/<guid-hex>/<file name>`, off the device. A **field** rather than an argument so no `commit` can forget it and no test can reach the real cache — the same rule `TrackDb::at` follows for `library.json` |
+| `Job::epoch` | ipod/push.rs | bumped whenever a job **finishes**, either way. The Library sidebar's `SidebarDirs` cache is keyed on it, because a mount or an eject is the one entry in that list that changes mid-session — see **iPod** → *Mounting and ejecting* |
+| `parse_status` / `property` / `partition_device` | ipod/device.rs | the three pure parsers over `udisksctl` output, which is all of this feature's logic that can be tested without a device. **The columns are read from the right**, because the model contains spaces and counting fields from the left drops the iPod row |
+| `identity` / `Push::present` | ipod/push.rs | what "the same song" means to a push — title, artist, album and file type, lower-cased — and the track id each one already has on the device. **One function for both sides**; the first version had two and the device side skipped the normalisation |
 
 ---
 
 ## Test conventions
 
 - **All tests live in `tests/`** — no `#[cfg(test)]` modules in src, and `tests/no_inline_tests.rs` fails the build if one appears (it walks `src/`, skipping comment lines so a doc comment may still *mention* `#[test]`). The reason is not tidiness: cargo compiles an inline module into **both** the `lib` and the `main` unit-test binaries, so `src/audio/viz.rs`'s 8 tests ran **twice** under two unnameable targets and could not be run or filtered as a suite. Moving them to `tests/viz_tests.rs` made them run once, as a target you can name. Cargo auto-discovers each `tests/<suite>.rs` as its own binary, so every suite runs exactly once (`tests/main.rs` was removed — it re-declared the suites and doubled every run). A private helper is reachable from a suite by making it `pub` — the only reason `audio::viz::fft_magnitude` is public.
-- `tests/common.rs` helpers: `temp_dir()`, `test_dir(name)`, `write_wav(path)` (1s 8kHz mono PCM), `write_aiff(path, title, artist)`, `write_minimal_flac(path)` (headers only), `write_tagged_mp3(path, title, artist, album)` (a real ~125 KB MP3 with real ID3v2 tags), `assert_duration_approx`, `lay_out::<T>(tree)` (the egui_dock finite-viewport fix, shared by `dock_layout.rs` and `layout_save_load.rs`), and the `TestApp` harness — `new`, `pump`, `pump_until_empty`, `pump_during(f)` (the one that moves the `MixerSource` into a scoped thread so the mixer runs while `f` blocks, which is how the blocking `try_seek` is serviced in a test).
+- `tests/common.rs` helpers: `temp_dir()`, `test_dir(name)`, `write_wav(path)` (1s 8kHz mono PCM), `write_aiff(path, title, artist)`, `write_minimal_flac(path)` (headers only), `write_tagged_mp3(path, title, artist, album)` (a real ~125 KB MP3 with real ID3v2 tags, **UTF-16BE frames — see below**), `assert_duration_approx`, `lay_out::<T>(tree)` (the egui_dock finite-viewport fix, shared by `dock_layout.rs` and `layout_save_load.rs`), and the `TestApp` harness — `new`, `pump`, `pump_until_empty`, `pump_during(f)` (the one that moves the `MixerSource` into a scoped thread so the mixer runs while `f` blocks, which is how the blocking `try_seek` is serviced in a test).
+  - **`write_tagged_mp3` writes UTF-16BE frames, and it used to write ISO-8859-1 frames carrying UTF-8 bytes** — so `ç` came back as `Ã§` and a hyphen U+2010 could not be written at all. **Nothing failed for years, because every title in the suite was ASCII, which is the one text where the two encodings agree byte for byte.** A helper that cannot express a case is a case no test can cover, and it hid a real bug: the iPod push's duplicate detection compared the two halves of one identity with different normalisation, so **every accented song failed to match itself** — and the device this app was written against has `Renascença` as its first track. `a_generated_mp3_carries_its_accented_title` is the test that says so.
 - **`tests/fixtures/` — eight committed real audio files, one per format, and the only fixtures that are not hand-built.** `tests/common.rs` builds its own because nothing in the dependency tree can *encode* audio, which is a fact about the crates and not a reason to ship a synthetic file when a real one exists: a 1 s tone says a decoder opened the file, and nothing about where that format keeps its tag block or whether its declared duration survives a round trip. All eight are one 12.27 s / 44.1 kHz recording in eight containers (CC0, from `audiojs/audio-lena`, which is freesound #246148 by *heshamwhite* — `tests/fixtures/README.md` and `CREDITS` have the provenance), so a duration assertion means the same thing in each and the four tagged formats put their tags in **four different containers' worth of places** — a native `VORBIS_COMMENT` block, a Vorbis comment packet, ID3v2, and a `LIST`/`INFO` chunk. They close three real gaps: **FLAC had no audio at all** (`write_minimal_flac` is headers only) and **OGG and M4A had no fixture whatsoever**. `common.rs` is unchanged and still load-bearing — `write_aiff` in particular must stay hand-built, because `symphonia_misreads_the_aiff_sample_rate` is a tripwire whose premise is a provably correct 8000 Hz rate. **Do not regenerate them:** `ffmpeg` is not a build dependency and the suite is hermetic. 13 of the upstream project's 21 files are deliberately absent (10 MB with no demuxer in this stack) — add one only alongside a test that needs it.
-- Test isolation: each test makes its own temp dir under `/tmp/tplay-test-<pid>/<name>/` and removes it. `audio_fixtures.rs` is the one suite that reads a path it did not create (`CARGO_MANIFEST_DIR`-relative, since cargo promises no working directory) and so writes nothing.
+- **`tests/fixtures/ipod/` — a real iPod Classic 7G database, and the most valuable fixture in the tree.** `tests/fixtures/ipod/README.md` carries the measurements and the provenance. It is worth more than the eight audio files next to it because **there is no second implementation to check it against**: `audio_fixtures.rs` can assert a decoder and a tag reader agree on a duration because two readers exist, and here the only other reader in the tree is the one under test. **Every UTF-16 `mhod` payload was replaced with placeholder letters of the same byte length** so no length moved, and the file was re-signed so it still verifies — the one thing kept is the FireWire GUID, which is the device's serial number, because a signature is meaningless without the key that made it. `ArtworkDB` is committed **verbatim**, because it holds no prose: an image record is an id, an opaque `dbid` and three geometry descriptors, with no title, filename or picture in it. **`SysInfo` is committed empty on purpose:** the device it came from has one, so the `udevadm` fallback that every Linux iPod needs stays exercised. The sanitiser is **not** committed — a fixture dump *is* a library export and the accident is one `cp` away. The three `.ithmb` stores are **not** committed either: 20 MB of somebody's album art, and the geometry is pinned by their file lengths while the packing is covered by generated pixels.
+- **`tests/ipod_tests.rs`** — 64 tests over that fixture. The one that matters is `hash58_reproduces_a_real_devices_signature`: it computes the HMAC over the committed file with a key the code did not have and gets back the twenty bytes the device stored, which a sign-then-verify round trip cannot do. The rest is the round trip, the chunk census, the three constants that disagree with the published table, the artwork geometry and packing, the **three `udisksctl` parsers against real captured output**, and a push or a removal per claim either makes — the file the database names exists, the copy is the whole file, the record is in the Library playlist, a second copy of one source gets a second name, an album the device has is reused and one it lacks is added, a refused signature leaves the database byte-identical, **a second push of the same song adds neither a record nor a file**, and a playlist of songs already on the device is still built; and on the removal side, all four pieces of a track go together, the album survives while a sibling is still there and goes when the last one does, artwork records do not move, an off-device path is refused, a recursive removal reaches every depth in **one** database write, the walk skips a symlinked folder and collects only playable files, an empty batch writes nothing, the removal records itself once, and **nothing at all is left on the device** after either direction.
+- Test isolation: each test makes its own temp dir under `/tmp/tplay-test-<pid>/<name>/` and removes it. `audio_fixtures.rs` is the one suite that reads a path it did not create (`CARGO_MANIFEST_DIR`-relative, since cargo promises no working directory) and so writes nothing. `ipod_tests.rs` writes its fake device under `target/ipod-tests/` rather than `/tmp`, because its fixture database is 1.9 MB and the other suites' convention is sized for one audio file — **and its backups go to `target/ipod-tests/<name>-backups/`, a sibling rather than a folder inside the pod**, because the property under test is that a backup is never on the device, and a fixture that puts one there cannot assert it.
 - Run: `cargo test` (all suites, once each).
 
 ---
@@ -911,6 +1368,11 @@ and per-track EQ are still to-do and live under *Future milestones* → **Deferr
 | Change the breadcrumb | `gui/panes/library/header.rs`. Rendering is `breadcrumb` and must stay source-agnostic — a change to *what* a segment means goes in `local_segs`/`remote_segs`, a change to the `…` rule in `plan` (and its `always` argument at the two call sites) |
 | Change how remote tracks get tags | `Network::fetch_tags` + `run_tags` (network.rs), the `Event::Tagged` arm in `update()` |
 | Change how a track's file is resolved or read | `tracks.rs` — `open`/`info`/`probe`/`cover` and the `local_file_in` primitive. **Never** resolve in `app.rs` or `src/gui/`: the two-path pair that causes is what made a swapped pair a silent crash |
+| Change what gets copied to an iPod | `ipod/push.rs` — `KINDS` for the formats, `template_for` for the record shape, `strings_for` for the ten `mhod`s a track carries. `db.rs` only if a field genuinely moved, and `a_round_trip_returns_the_input_unchanged` must still hold over the fixture |
+| Change what counts as "already on the iPod" | `identity` in `ipod/push.rs` — one function, and **both sides must go through it**: the file's tags in `add_track`, the device record's in `identity_of`. The first version had two and they disagreed about case, so every accented song failed to match itself. **Do not switch it to file size**: two CBR MP3s of the same duration are the same size to the byte |
+| Change what comes off an iPod | `ipod/remove.rs` — `remove_paths` is the only entry point and handles one file or a thousand; `audio_files_under` is the recursion that decides which files a button covers. **Never loop `remove_paths` over one path per track**: that is a 1.9 MB database write per track. **A fifth thing that has to go with a track is the artwork record, and it deliberately does not** — record *N* is slot *N* in each store, so removing one renumbers every cover after it. If you find yourself needing to reclaim art space, that is a whole-device rewrite, not a per-track edit |
+| Add a removal UI | the confirm arm in `gui/dialogs.rs` (holding the paths, because the Library can be navigated while the modal waits), then `listing.rs`. The button is `ipod_button` with an `IpodDirection`, and the row button is the existing `+` becoming a `✕` — **do not add a second button to a file row**, whose width is already accounted for to the pixel |
+| Add support for another iPod family | **`Do not, without measuring.**** A touch or an iPhone is not mass storage: it needs `usbmuxd` + `libimobiledevice`, its library is a signed SQLite database rather than this chunk tree, and the signature is `hashAB`, a white-box AES blob with no published description. `hash58::sign` already refuses a scheme it cannot write |
 | Change spool cache retention | `Config::spool_cache_mb` + `Network::evict_unplayed`/`mark_played`, policy in the pure `select_evictions` |
 | Change visualizer rendering | the one file in `gui/panes/visualizer/views/<name>.rs`; `audio/viz.rs` only for the DSP a view calls (FFT/bands, `compute_wave`) and `gpu.rs` only for a *new kind* of uniform input — never for a look, and `the_wgpu_harness_never_names_a_view` fails if you do |
 | Add a visualizer view | `views/<name>.rs` with a `pub const FRAG: &str` (reading **`v_uv`**, never `gl_FragCoord`, and a density ramp whose lower edge is below the field's mean) + a `SHADER_VIEWS` row, a `VizView` variant (`ALL` + `name`), and the `ALL` pin in `tests/app_integration.rs`. **There is no CPU variant, so these are the only steps**, and `gpu.rs` is never touched — `the_wgpu_harness_never_names_a_view` fails if you edit it to accommodate a look. A body that needs its own helper puts it in a `helpers` const beside it and names that in the row — **WGSL has no nested functions**, and the alternative is a per-view special case in the harness, which is the one thing the arrangement forbids. Palette uniforms only, and the sweeps in `gui_tests.rs` cover the new view with no new test body. **Three traps this codebase has already hit:** never read the built-in fragment position (`no_shader_reads_a_window_relative_pixel_coordinate` fails) — it is window-relative and bottom-left; **if the view draws anything round, aspect-correct the coordinate it is measured in** — `a_view_that_draws_round_corrects_the_aspect_ratio` fails on a new view that forgets, and it fires on `length(`/`atan(`/`exp(-`/`tongue(` so the property is about the shape rather than about a name you have to remember.

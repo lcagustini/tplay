@@ -32,8 +32,17 @@ image     = { version = "0.25", default-features = false, features = ["png", "jp
 # system fonts would fight theme::install_fallback_fonts over egui's font families.
 resvg     = { version = "0.48", default-features = false }
 lofty = "0.25.4"
+# AAC-LC encoder for the iPod's "convert to AAC" setting (src/ipod/aac.rs).
+# Apache-2.0, zero transitive dependencies, no C and no FFI -- so the suite stays
+# hermetic and CI needs nothing installed. The MP4 container around the bitstream
+# is ours; this crate only carries the AudioSpecificConfig the `esds` needs.
+rusty_aac = { version = "1.1", default-features = false }
 smb2 = "0.26"
 tokio = { version = "1.53.1", features = ["rt", "net", "time"] }
+# SHA-1 for the iPod database signature (src/ipod/hash58.rs). Already in the
+# tree via smb2, which signs every SMB request with it, so declaring it here
+# compiles nothing new -- it is the same crate at the same version.
+sha1    = "0.11"
 
 [dev-dependencies]
 # The visualizer harness, so the tests can validate the WGSL the same way the

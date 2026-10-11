@@ -3,6 +3,7 @@
 use crate::audio;
 use crate::audio::transition;
 use crate::config;
+use crate::ipod;
 use crate::library;
 use crate::library_db;
 use crate::network;
@@ -148,6 +149,11 @@ pub struct TPlayApp {
     // ── SMB network ────────────────────────────────────────────────────────
     /// All network state + the worker channels.
     network: network::Network,
+
+    // ── iPod ───────────────────────────────────────────────────────────────
+    /// The copy to a connected iPod, and its outcome. One at a time: a second
+    /// push while one runs would race the first over the same database.
+    ipod: ipod::Job,
 }
 
 impl TPlayApp {
@@ -209,6 +215,7 @@ impl TPlayApp {
             db,
             tracks: tracks::TagReader::new(),
             network: network::Network::new(config.servers.clone()),
+            ipod: ipod::Job::default(),
         };
 
         app.sink.set_volume(app.volume);
@@ -1325,6 +1332,17 @@ impl TPlayApp {
         &mut self.network
     }
 
+    /// The copy to a connected iPod. `Job` owns the thread and the channel, so
+    /// this pair is the whole of it — the GUI asks it to start and to report,
+    /// and `update` drains it.
+    pub fn ipod(&self) -> &ipod::Job {
+        &self.ipod
+    }
+
+    pub fn ipod_mut(&mut self) -> &mut ipod::Job {
+        &mut self.ipod
+    }
+
     // Read-only getters
 
     pub fn current_path(&self) -> Option<&std::path::Path> {
@@ -1497,6 +1515,10 @@ impl TPlayApp {
     pub fn update(&mut self, now: f64, closing: bool, theme_id: &str) -> bool {
         self.advance();
         let scanning = self.drain_tag_scan();
+        // A finished iPod copy: the thread's answer, so the pane can report it.
+        // Drained here for the same reason as the tag scan — a reply with
+        // nothing draining it sits unseen until an unrelated repaint.
+        let copied = self.ipod.drain();
         // SMB replies: browse listings are applied inside `Network::drain`; a
         // completed spool promotes playback, a fetched `.tplay` loads, and a
         // save confirms. Drain every event, not just the first — a save reply
@@ -1547,7 +1569,7 @@ impl TPlayApp {
         // same frame it lands.
         self.flush_config(now, closing, theme_id);
         self.flush_db(now, closing);
-        scanning || self.network.busy() || self.is_playing()
+        scanning || copied || self.network.busy() || self.ipod.busy() || self.is_playing()
     }
 }
 
