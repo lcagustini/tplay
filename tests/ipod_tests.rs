@@ -2148,7 +2148,8 @@ fn the_sidebar_re_reads_when_an_ipod_job_finishes() {
     );
 
     // And the epoch moves on **both** endings, because a job that failed after
-    // half-changing the outside world still changed it.
+    // half-changing the outside world still changed it. Plus the explicit
+    // refresh button.
     let push = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ipod/push.rs"),
     )
@@ -2156,8 +2157,8 @@ fn the_sidebar_re_reads_when_an_ipod_job_finishes() {
     assert_eq!(
         push.matches("self.epoch = self.epoch.wrapping_add(1);")
             .count(),
-        2,
-        "once for a job that answered and once for one whose thread died"
+        3,
+        "once for a job that answered, once for one whose thread died, once for refresh_devices"
     );
 }
 

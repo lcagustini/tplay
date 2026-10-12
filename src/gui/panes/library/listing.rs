@@ -15,7 +15,7 @@ use crate::gui::dialogs;
 use crate::gui::panes::row_visible;
 use crate::gui::panes::IpodDirection;
 use crate::gui::theme::{self, ThemeState};
-use crate::ipod::remove;
+use crate::ipod::{push, remove};
 use crate::library;
 use crate::network;
 use eframe::egui;
@@ -632,7 +632,9 @@ pub fn local_list_ui(
         ui,
         theme.palette,
         Counts::of(app.library().entries()),
-        on_device,
+        source,
+        None,
+        None,
     );
     ui.add_space(theme.panes.gap);
     let scanning = app.library_scanning();
@@ -762,7 +764,9 @@ fn list_header_right(
     ui: &mut egui::Ui,
     p: theme::Palette,
     c: Counts,
-    on_device: bool,
+    source: Source,
+    share_entries: Option<&[library::Entry]>,
+    share_name: Option<&str>,
 ) {
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
         if ui
@@ -773,40 +777,50 @@ fn list_header_right(
             // Walked only on the click, and the borrow ends before `add_files` —
             // the other half of why this is a reader: a slice of the entries
             // could not be held across that call.
-            let files: Vec<PathBuf> = app
-                .library()
-                .entries()
+            let entries = match source {
+                Source::Share => share_entries.unwrap_or_default(),
+                _ => app.library().entries(),
+            };
+            let files: Vec<PathBuf> = entries
                 .iter()
                 .filter(|e| !e.is_dir() && !library::is_playlist(e.path()))
                 .map(|e| e.path().to_path_buf())
                 .collect();
             app.add_files(files);
         }
-        // The same button in both directions: browsing the device's own folder is
-        // what makes "take these off" meaningful, and a permanently-greyed button
-        // beside an enabled one reads as a broken app rather than as an
-        // inapplicable action.
-        let direction = if on_device {
-            IpodDirection::Remove
-        } else {
-            IpodDirection::Add
+        // iPod: only for local (Add) / device (Remove), not for SMB shares.
+        // On a share, the push path in ipod/push.rs resolves smb:// URIs to
+        // spool cache copies; the button shows because share_entries carries
+        // the files to copy.
+        let (direction, files, name) = match source {
+            Source::Device => {
+                let f = remove::audio_files_under(app.library().dir());
+                let nm = app.library().dir().file_name().map_or_else(
+                    || "this folder".to_string(),
+                    |n| n.to_string_lossy().into_owned(),
+                );
+                (IpodDirection::Remove, f, nm)
+            }
+            Source::Local => {
+                let f = push::all_audio_files_under(app.library().dir());
+                let nm = app.library().dir().file_name().map_or_else(
+                    || "this album".to_string(),
+                    |n| n.to_string_lossy().into_owned(),
+                );
+                (IpodDirection::Add, f, nm)
+            }
+            Source::Share => {
+                let entries = share_entries.unwrap_or_default();
+                let f: Vec<PathBuf> = entries
+                    .iter()
+                    .filter(|e| !e.is_dir() && !library::is_playlist(e.path()))
+                    .map(|e| e.path().to_path_buf())
+                    .collect();
+                let nm = share_name.unwrap_or("this share").to_string();
+                (IpodDirection::Add, f, nm)
+            }
         };
         if super::super::ipod_button(ui, app, p, direction) {
-            // Every playable file under this folder, at any depth. **Recursive
-            // because the folder the user browsed to is not always an album**:
-            // `iPod_Control/Music` holds fifty `Fnn` folders and no files at all,
-            // so a one-level walk found zero tracks and the button did nothing.
-            // Walked on the click, for the same reason `Add All` walks then: a
-            // list handed to a dialog that may never open is a list built sixty
-            // times a second for nothing.
-            let files = remove::audio_files_under(app.library().dir());
-            let name = app.library().dir().file_name().map_or_else(
-                || match direction {
-                    IpodDirection::Remove => "this folder".to_string(),
-                    IpodDirection::Add => "this album".to_string(),
-                },
-                |n| n.to_string_lossy().into_owned(),
-            );
             let n = files.len();
             if direction == IpodDirection::Remove {
                 dialogs::ask(
@@ -1003,7 +1017,15 @@ pub fn remote_list_ui(
 
     // A share is never a device's own folder, so the direction is fixed here rather
     // than by a second check.
-    list_header_right(app, ui, p, Counts::of(&entries), false);
+    list_header_right(
+        app,
+        ui,
+        p,
+        Counts::of(&entries),
+        Source::Share,
+        Some(&entries),
+        browse.share.as_deref(),
+    );
     ui.add_space(theme.panes.gap);
     let act = file_list_ui(app, themes, ui, theme, &entries, note, Source::Share);
 

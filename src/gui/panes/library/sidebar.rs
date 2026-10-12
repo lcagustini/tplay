@@ -239,7 +239,16 @@ pub fn sidebar_ui(
                 // device that was plugged in but unmounted, and no way to eject
                 // one that was mounted. Here both are the row's whole job.
                 if !dirs.ipods.is_empty() {
-                    section_label(ui, theme, p, "iPod");
+                    ui.horizontal(|ui| {
+                        section_label(ui, theme, p, "iPod");
+                        if ui
+                            .small_button("⟳")
+                            .on_hover_text("Rescan for connected iPods")
+                            .clicked()
+                        {
+                            app.ipod_mut().refresh_devices();
+                        }
+                    });
                     let busy = app.ipod().busy();
                     for ipod in &dirs.ipods {
                         // Two shapes, because the two states are different

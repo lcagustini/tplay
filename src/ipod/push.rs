@@ -130,6 +130,31 @@ fn cover_key(cover: &[u8]) -> u64 {
     hasher.finish()
 }
 
+/// Collect ALL audio files under `dir` recursively, including formats the iPod
+/// cannot play natively (FLAC, OGG, WAV). These will be converted to AAC if
+/// `ipod_aac` is enabled, or refused otherwise. This is for the "To iPod" push,
+/// unlike `remove::audio_files_under` which only returns playable formats for
+/// the "From iPod" removal.
+///
+/// **`DirEntry::file_type`, not `Path::is_dir`**: the latter follows symlinks, so
+/// a symlink loop inside a music folder would hang the walk forever. A symlinked
+/// folder is skipped instead.
+pub fn all_audio_files_under(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        match entry.file_type() {
+            Ok(t) if t.is_dir() => out.extend(all_audio_files_under(&path)),
+            Ok(_) if crate::library::is_audio(&path) => out.push(path),
+            _ => {}
+        }
+    }
+    out
+}
+
 /// A file type an iPod Classic can be asked to play.
 ///
 /// **`code` is the four bytes in the order the file holds them, which is the
@@ -911,6 +936,12 @@ impl Job {
     /// How many jobs have finished this session. See [`Job::epoch`].
     pub fn epoch(&self) -> u64 {
         self.epoch
+    }
+
+    /// Force a re-scan of iPod devices by bumping the epoch.
+    /// Call when the user explicitly requests a refresh (e.g., after plugging in a device).
+    pub fn refresh_devices(&mut self) {
+        self.epoch = self.epoch.wrapping_add(1);
     }
 
     /// The last outcome, kept so the pane can show it after the job ends.
