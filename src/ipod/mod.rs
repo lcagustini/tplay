@@ -38,6 +38,7 @@
 //! a published description. `hash58::sign` refuses a scheme it cannot write
 //! rather than producing a file the device will silently ignore.
 
+pub mod aac;
 pub mod artwork;
 pub mod db;
 pub mod device;

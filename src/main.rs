@@ -116,7 +116,8 @@ fn main() -> eframe::Result<()> {
             .with_min_inner_size([320.0, 160.0])
             // No native title bar: the controls live in the app's own top bar
             // (right-aligned next to the logo), and that bar is draggable.
-            .with_decorations(false),
+            .with_decorations(false)
+            .with_resizable(true),
         ..Default::default()
     };
     eframe::run_native(

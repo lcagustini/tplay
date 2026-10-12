@@ -418,7 +418,7 @@ fn adding_a_track_updates_the_database_and_the_disk_together() {
     let source = fixture("lena.mp3");
 
     let mut push = Push::open(&device).unwrap();
-    let track_id = push.add_track(&source).unwrap();
+    let track_id = push.add_track(&source, None).unwrap();
     let before = track_count(&db::parse(&database()).unwrap());
     let signed = push.finish().unwrap();
 
@@ -506,7 +506,7 @@ fn a_new_id_does_not_collide_with_the_ones_already_in_the_database() {
     let mut push = Push::open(&device).unwrap();
     let mut added = Vec::new();
     for _ in 0..3 {
-        added.push(push.add_track(&source).unwrap());
+        added.push(push.add_track(&source, None).unwrap());
     }
     let signed = push.finish().unwrap();
     let tree = db::parse(&signed).unwrap();
@@ -546,7 +546,7 @@ fn three_copies_of_one_file_land_on_three_names() {
 
     let mut push = Push::open(&device).unwrap();
     for _ in 0..3 {
-        push.add_track(&source).unwrap();
+        push.add_track(&source, None).unwrap();
     }
     let signed = push.finish().unwrap();
     let tree = db::parse(&signed).unwrap();
@@ -599,7 +599,7 @@ fn an_album_the_device_already_knows_is_reused_rather_than_duplicated() {
     tagged_mp3(&tagged, &existing, &artist);
 
     let mut push = Push::open(&device).unwrap();
-    let track_id = push.add_track(&tagged).unwrap();
+    let track_id = push.add_track(&tagged, None).unwrap();
     let signed = push.finish().unwrap();
     let tree = db::parse(&signed).unwrap();
 
@@ -637,7 +637,7 @@ fn a_new_album_gets_an_entry_with_the_album_list_fields() {
     tagged_mp3(&tagged, "An Album Nobody Synced", "A Band Nobody Has");
 
     let mut push = Push::open(&device).unwrap();
-    let track_id = push.add_track(&tagged).unwrap();
+    let track_id = push.add_track(&tagged, None).unwrap();
     let signed = push.finish().unwrap();
     let tree = db::parse(&signed).unwrap();
 
@@ -683,7 +683,9 @@ fn a_playlist_is_added_without_disturbing_the_library_playlist() {
     let source = fixture("lena.mp3");
 
     let mut push = Push::open(&device).unwrap();
-    let ids: Vec<u32> = (0..2).map(|_| push.add_track(&source).unwrap()).collect();
+    let ids: Vec<u32> = (0..2)
+        .map(|_| push.add_track(&source, None).unwrap())
+        .collect();
     push.add_playlist("Walk Home", &ids).unwrap();
     let signed = push.finish().unwrap();
 
@@ -753,7 +755,7 @@ fn a_commit_leaves_the_previous_database_behind() {
     let original = database();
     let signed = {
         let mut push = Push::open(&device).unwrap();
-        push.add_track(&fixture("lena.mp3")).unwrap();
+        push.add_track(&fixture("lena.mp3"), None).unwrap();
         push.finish().unwrap()
     };
     push::commit(&device, &signed).unwrap();
@@ -1113,7 +1115,9 @@ fn tracks_sharing_a_cover_share_one_image() {
     std::fs::write(pod.root.join("folder.png"), test_png(300, 300)).unwrap();
 
     let mut push = tplay::ipod::push::Push::open(&device).unwrap();
-    let ids: Vec<u32> = (0..3).map(|_| push.add_track(&source).unwrap()).collect();
+    let ids: Vec<u32> = (0..3)
+        .map(|_| push.add_track(&source, None).unwrap())
+        .collect();
     let signed = push.finish().unwrap();
 
     let tree = db::parse(&signed).unwrap();
@@ -1167,7 +1171,7 @@ fn nothing_is_left_on_the_device_and_the_backup_is_reachable() {
     seed_artwork(&pod);
 
     let mut push = Push::open(&device).unwrap();
-    push.add_track(&source).unwrap();
+    push.add_track(&source, None).unwrap();
     push::commit(&device, &push.finish().unwrap()).unwrap();
 
     let path = path_of(&pod, &location_of(&tracks_of(&pod)[0]));
@@ -2207,7 +2211,7 @@ fn pushing_the_same_song_twice_leaves_one_copy() {
     common::write_tagged_mp3(&source, "Renascença", "A Band", "An Album");
 
     let tracks_before = tracks_of(&pod).len();
-    let first = push::push_album(&device, std::slice::from_ref(&source)).unwrap();
+    let first = push::push_album(&device, std::slice::from_ref(&source), None).unwrap();
     assert_eq!(first.added, 1);
     assert_eq!(first.already, 0);
     let after_first = tracks_of(&pod).len();
@@ -2215,7 +2219,7 @@ fn pushing_the_same_song_twice_leaves_one_copy() {
     let files_after_first = device_music_files(&pod).len();
 
     // The same file, same folder, same everything — the second press.
-    let second = push::push_album(&device, std::slice::from_ref(&source)).unwrap();
+    let second = push::push_album(&device, std::slice::from_ref(&source), None).unwrap();
     assert_eq!(second.already, 1, "the song was recognised");
     assert_eq!(second.added, 0, "and not copied again");
     assert_eq!(
@@ -2245,7 +2249,7 @@ fn two_different_songs_both_go_across() {
     common::write_tagged_mp3(&one, "First Song", "A Band", "An Album");
     common::write_tagged_mp3(&two, "Second Song", "A Band", "An Album");
 
-    let summary = push::push_album(&device, &[one, two]).unwrap();
+    let summary = push::push_album(&device, &[one, two], None).unwrap();
     assert_eq!(summary.added, 2);
     assert_eq!(summary.already, 0, "same album and artist, different song");
     assert_eq!(device_tracks_titled(&pod, "First Song").len(), 1);
@@ -2263,7 +2267,7 @@ fn the_same_song_on_two_albums_is_two_tracks() {
     common::write_tagged_mp3(&one, "Yesterday", "A Band", "Live");
     common::write_tagged_mp3(&two, "Yesterday", "A Band", "Studio");
 
-    let summary = push::push_album(&device, &[one, two]).unwrap();
+    let summary = push::push_album(&device, &[one, two], None).unwrap();
     assert_eq!(summary.added, 2, "a compilation has the same song twice");
 }
 
@@ -2281,8 +2285,9 @@ fn a_playlist_of_already_present_songs_is_still_created() {
     let source = pod.root.join("song.mp3");
     common::write_tagged_mp3(&source, "Renascença", "A Band", "An Album");
 
-    push::push_album(&device, std::slice::from_ref(&source)).unwrap();
-    let second = push::push_playlist(&device, std::slice::from_ref(&source), "Favourites").unwrap();
+    push::push_album(&device, std::slice::from_ref(&source), None).unwrap();
+    let second =
+        push::push_playlist(&device, std::slice::from_ref(&source), "Favourites", None).unwrap();
     assert_eq!(second.added, 0, "nothing new to copy");
     assert_eq!(second.already, 1);
 
@@ -2319,11 +2324,11 @@ fn a_tag_edit_makes_a_second_copy_rather_than_silently_skipping() {
     let device = pod.device();
     let source = pod.root.join("song.mp3");
     common::write_tagged_mp3(&source, "Original Title", "A Band", "An Album");
-    push::push_album(&device, std::slice::from_ref(&source)).unwrap();
+    push::push_album(&device, std::slice::from_ref(&source), None).unwrap();
 
     // The same audio, retitled on disk.
     common::write_tagged_mp3(&source, "Corrected Title", "A Band", "An Album");
-    let second = push::push_album(&device, std::slice::from_ref(&source)).unwrap();
+    let second = push::push_album(&device, std::slice::from_ref(&source), None).unwrap();
 
     assert_eq!(
         second.already, 0,
@@ -2377,11 +2382,100 @@ fn a_retagged_title_in_another_case_is_the_same_song() {
     let device = pod.device();
     let source = pod.root.join("song.mp3");
     common::write_tagged_mp3(&source, "Yesterday", "The Beatles", "Help!");
-    push::push_album(&device, std::slice::from_ref(&source)).unwrap();
+    push::push_album(&device, std::slice::from_ref(&source), None).unwrap();
 
     common::write_tagged_mp3(&source, "YESTERDAY", "The Beatles", "Help!");
-    let second = push::push_album(&device, std::slice::from_ref(&source)).unwrap();
+    let second = push::push_album(&device, std::slice::from_ref(&source), None).unwrap();
 
     assert_eq!(second.already, 1, "capitalisation is not a different song");
     assert_eq!(second.added, 0);
+}
+
+#[test]
+fn should_convert_returns_true_for_unplayable_formats() {
+    use std::fs::File;
+    use std::io::Write;
+    use tplay::ipod::push::Push;
+
+    let dir = std::env::temp_dir().join(format!("tplay-test-{}-aac-test", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let flac = dir.join("test.flac");
+    let ogg = dir.join("test.ogg");
+    let wav = dir.join("test.wav");
+
+    // Create dummy files with unplayable extensions
+    File::create(&flac).unwrap().write_all(b"dummy").unwrap();
+    File::create(&ogg).unwrap().write_all(b"dummy").unwrap();
+    File::create(&wav).unwrap().write_all(b"dummy").unwrap();
+
+    assert!(Push::should_convert(&flac, 128_000));
+    assert!(Push::should_convert(&ogg, 128_000));
+    assert!(Push::should_convert(&wav, 128_000));
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn should_convert_returns_false_for_mp3_below_target() {
+    use tplay::ipod::push::Push;
+
+    let dir = std::env::temp_dir().join(format!("tplay-test-{}-aac-test", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mp3 = dir.join("test.mp3");
+    common::write_tagged_mp3(&mp3, "Test", "Artist", "Album");
+
+    // 128 kbps MP3, target 256 kbps - should not convert
+    assert!(!Push::should_convert(&mp3, 256_000));
+    // 128 kbps MP3, target 128 kbps - should not convert (equal)
+    assert!(!Push::should_convert(&mp3, 128_000));
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn ipod_aac_config_default_is_none() {
+    use tplay::config::Config;
+    let config = Config::default();
+    assert_eq!(config.ipod_aac, None);
+}
+
+#[test]
+fn ipod_aac_config_round_trips() {
+    use tplay::config::Config;
+    let config = Config {
+        ipod_aac: Some(256_000),
+        ..Default::default()
+    };
+
+    let json = serde_json::to_string(&config).unwrap();
+    let back: Config = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.ipod_aac, Some(256_000));
+}
+
+#[test]
+fn ipod_aac_hand_edited_value_snaps_to_nearest() {
+    use tplay::config::Prefs;
+    let config = tplay::config::Config {
+        ipod_aac: Some(999),
+        ..Default::default()
+    }; // hand-edited value not in AAC_BITRATES
+
+    let prefs = Prefs::from_config(&config);
+    // Should snap to nearest offered rate (128000, 256000, 320000)
+    // 999 is closest to 128000
+    assert_eq!(prefs.ipod_aac(), Some(128_000));
+}
+
+#[test]
+fn ipod_aac_prefs_setter_snaps_to_nearest() {
+    use tplay::config::Prefs;
+    let mut prefs = Prefs::from_config(&tplay::config::Config::default());
+    prefs.set_ipod_aac(Some(999));
+    assert_eq!(prefs.ipod_aac(), Some(128_000));
+    prefs.set_ipod_aac(Some(200_000));
+    assert_eq!(prefs.ipod_aac(), Some(256_000)); // closer to 256k
+    prefs.set_ipod_aac(Some(300_000));
+    assert_eq!(prefs.ipod_aac(), Some(320_000)); // closer to 320k
+    prefs.set_ipod_aac(None);
+    assert_eq!(prefs.ipod_aac(), None);
 }

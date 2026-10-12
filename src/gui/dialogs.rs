@@ -239,7 +239,8 @@ fn run(app: &mut TPlayApp, ctx: &egui::Context, action: ConfirmAction) {
         }
         ConfirmAction::PushToIpod { tracks, playlist } => {
             let what = playlist.clone().unwrap_or_else(|| "this album".to_string());
-            app.ipod_mut().start(what, tracks, playlist);
+            let aac_bps = app.prefs().ipod_aac();
+            app.ipod_mut().start(what, tracks, playlist, aac_bps);
         }
         ConfirmAction::RemoveFromIpod { paths, what } => {
             app.ipod_mut().start_remove(what, paths);

@@ -10,7 +10,7 @@ use tplay::audio::eq::EqShared;
 use tplay::audio::viz::{VizBuf, VIZ_BANDS, WAVE_BUCKETS};
 use tplay::gui::panes::visualizer::views::SHADER_VIEWS;
 use tplay::gui::theme::{
-    rasterize_icon, Base, Family, Icon, Layout, Surface, ThemeState, Themes, DEFAULT_THEME_ID,
+    rasterize_icon, Base, Family, Icon, Layout, ThemeState, Themes, DEFAULT_THEME_ID,
 };
 
 /// One headless frame, with the output disposed of.
@@ -3853,56 +3853,17 @@ fn a_zero_inset_collapses_that_column_rather_than_using_the_default() {
     }
 }
 
-/// `frames` is optional, and three of the four bundled themes name none — which is
+/// `frames` is optional, and the bundled themes name none — which is
 /// the back-compatibility case: a `theme.json` with no `frames` group must leave
 /// both surfaces alone rather than reaching for another theme's art.
 #[test]
 fn a_theme_without_a_frames_group_names_none() {
     let themes = Themes::load();
     for theme in themes.list() {
-        if theme.id == "winamp" {
-            continue; // the one theme that does ship frames; see below
-        }
         assert!(
             theme.frames.titlebar.is_none() && theme.frames.pane.is_none(),
             "{} ships no frame files yet",
             theme.id
-        );
-    }
-}
-
-/// The theme that uses every group must reach both frame surfaces. This is the
-/// end-to-end check on the whole path — `theme.json` names a `.bmp`, the loader
-/// resolves it inside the theme's folder, the `image` crate decodes it, and a
-/// texture is allocated — and every step of it is invisible to a test that only
-/// reads the token struct.
-#[test]
-fn the_winamp_theme_decodes_both_of_its_frames() {
-    let ctx = egui::Context::default();
-    let themes = Themes::load();
-    let named = themes.get("winamp").expect("the winamp theme ships");
-    let json_titles = named.frames.titlebar.is_some();
-    let json_panes = named.frames.pane.is_some();
-    let state = ThemeState::load(&ctx, themes, "winamp");
-
-    assert!(json_titles, "theme.json names a titlebar");
-    assert!(json_panes, "theme.json names a pane");
-
-    for surface in [Surface::Titlebar, Surface::Pane] {
-        let (tex, stretch) = state
-            .frame(surface)
-            .unwrap_or_else(|| panic!("{surface:?} decoded"));
-        assert!(
-            tex.size()[0] > 0 && tex.size()[1] > 0,
-            "{surface:?} has pixels"
-        );
-        // The insets must fit inside the source, or `nine_slice` is being asked
-        // for a cut the image cannot supply and clamps it away.
-        let [w, h] = tex.size();
-        assert!(
-            (stretch.left + stretch.right) as usize <= w
-                && (stretch.top + stretch.bottom) as usize <= h,
-            "{surface:?}: insets {stretch:?} fit inside {w}x{h}"
         );
     }
 }
@@ -4232,114 +4193,8 @@ fn a_face_button_draws_its_face_and_takes_the_click() {
     );
 }
 
-/// The theme that uses every group must reach every bitmap surface: two frames,
-/// the digit strip and a face per transport mark. Each step of that path —
-/// `theme.json` names a `.bmp`, the loader resolves it inside the theme's folder,
-/// the `image` crate decodes it, a texture is allocated, and the cell arithmetic
-/// lands on the right part of it — is invisible to a test that only reads tokens.
-#[test]
-fn the_winamp_theme_decodes_its_frames_its_digits_its_faces_and_its_knobs() {
-    let ctx = egui::Context::default();
-    let themes = Themes::load();
-    let winamp = themes.get("winamp").expect("the winamp theme ships");
-    let named = (
-        winamp.frames.titlebar.is_some(),
-        winamp.frames.pane.is_some(),
-        winamp.frames.eq.is_some(),
-        winamp.digits.is_some(),
-        winamp.faces.slots.len(),
-        winamp.knobs.slots.len(),
-    );
-    let state = ThemeState::load(&ctx, themes, "winamp");
-    assert!(named.0, "theme.json names a titlebar");
-    assert!(named.1, "theme.json names a pane");
-    assert!(named.2, "theme.json names an eq backdrop");
-    assert!(named.3, "theme.json names a digit strip");
-    assert!(named.4 >= 5, "theme.json names the five transport marks");
-    // Every slider role, or one of them silently keeps egui's handle while the
-    // other four look like the theme — which is the kind of half-skinned thing a
-    // screenshot of one pane cannot see.
-    assert_eq!(
-        named.5,
-        tplay::gui::theme::Knob::ALL.len(),
-        "theme.json names a knob for every slider role"
-    );
-
-    for surface in [Surface::Titlebar, Surface::Pane, Surface::Eq] {
-        let (tex, stretch) = state
-            .frame(surface)
-            .unwrap_or_else(|| panic!("{surface:?} decoded"));
-        assert!(
-            tex.size()[0] > 0 && tex.size()[1] > 0,
-            "{surface:?} has pixels"
-        );
-        let [w, h] = tex.size();
-        assert!(
-            (stretch.left + stretch.right) as usize <= w
-                && (stretch.top + stretch.bottom) as usize <= h,
-            "{surface:?}: insets {stretch:?} fit inside {w}x{h}"
-        );
-    }
-
-    let (tex, chars) = state.digits().expect("the digit strip decoded");
-    assert_eq!(
-        chars, "0123456789: ",
-        "the strip's cell order is what it says"
-    );
-    assert_eq!(
-        tex.size()[0] as u32 % chars.chars().count() as u32,
-        0,
-        "the strip divides evenly into its cells"
-    );
-
-    for icon in [
-        tplay::gui::theme::Icon::Prev,
-        tplay::gui::theme::Icon::Play,
-        tplay::gui::theme::Icon::Pause,
-        tplay::gui::theme::Icon::Stop,
-        tplay::gui::theme::Icon::Next,
-    ] {
-        let slot = state.slot(icon);
-        let face = slot
-            .face
-            .as_ref()
-            .unwrap_or_else(|| panic!("{icon:?} has a face"));
-        // Every state resolved to a real cell, and the four are distinct where
-        // the theme named four indices — a face whose states all collapse to one
-        // is a theme that shipped a grid and a table it did not need.
-        assert!(face.normal.uv.width() > 0.0, "{icon:?} normal");
-        assert!(face.disabled.uv.width() > 0.0, "{icon:?} disabled");
-    }
-    for knob in tplay::gui::theme::Knob::ALL {
-        let face = state
-            .knob(knob)
-            .unwrap_or_else(|| panic!("{} decoded", knob.key()));
-        assert!(face.normal.uv.width() > 0.0, "{} normal", knob.key());
-        assert!(face.pressed.uv.width() > 0.0, "{} pressed", knob.key());
-        assert!(face.disabled.uv.width() > 0.0, "{} disabled", knob.key());
-    }
-
-    // And the five marks are five different cells, which is what makes the grid
-    // worth having rather than one image drawn five times.
-    let mut seen: Vec<egui::Rect> = Vec::new();
-    for icon in [
-        tplay::gui::theme::Icon::Prev,
-        tplay::gui::theme::Icon::Play,
-        tplay::gui::theme::Icon::Pause,
-        tplay::gui::theme::Icon::Stop,
-        tplay::gui::theme::Icon::Next,
-    ] {
-        let uv = state.face(icon).unwrap().normal.uv;
-        assert!(
-            !seen.contains(&uv),
-            "{icon:?} shares a cell with another mark"
-        );
-        seen.push(uv);
-    }
-}
-
 /// A time string the strip cannot render must fall back to the text label rather
-/// than drawing a gap. Winamp's own `NUMBERS.BMP` has no colon — the background
+/// than drawing a gap. The `NUMBERS.BMP` convention has no colon — the background
 /// supplies it — so a strip that omits one is the normal case, not a broken one.
 #[test]
 fn a_digit_strip_that_lacks_a_character_asks_for_no_width() {
@@ -4690,7 +4545,7 @@ fn gui_sources() -> Vec<(std::path::PathBuf, String)> {
 /// A source-reading test, because the failure has no other shape: a call site
 /// that reverts to `ui.add(Slider::new(..))` compiles, passes every behavioural
 /// test in this file, and renders a slider with no knob on it — one slider in a
-/// themed player that quietly is not themed. The winamp decode test says every
+/// themed player that quietly is not themed. The theme decode test says every
 /// *role* resolves; only this says every *call site* asks.
 ///
 /// **Counted per file rather than per line, and that is load-bearing.**

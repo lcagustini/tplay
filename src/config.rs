@@ -168,6 +168,9 @@ pub struct Config {
     /// Saved SMB servers (host + username; passwords are session-memory only).
     #[serde(default)]
     pub servers: Vec<network::ServerCfg>,
+    /// iPod AAC target bitrate in bits per second. None = off (copy MP3/M4A as-is).
+    #[serde(default)]
+    pub ipod_aac: Option<u32>,
 }
 
 fn default_volume() -> f32 {
@@ -204,6 +207,7 @@ impl Default for Config {
             crossfade: false,
             crossfade_secs: default_crossfade_secs(),
             servers: Vec::new(),
+            ipod_aac: None,
         }
     }
 }
@@ -236,6 +240,9 @@ pub struct LibraryData {
 /// are clamped on load rather than honoured).
 pub const MAX_CROSSFADE_SECS: f32 = 10.0;
 
+/// iPod AAC bitrates the UI offers, in bits per second.
+pub const AAC_BITRATES: [u32; 3] = [128_000, 256_000, 320_000];
+
 /// The user-tunable playback settings, as one owned group.
 ///
 /// The live counterpart of the matching `Config` fields: `from_config` reads them
@@ -255,6 +262,8 @@ pub struct Prefs {
     /// the audio thread while the GUI writes it — the same live-shared shape as
     /// `EqShared`. Not a plain `f32` for exactly that reason.
     balance: Arc<RwLock<f32>>,
+    /// iPod AAC target bitrate in bits per second. None = off.
+    ipod_aac: Option<u32>,
 }
 
 impl Prefs {
@@ -268,6 +277,13 @@ impl Prefs {
             // 900-second (or negative) crossfade into the fade math.
             crossfade_secs: c.crossfade_secs.clamp(0.0, MAX_CROSSFADE_SECS),
             balance: Arc::new(RwLock::new(c.balance)),
+            // Snap a hand-edited number to the nearest offered rate.
+            ipod_aac: c.ipod_aac.map(|b| {
+                AAC_BITRATES
+                    .into_iter()
+                    .min_by_key(|&r| r.abs_diff(b))
+                    .unwrap_or(b)
+            }),
         }
     }
 
@@ -325,6 +341,19 @@ impl Prefs {
     /// source outlives any borrow of `self`.
     pub fn balance_shared(&self) -> Arc<RwLock<f32>> {
         Arc::clone(&self.balance)
+    }
+
+    pub fn ipod_aac(&self) -> Option<u32> {
+        self.ipod_aac
+    }
+
+    pub fn set_ipod_aac(&mut self, bps: Option<u32>) {
+        self.ipod_aac = bps.map(|b| {
+            AAC_BITRATES
+                .into_iter()
+                .min_by_key(|&r| r.abs_diff(b))
+                .unwrap_or(b)
+        });
     }
 }
 

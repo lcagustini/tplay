@@ -306,6 +306,7 @@ fn equal_configs_serialize_identically() {
             host: "10.0.0.1".into(),
             username: "guest".into(),
         }],
+        ipod_aac: None,
     };
     let a = serde_json::to_string_pretty(&build()).unwrap();
     let b = serde_json::to_string_pretty(&build()).unwrap();
@@ -352,6 +353,7 @@ fn config_round_trip_preserves_every_field() {
                 username: String::new(),
             },
         ],
+        ipod_aac: None,
     };
 
     let json = serde_json::to_string(&c).unwrap();

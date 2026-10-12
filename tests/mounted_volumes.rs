@@ -4,6 +4,8 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+
+mod common;
 use tplay::library::Volume;
 
 /// Matches this machine's `/dev/disk/by-label/` (used by `parse_real_mount_table`).
@@ -25,15 +27,24 @@ fn real_labels() -> HashMap<String, String> {
 /// `/run/media/lucas/LUCAS_S\040IPO`. Used verbatim, the sidebar's **Volumes**
 /// row for the device points at a directory that does not exist: the row draws
 /// and highlights, and clicking it navigates nowhere. This is the real line from
-/// the machine the iPod was written against, escape and all.
+/// the machine the iPod was written against, escape and all, retargeted at a
+/// directory this test creates — the device is not always plugged in, and
+/// `is_dir` is the claim, so it needs a path that exists.
 #[test]
 fn a_mount_point_with_an_escaped_character_is_a_real_path() {
-    let line = r#"/dev/sde1 /run/media/lucas/LUCAS_S\040IPO vfat rw,relatime 0 0"#;
-    let volumes = Volume::parse_mounts_with_labels(line, &HashMap::new());
+    let base = common::test_dir("escaped_mountpoint");
+    let leaf = "LUCAS_S IPO";
+    std::fs::create_dir_all(base.join(leaf)).unwrap();
+
+    let line = format!(
+        r#"/dev/sde1 {}/LUCAS_S\040IPO vfat rw,relatime 0 0"#,
+        base.display()
+    );
+    let volumes = Volume::parse_mounts_with_labels(&line, &HashMap::new());
     assert_eq!(volumes.len(), 1);
     assert_eq!(
         volumes[0].path,
-        Path::new("/run/media/lucas/LUCAS_S IPO"),
+        base.join(leaf),
         "the octal escape must be decoded back to the character"
     );
     assert!(

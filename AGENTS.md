@@ -595,11 +595,23 @@ of the constants contradict the only public description of the format.
     what it means: `"0 on the iPod, 14 already there"` is a true sentence and a
     useless one, and pressing the button twice is the *expected* path.
 
-- **Only MP3 and M4A are accepted, and the refusal names the file.** A 7G plays
-  neither FLAC, nor OGG, nor WAV. `push_album` reports them in
-  `Summary::refused` and copies the rest. **No transcoder**: that is a
-  dependency, a licensing question, and a second thing that can fail, for files
-  the device would refuse anyway.
+- **AAC conversion for iPod pushes.** When the user enables an AAC target bitrate in the
+  ☰ menu (Off / 128 / 256 / 320 kbps), any track the device cannot play
+  (FLAC, OGG, WAV) is automatically encoded to AAC-LC at that bitrate, and any
+  MP3/M4A whose average bitrate exceeds the target is also re-encoded. The
+  device still receives only MP3 and M4A files; the transcoder is `rusty_aac`
+  (Apache-2.0, zero transitive deps, pure Rust). The convert-or-copy rule is:
+  1. If the format is not playable on the device (FLAC, OGG, WAV), always convert.
+  2. Otherwise, convert only when the source's average bitrate exceeds the target.
+     Average bitrate = file_size × 8 / duration_ms, computed from fs::metadata and
+     `tracks::info`.
+  A file that fails to convert joins `Summary::refused`; the remaining tracks
+  still go. The encoded file's exact duration (more accurate than lofty's
+  estimate on the source) is written to the database's `M_LENGTH` field.
+  The encoded file carries no tags — the device reads the database, so menus
+  show the right title either way.
+
+- **Every track needs an entry in the Library playlist** — the master `mhyp` —
 
 - **Every track needs an entry in the Library playlist** — the master `mhyp` —
   or it is in the database and in no playlist, and nothing on the device can
@@ -1315,11 +1327,12 @@ and per-track EQ are still to-do and live under *Future milestones* → **Deferr
 | `TAG_ATTEMPTS_MAX` | network.rs | `3` — tag-fetch attempts before a remote track is given up on for the session |
 | `spool_cache_mb` | config.rs (`Config`) | `2048` — MiB ceiling for never-played spool; eviction never touches a played file |
 | `MAX_CROSSFADE_SECS` | config.rs | `10.0` — longest crossfade the UI offers (the ☰ slider's range) and what a hand-edited larger `crossfade_secs` is clamped to on load by `Prefs::from_config` |
+| `AAC_BITRATES` | ipod/aac.rs & config.rs | `[128_000, 256_000, 320_000]` — iPod AAC target bitrates in bps, offered in the ☰ menu as Off / Low / Medium / High. Hand-edited values snap to the nearest offered rate |
 | `spool_key` / `cache_path` | network.rs | FNV-1a 64 hex key + cache path for a `smb://` URI (`<cache>/tplay/smb/<key>.<ext>`) — so the **stem** is the identity, never the filename |
 | `select_evictions` / `evict_unplayed_in` | network.rs | the eviction policy (pure) and the wiring that actually unlinks, over an injectable dir so the two halves are separately testable |
 | `COUNTS_CHILDREN` / `id::MHBD` | ipod/db.rs | the five chunks that store a **child count** where every other chunk stores a total, and the file's first four bytes (`mhfd` for the artwork database, which is the same grammar). `mhlt`/`mhla`/`mhlp`/`mhli`/`mhlf`, and the tell is arithmetic: a chunk's length is at least its own header, so a smaller number in offset 8 can only be a count |
 | `M_ALBUM` = 288 | ipod/push.rs | the `mhit` offset holding the album id. **Not 314**, where the published table puts it — that offset matches no album for any of the fixture's 1169 tracks. Pinned by `the_album_link_is_not_where_the_published_table_says` |
-| `KINDS` | ipod/push.rs | the two file types a 7G plays, **each holding its packed code reversed** (`" 3PM"` is `MP3 `) because `mhit` offset 24 stores the readable name backwards |
+| `KINDS` | ipod/push.rs | the two file types a 7G plays natively, **each holding its packed code reversed** (`" 3PM"` is `MP3 `) because `mhit` offset 24 stores the readable name backwards. Other formats (FLAC, OGG, WAV) are converted to AAC-LC via `rusty_aac` when the user enables an AAC target bitrate (Off / 128 / 256 / 320 kbps). The convert-or-copy rule: unplayable formats always convert; MP3/M4A above the target bitrate re-encode |
 | `H_TRACK` = 24 | ipod/remove.rs | `mhip`'s reference to the track it plays — how a removal finds every playlist entry naming it. Read off one record; `every_playlist_entry_names_a_track_that_exists` is what makes it a fact about all 2338 |
 | `A_ID` = 16 | ipod/remove.rs | `mhia`'s album id in its own header. **Not 20**, which is `M_ALBUM`'s offset in an `mhit` — the two records agree about what an album is and disagree about where to read it |
 | `PLAYLIST_KINDS` | ipod/remove.rs | the three list-holder kinds a track can appear in (playlists, podcasts, new playlists). The sweep is over kinds, not over "the" playlist list, because the device ships all three |

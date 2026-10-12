@@ -37,6 +37,7 @@
 //! tool outside iTunes can honestly do.
 
 use crate::config;
+use crate::ipod::aac::encode_file;
 use crate::ipod::db::{self, Chunk};
 use crate::ipod::db::{field as f, id};
 use crate::ipod::hash58;
@@ -357,7 +358,7 @@ impl<'a> Push<'a> {
     /// `cover.jpg` beside it, by the same `tracks::cover` the Album Cover pane
     /// uses — so no album grouping is needed and a playlist spanning four albums
     /// gets each track's own.
-    pub fn add_track(&mut self, path: &Path) -> Result<u32, String> {
+    pub fn add_track(&mut self, path: &Path, aac_bps: Option<u32>) -> Result<u32, String> {
         let Some(kind) = kind_of(path) else {
             return Err("this iPod cannot play that format".into());
         };
@@ -384,7 +385,8 @@ impl<'a> Push<'a> {
         }
 
         let track_id = self.next_id;
-        let (location, size) = self.place(track_id, path, kind.extension)?;
+        let (location, size, encoded_duration) =
+            self.place(track_id, path, kind.extension, aac_bps)?;
         let album_id = self.album_id(&info);
 
         let template = {
@@ -405,7 +407,11 @@ impl<'a> Push<'a> {
         record.set_u32(M_ID, track_id);
         record.set_u32(M_VISIBLE, 1);
         record.set_u32(M_SIZE, size);
-        record.set_u32(M_LENGTH, info.duration.map_or(0, |d| d.as_millis() as u32));
+        // Use encoded duration if available (more accurate than lofty's estimate on the source)
+        record.set_u32(
+            M_LENGTH,
+            encoded_duration.unwrap_or_else(|| info.duration.map_or(0, |d| d.as_millis() as u32)),
+        );
         record.set_u32(M_MODIFIED, now_mac());
         record.set_u32(M_ADDED, now_mac());
         record.set_u64(M_DBID, self.next_dbid);
@@ -456,6 +462,35 @@ impl<'a> Push<'a> {
         self.already
     }
 
+    /// Whether a track at `path` should be converted to AAC at `target_bps`.
+    /// Whether a track at `path` should be converted to AAC at `target_bps`.
+    ///
+    /// - If the format is not playable on the device (FLAC, OGG, WAV), always convert.
+    /// - Otherwise, convert only when the source's average bitrate exceeds the target.
+    ///   Average bitrate = file_size * 8 / duration_ms, computed from fs::metadata and tracks::info.
+    pub fn should_convert(path: &Path, target_bps: u32) -> bool {
+        let Some(_kind) = kind_of(path) else {
+            return true; // not playable, must convert
+        };
+        // Playable format (MP3/M4A): check if bitrate exceeds target.
+        let Ok(meta) = std::fs::metadata(path) else {
+            return false;
+        };
+        let file_size = meta.len();
+        let Some(info) = tracks::info(path) else {
+            return false;
+        };
+        let Some(duration) = info.duration else {
+            return false;
+        };
+        let duration_ms = duration.as_millis() as u64;
+        if duration_ms == 0 {
+            return false;
+        }
+        let avg_bps = (file_size * 8) / duration_ms;
+        avg_bps > target_bps as u64
+    }
+
     /// What one song's identity is, and what the second push of it must not do.
     fn artwork_for(&mut self, path: &Path, dbid: u64) -> Result<Option<u32>, String> {
         let Some(cover) = tracks::cover(path) else {
@@ -477,7 +512,8 @@ impl<'a> Push<'a> {
         track_id: u32,
         path: &Path,
         extension: &str,
-    ) -> Result<(String, u32), String> {
+        aac_bps: Option<u32>,
+    ) -> Result<(String, u32, Option<u32>), String> {
         // iTunes distributes tracks across the fifty folders with its own hash,
         // which is not derivable from this database. It does not need to be: the
         // location string is what the device follows. Deriving the folder from
@@ -496,12 +532,48 @@ impl<'a> Push<'a> {
         let dir = self.device.music_dir().join(format!("F{folder:02}"));
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let destination = dir.join(&name);
-        std::fs::copy(path, &destination).map_err(|e| format!("{}: {e}", destination.display()))?;
+
+        let (size, encoded_duration) = if let Some(bps) = aac_bps {
+            if Self::should_convert(path, bps) {
+                // Encode to AAC (.m4a)
+                let aac_dest = destination.with_extension("m4a");
+                let duration_ms = encode_file(path, bps, &aac_dest)
+                    .map_err(|e| format!("AAC encode failed: {e}"))?;
+                // Update extension to m4a for the location string
+                let aac_name = format!("{stem}.m4a");
+                return Ok((
+                    format!(":iPod_Control:Music:F{folder:02}:{aac_name}"),
+                    std::fs::metadata(&aac_dest)
+                        .map(|m| m.len() as u32)
+                        .unwrap_or(0),
+                    Some(duration_ms),
+                ));
+            }
+            // Copy as-is
+            std::fs::copy(path, &destination)
+                .map_err(|e| format!("{}: {e}", destination.display()))?;
+            (
+                std::fs::metadata(&destination)
+                    .map(|m| m.len() as u32)
+                    .unwrap_or(0),
+                None,
+            )
+        } else {
+            // No AAC conversion requested, copy as-is
+            std::fs::copy(path, &destination)
+                .map_err(|e| format!("{}: {e}", destination.display()))?;
+            (
+                std::fs::metadata(&destination)
+                    .map(|m| m.len() as u32)
+                    .unwrap_or(0),
+                None,
+            )
+        };
+
         Ok((
             format!(":iPod_Control:Music:F{folder:02}:{name}"),
-            std::fs::metadata(&destination)
-                .map(|m| m.len() as u32)
-                .unwrap_or(0),
+            size,
+            encoded_duration,
         ))
     }
 
@@ -852,10 +924,16 @@ impl Job {
     /// One at a time, and the refusal is the honest kind: a second job while
     /// one runs would race it over the same database, and the file that landed
     /// last would carry a signature over two edits neither of them knows about.
-    pub fn start(&mut self, what: String, tracks: Vec<PathBuf>, playlist: Option<String>) {
+    pub fn start(
+        &mut self,
+        what: String,
+        tracks: Vec<PathBuf>,
+        playlist: Option<String>,
+        aac_bps: Option<u32>,
+    ) {
         self.spawn(what, move |device| match playlist {
-            Some(name) => push_playlist(device, &tracks, &name).map(Outcome::Added),
-            None => push_album(device, &tracks).map(Outcome::Added),
+            Some(name) => push_playlist(device, &tracks, &name, aac_bps).map(Outcome::Added),
+            None => push_album(device, &tracks, aac_bps).map(Outcome::Added),
         });
     }
 
@@ -979,7 +1057,11 @@ impl Job {
 ///
 /// Files in a format the device cannot play are named in [`Summary::refused`]
 /// and the rest still go.
-pub fn push_album(device: &Device, paths: &[PathBuf]) -> Result<Summary, String> {
+pub fn push_album(
+    device: &Device,
+    paths: &[PathBuf],
+    aac_bps: Option<u32>,
+) -> Result<Summary, String> {
     let mut push = Push::open(device)?;
     let mut summary = Summary::default();
     let mut added = Vec::new();
@@ -993,7 +1075,7 @@ pub fn push_album(device: &Device, paths: &[PathBuf]) -> Result<Summary, String>
             );
             continue;
         }
-        added.push(push.add_track(path)?);
+        added.push(push.add_track(path, aac_bps)?);
     }
     summary.already = push.already();
     summary.added = added.len() - summary.already;
@@ -1002,7 +1084,12 @@ pub fn push_album(device: &Device, paths: &[PathBuf]) -> Result<Summary, String>
 }
 
 /// Copy `paths` to the device and add them as a playlist called `name`.
-pub fn push_playlist(device: &Device, paths: &[PathBuf], name: &str) -> Result<Summary, String> {
+pub fn push_playlist(
+    device: &Device,
+    paths: &[PathBuf],
+    name: &str,
+    aac_bps: Option<u32>,
+) -> Result<Summary, String> {
     let mut push = Push::open(device)?;
     let mut summary = Summary::default();
     let mut added = Vec::new();
@@ -1016,7 +1103,7 @@ pub fn push_playlist(device: &Device, paths: &[PathBuf], name: &str) -> Result<S
             );
             continue;
         }
-        added.push(push.add_track(path)?);
+        added.push(push.add_track(path, aac_bps)?);
     }
     // The playlist wants the ids of the songs it names, including the ones that
     // were already on the device — a second push of the same tracks as a

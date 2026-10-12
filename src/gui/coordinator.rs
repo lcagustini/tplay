@@ -420,6 +420,16 @@ pub fn update_ui(
                     app.prefs_mut().set_crossfade_secs(cf_secs);
                 }
                 ui.separator();
+                ui.label("iPod AAC");
+                let mut aac_bps = app.prefs().ipod_aac();
+                ui.radio_value(&mut aac_bps, None, "Off");
+                ui.radio_value(&mut aac_bps, Some(128_000), "Low (128 kbps)");
+                ui.radio_value(&mut aac_bps, Some(256_000), "Medium (256 kbps)");
+                ui.radio_value(&mut aac_bps, Some(320_000), "High (320 kbps)");
+                if aac_bps != app.prefs().ipod_aac() {
+                    app.prefs_mut().set_ipod_aac(aac_bps);
+                }
+                ui.separator();
                 ui.label("Layouts");
                 let open_count = Pane::ALL
                     .iter()
@@ -670,6 +680,46 @@ pub fn update_ui(
             .show_leaf_collapse_buttons(false)
             .style(style.clone())
             .show_inside(ui, &mut viewer);
+
+        // Resize handle (bottom-right corner) for CSD windows on Wayland/GNOME
+        let resize_size = egui::vec2(16.0, 16.0);
+        let resize_rect = egui::Rect::from_min_max(
+            ui.max_rect().right_bottom() - resize_size,
+            ui.max_rect().right_bottom(),
+        );
+        let resize_resp = ui.interact(
+            resize_rect,
+            ui.id().with("resize_handle"),
+            egui::Sense::click_and_drag(),
+        );
+        if resize_resp.drag_started() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(
+                egui::ResizeDirection::SouthEast,
+            ));
+        }
+        // Visual indicator for resize handle
+        let painter = ui.painter();
+        let rect = resize_rect;
+        let stroke = if resize_resp.dragged() {
+            ui.visuals().widgets.active.fg_stroke
+        } else if resize_resp.hovered() {
+            ui.visuals().widgets.hovered.fg_stroke
+        } else {
+            ui.style().visuals.widgets.noninteractive.fg_stroke
+        };
+        // Draw diagonal lines for resize indicator
+        let corner_size = 10.0;
+        let start = rect.right_bottom() - egui::vec2(corner_size, corner_size);
+        for i in 0..3 {
+            let offset = (i as f32) * 3.0;
+            painter.line_segment(
+                [
+                    start + egui::vec2(offset, corner_size),
+                    start + egui::vec2(corner_size, offset),
+                ],
+                stroke,
+            );
+        }
     });
 
     // Enforce minimum pane sizes after layout: the splitter drag and floating

@@ -335,6 +335,7 @@ impl TPlayApp {
                 show_hidden: self.library.show_hidden(),
             },
             servers: self.network.servers().to_vec(),
+            ipod_aac: self.prefs.ipod_aac(),
         }
     }
 
