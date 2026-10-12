@@ -131,23 +131,19 @@ static SBOX: std::sync::LazyLock<([u8; 256], [u8; 256])> = std::sync::LazyLock::
 pub fn derive_key(guid: Guid) -> [u8; 64] {
     let (forward, inverse) = &*SBOX;
     let mut mixed = [0u8; 16];
-    for (pair, out) in guid
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .zip(mixed.as_chunks_mut::<4>().0)
-    {
-        let (a, b) = (u32::from(pair[0]), u32::from(pair[1]));
+    for i in 0..4 {
+        let a = u32::from(guid[i * 2]);
+        let b = u32::from(guid[i * 2 + 1]);
         let lcm = if a == 0 || b == 0 {
             1
         } else {
             a * b / gcd(a, b)
         };
         let (hi, lo) = ((lcm >> 8) as u8, lcm as u8);
-        out[0] = forward[hi as usize];
-        out[1] = inverse[hi as usize];
-        out[2] = forward[lo as usize];
-        out[3] = inverse[lo as usize];
+        mixed[i * 4] = forward[hi as usize];
+        mixed[i * 4 + 1] = inverse[hi as usize];
+        mixed[i * 4 + 2] = forward[lo as usize];
+        mixed[i * 4 + 3] = inverse[lo as usize];
     }
 
     let mut hasher = Sha1::new();

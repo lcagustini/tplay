@@ -1,0 +1,27 @@
+{
+  "id": "b5e027789",
+  "name": "Run iPod tests",
+  "command": "cd /home/lucas/Documents/tplay && cargo test ipod 2>&1 | head -100",
+  "status": "completed",
+  "outputPath": ".pi/tasks/01a12e4f-eb3e-7467-9071-86c72e4cfd4f-29616/b5e027789.output",
+  "cwd": "/home/lucas/Documents/tplay",
+  "startTime": 1791779008867,
+  "endTime": 1791779009486,
+  "exitCode": 0,
+  "signal": null,
+  "pid": 47072,
+  "bytesWritten": 3323,
+  "isAgent": false,
+  "surviveReload": false,
+  "notified": true,
+  "notifyOnCompletion": true,
+  "triggerOnCompletion": true,
+  "shellPolicy": {
+    "policy": "inherit",
+    "executable": "/bin/bash",
+    "argvPrefix": [
+      "-c"
+    ],
+    "dialect": "bash"
+  }
+}

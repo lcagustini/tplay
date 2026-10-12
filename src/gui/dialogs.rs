@@ -240,7 +240,27 @@ fn run(app: &mut TPlayApp, ctx: &egui::Context, action: ConfirmAction) {
         ConfirmAction::PushToIpod { tracks, playlist } => {
             let what = playlist.clone().unwrap_or_else(|| "this album".to_string());
             let aac_bps = app.prefs().ipod_aac();
-            app.ipod_mut().start(what, tracks, playlist, aac_bps);
+            let (cmd_tx, servers, passwords) = {
+                let n = app.network();
+                let c = n.cmd_tx().clone();
+                let s = n.servers().to_vec();
+                let p = n.passwords().clone();
+                (c, s, p)
+            };
+            app.ipod_mut().start(
+                what,
+                tracks,
+                playlist,
+                aac_bps,
+                Some(Box::new(move |p: &std::path::Path| {
+                    crate::network::spool_blocking_inner(
+                        &cmd_tx,
+                        &servers,
+                        &passwords,
+                        &p.to_string_lossy(),
+                    )
+                })),
+            );
         }
         ConfirmAction::RemoveFromIpod { paths, what } => {
             app.ipod_mut().start_remove(what, paths);

@@ -15,6 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
+use tokio::sync::oneshot;
 
 /// SMB default port (protocol constant, like HTTP's 80).
 pub const SMB_PORT: u16 = 445;
@@ -109,6 +110,14 @@ pub enum SmbCmd {
         uri: String,
         creds: SmbCreds,
         reply: Sender<SmbReply>,
+    },
+    /// Blocking spool for callers that need to wait (e.g., iPod push from a
+    /// background thread). Uses a oneshot channel so the worker can reply
+    /// directly without going through the shared reply_rx.
+    SpoolBlocking {
+        uri: String,
+        creds: SmbCreds,
+        reply: oneshot::Sender<Result<PathBuf, String>>,
     },
     /// Upload `data` to `uri`, overwriting it if it exists.
     Save {
@@ -267,6 +276,11 @@ impl Network {
         &self.servers
     }
 
+    /// Session-memory passwords keyed by host — never persisted.
+    pub fn passwords(&self) -> &HashMap<String, String> {
+        &self.passwords
+    }
+
     /// Add a server (dedup by host; re-adding updates the username).
     pub fn add_server(&mut self, host: String, username: String) {
         let host = host.trim().to_string();
@@ -377,6 +391,12 @@ impl Network {
                 let _ = std::fs::remove_file(&entry.path);
             }
         }
+    }
+
+    /// Command sender for the SMB worker — exposed for blocking spool calls
+    /// from background threads (e.g., iPod push).
+    pub fn cmd_tx(&self) -> &Sender<SmbCmd> {
+        &self.cmd_tx
     }
 
     /// Saved username for a host (or blank → guest) + session password.
@@ -627,6 +647,34 @@ impl Network {
     }
 }
 
+/// Standalone blocking spool that only requires the command sender and credentials.
+/// This can be used from any thread without needing the full `Network` struct
+/// (which is not `Sync` due to its `Receiver`).
+pub fn spool_blocking_inner(
+    cmd_tx: &Sender<SmbCmd>,
+    servers: &[ServerCfg],
+    passwords: &HashMap<String, String>,
+    uri: &str,
+) -> Result<PathBuf, String> {
+    let (tx, rx) = oneshot::channel();
+    let host = split_uri(uri).map(|(h, _, _)| h).unwrap_or_default();
+    let creds = SmbCreds {
+        username: servers
+            .iter()
+            .find(|s| s.host == host)
+            .map(|s| s.username.clone())
+            .unwrap_or_default(),
+        password: passwords.get(&host).cloned().unwrap_or_default(),
+    };
+    let _ = cmd_tx.send(SmbCmd::SpoolBlocking {
+        uri: uri.to_string(),
+        creds,
+        reply: tx,
+    });
+    rx.blocking_recv()
+        .map_err(|_| "spool worker disconnected".to_string())?
+}
+
 // ── URI model ────────────────────────────────────────────────────────────────
 
 /// Is this playlist/library path a remote `smb://` track?
@@ -781,6 +829,10 @@ fn spawn_worker(rx: Receiver<SmbCmd>) -> thread::JoinHandle<()> {
                     SmbCmd::Spool { uri, creds, reply } => {
                         let res = run_spool(&uri, &creds).await;
                         let _ = reply.send(SmbReply::Spooled { uri, result: res });
+                    }
+                    SmbCmd::SpoolBlocking { uri, creds, reply } => {
+                        let res = run_spool(&uri, &creds).await;
+                        let _ = reply.send(res);
                     }
                     SmbCmd::Save {
                         uri,

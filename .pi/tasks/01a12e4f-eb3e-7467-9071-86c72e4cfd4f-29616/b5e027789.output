@@ -1,0 +1,100 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.46s
+     Running unittests src/lib.rs (target/debug/deps/tplay-3ae7a51f860d2afe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/tplay-26423401eeae667d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/app_integration.rs (target/debug/deps/app_integration-5ba0a779a9a790d2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/audio_fixtures.rs (target/debug/deps/audio_fixtures-8c56aa781bc1d035)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+     Running tests/balance_tests.rs (target/debug/deps/balance_tests-93c3f1e88cf943f4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+     Running tests/common.rs (target/debug/deps/common-666ef51672515ea1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/config_persistence.rs (target/debug/deps/config_persistence-8841db5ef73169c1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+     Running tests/contrast_tests.rs (target/debug/deps/contrast_tests-592c76d6db5f05cd)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+     Running tests/cover_tests.rs (target/debug/deps/cover_tests-4b2f209e97f64a29)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/dock_layout.rs (target/debug/deps/dock_layout-a6ba140310024af5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/drag_drop.rs (target/debug/deps/drag_drop-c5587f116e402c2e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+     Running tests/eq_live.rs (target/debug/deps/eq_live-599f59293275871e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/eq_tests.rs (target/debug/deps/eq_tests-af92e2922a9074f0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+     Running tests/font_fallback.rs (target/debug/deps/font_fallback-3076163d36db9ce9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/gapless_crossfade.rs (target/debug/deps/gapless_crossfade-b0c8f67939db024d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 28 filtered out; finished in 0.00s
+
+     Running tests/gui_tests.rs (target/debug/deps/gui_tests-e4f9c7c001184f54)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 82 filtered out; finished in 0.00s
+
+     Running tests/ipod_tests.rs (target/debug/deps/ipod_tests-2b9c5e100e2682bd)
+
+running 9 tests

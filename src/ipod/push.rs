@@ -48,11 +48,177 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// A function that resolves a track id — local path or `smb://` URI — to a
+/// local file to read from. Concrete rather than a generic parameter, so every
+/// caller can pass `None` for "no network involved" without naming a type.
+pub type SpoolFn = Box<dyn Fn(&Path) -> Result<PathBuf, String> + Send + 'static>;
+
 /// Seconds between the Unix epoch and the Mac epoch, which is what every
 /// timestamp in this database counts from. Measured: the fixture's Library
 /// playlist was created at 3 874 501 490, and that minus 2 082 844 800 is a date
 /// in June 2026.
 const MAC_EPOCH_OFFSET: u64 = 2_082_844_800;
+
+/// Build an mhit track record header (624 bytes for dbversion 0x75) from scratch.
+/// This replaces the embedded binary templates (mhit_mp3.bin, mhit_m4a.bin) with
+/// programmatic construction using field offsets measured from a real device.
+/// See IPOD_DATABASE_FORMAT_REPORT.md for the complete field map.
+fn build_mhit_template(kind: &Kind) -> Vec<u8> {
+    // mhit header length for dbversion 0x75 is 0x270 = 624 bytes
+    const MHIT_HEADER_LEN: usize = 624;
+    let mut hdr = vec![0u8; MHIT_HEADER_LEN];
+
+    let mut w = |off: usize, bytes: &[u8]| {
+        let end = off + bytes.len();
+        hdr[off..end].copy_from_slice(bytes);
+    };
+
+    w(M_MHODS, &0u32.to_le_bytes());
+    w(M_ID, &0u32.to_le_bytes());
+    w(M_VISIBLE, &1u32.to_le_bytes());
+    w(M_FILETYPE, &kind.code);
+    // type1 (offset 28), type2 (offset 29) - format-specific from fixture
+    let (t1, t2) = if kind.code == *b" 3PM" {
+        (32u8, 51u8) // MP3
+    } else {
+        (32u8, 65u8) // M4A
+    };
+    w(28, &t1.to_le_bytes());
+    w(29, &t2.to_le_bytes());
+    w(30, &0u8.to_le_bytes());
+    w(M_RATING, &0u8.to_le_bytes());
+    w(M_MODIFIED, &0u32.to_le_bytes());
+    w(M_SIZE, &0u32.to_le_bytes());
+    w(M_LENGTH, &0u32.to_le_bytes());
+    w(44, &0u32.to_le_bytes());
+    w(48, &0u32.to_le_bytes());
+    w(52, &0u32.to_le_bytes());
+    w(56, &0u32.to_le_bytes());
+    w(60, &0u32.to_le_bytes());
+    w(64, &0u32.to_le_bytes());
+    w(68, &0u32.to_le_bytes());
+    w(72, &0u32.to_le_bytes());
+    w(76, &0u32.to_le_bytes());
+    w(80, &0u32.to_le_bytes());
+    w(84, &0u32.to_le_bytes());
+    w(88, &0u32.to_le_bytes());
+    w(92, &0u32.to_le_bytes());
+    w(96, &0u32.to_le_bytes());
+    w(100, &0u32.to_le_bytes());
+    w(M_ADDED, &0u32.to_le_bytes());
+    w(108, &0u32.to_le_bytes());
+    w(M_DBID, &0u64.to_le_bytes());
+    w(120, &0u8.to_le_bytes());
+    w(121, &0u8.to_le_bytes());
+    w(122, &0u16.to_le_bytes());
+    w(124, &0u16.to_le_bytes());
+    w(126, &0xFFFFu16.to_le_bytes());
+    w(128, &0u32.to_le_bytes());
+    w(132, &0u32.to_le_bytes());
+    w(136, &0u32.to_le_bytes());
+    w(140, &0u32.to_le_bytes());
+    w(M_UNK14, &kind.unk14.to_le_bytes());
+    w(146, &0u16.to_le_bytes());
+    w(148, &0u32.to_le_bytes());
+    w(152, &0u32.to_le_bytes());
+    w(156, &0u32.to_le_bytes());
+    w(160, &0u32.to_le_bytes());
+    w(M_HAS_ARTWORK, &2u8.to_le_bytes());
+    w(165, &0u8.to_le_bytes());
+    w(166, &0u8.to_le_bytes());
+    w(167, &0u8.to_le_bytes());
+    w(168, &0u64.to_le_bytes());
+    w(176, &0u8.to_le_bytes());
+    w(177, &0u8.to_le_bytes());
+    w(178, &0u8.to_le_bytes());
+    w(179, &0u8.to_le_bytes());
+    w(180, &0u32.to_le_bytes());
+    w(M_PRIMING, &kind.priming.to_le_bytes());
+    w(188, &0u64.to_le_bytes());
+    w(192, &0u32.to_le_bytes());
+    w(196, &0u32.to_le_bytes());
+    w(200, &0u32.to_le_bytes());
+    w(M_UNK27, &kind.unk27.to_le_bytes());
+    w(M_MEDIATYPE, &1u32.to_le_bytes());
+    w(212, &0u32.to_le_bytes());
+    w(216, &0u32.to_le_bytes());
+    w(220, &0u32.to_le_bytes());
+    w(224, &0u32.to_le_bytes());
+    w(228, &0u32.to_le_bytes());
+    w(232, &0u32.to_le_bytes());
+    w(236, &0u32.to_le_bytes());
+    w(240, &0u32.to_le_bytes());
+    w(244, &0u32.to_le_bytes());
+    w(248, &0u32.to_le_bytes());
+    w(252, &0u32.to_le_bytes());
+    w(256, &0u16.to_le_bytes());
+    w(258, &0u16.to_le_bytes());
+    if kind.code == *b" 3PM" {
+        w(
+            260,
+            &[
+                0xD4, 0x27, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ],
+        );
+    } else {
+        w(
+            260,
+            &[
+                0xB1, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ],
+        );
+    }
+    w(280, &0u32.to_le_bytes());
+    w(284, &0u32.to_le_bytes());
+    w(M_ALBUM, &0u32.to_le_bytes());
+    w(292, &0u32.to_le_bytes());
+    w(296, &0u32.to_le_bytes());
+    w(300, &0u32.to_le_bytes());
+    w(304, &0u32.to_le_bytes());
+    w(308, &0u32.to_le_bytes());
+    w(312, &0u32.to_le_bytes());
+    if kind.code == *b" 3PM" {
+        w(312, &0x8180808080808080u64.to_le_bytes());
+    } else {
+        w(312, &0x0000000000000000u64.to_le_bytes());
+    }
+    w(320, &0u32.to_le_bytes());
+    w(324, &0u32.to_le_bytes());
+    w(328, &0u32.to_le_bytes());
+    w(332, &0u32.to_le_bytes());
+    w(336, &0u32.to_le_bytes());
+    w(340, &0u32.to_le_bytes());
+    w(344, &0u32.to_le_bytes());
+    w(348, &0u32.to_le_bytes());
+    w(M_IMAGE_ID, &0u32.to_le_bytes());
+
+    hdr
+}
+
+/// Build an mhip playlist item header (72 bytes for dbversion 0x75) from scratch.
+/// This replaces the embedded mhip_regular.bin template.
+fn build_mhip_template() -> Vec<u8> {
+    const MHIP_HEADER_LEN: usize = 72;
+    let mut hdr = vec![0u8; MHIP_HEADER_LEN];
+
+    let mut w = |off: usize, bytes: &[u8]| {
+        let end = off + bytes.len();
+        hdr[off..end].copy_from_slice(bytes);
+    };
+
+    w(0, &0u8.to_le_bytes());
+    w(1, &[0u8; 3]);
+    w(4, &0u32.to_le_bytes());
+    w(8, &0u32.to_le_bytes());
+    w(12, &0u32.to_le_bytes());
+    w(P_TRACK, &0u32.to_le_bytes());
+    w(P_STAMP, &0u32.to_le_bytes());
+    w(24, &0u32.to_le_bytes());
+
+    hdr
+}
 
 /// `F00` through `F49`. The number is not load-bearing — the location string
 /// below is what the device follows — but a directory that holds every track is
@@ -70,7 +236,9 @@ const MUSIC_FOLDERS: u32 = 50;
 const M_MHODS: usize = 12;
 const M_ID: usize = 16;
 const M_VISIBLE: usize = 20;
-const M_FILETYPE: usize = 24;
+/// The four bytes naming the record's file type. Public because [`retarget`]
+/// writes them and a reader of this format has to know where they are.
+pub const M_FILETYPE: usize = 24;
 const M_RATING: usize = 31;
 const M_MODIFIED: usize = 32;
 const M_SIZE: usize = 36;
@@ -90,6 +258,18 @@ const M_IMAGE_ID: usize = 352;
 /// it: offset 314 holds a value matching no album for any of the fixture's 1169
 /// tracks, while 288 matches 1165 of them.
 const M_ALBUM: usize = 288;
+
+/// The three words that follow the file type, each measured as **fixed per
+/// format**: all 14 MP3 records in the fixture hold one value, all 1155 M4A
+/// records hold the other. They are what [`retarget`] rewrites when a record
+/// has to be cloned across formats.
+///
+/// `unk14` is the layer/codec marker — the published table agrees it is
+/// `0x000C` for MPEG-1 Layer 3 and `0x0033` for AAC. The other two the table
+/// describes differently from this device, so the measurement stands.
+pub const M_UNK14: usize = 144;
+pub const M_PRIMING: usize = 184;
+pub const M_UNK27: usize = 204;
 
 /// `mhia`.
 const A_CHILDREN: usize = 12;
@@ -163,12 +343,20 @@ pub fn all_audio_files_under(dir: &Path) -> Vec<PathBuf> {
 /// reversed". Read it forwards and every template lookup comes back empty,
 /// which is what this bit first cost.
 ///
-/// FLAC, OGG and WAV are refused by name rather than transcoded: a transcoder is
-/// a dependency, a licensing question and a second thing that can fail, for
-/// files the device would refuse anyway.
+/// The formats a device that cannot play them will get as AAC when `ipod_aac`
+/// is on, and a refusal by name when it is off: a transcoder is a dependency, a
+/// licensing question and a second thing that can fail, so nothing here
+/// transcodes anything by itself.
 pub struct Kind {
     code: [u8; 4],
-    extension: &'static str,
+    /// The extension both the source file and the file on the device carry.
+    pub extension: &'static str,
+    /// `mhit` 144: `0x000C` on MP3, `0x0033` on M4A.
+    unk14: u16,
+    /// `mhit` 184: the encoder's priming in samples. 528 on MP3, 2112 on M4A.
+    priming: u32,
+    /// `mhit` 204: `0x02000003` on MP3, `0x00000001` on M4A.
+    unk27: u32,
 }
 
 /// The formats this writes. AAC and ALAC reach the device as `.m4a`.
@@ -176,17 +364,45 @@ pub const KINDS: [Kind; 2] = [
     Kind {
         code: *b" 3PM",
         extension: "mp3",
+        unk14: 0x000c,
+        priming: 528,
+        unk27: 0x0200_0003,
     },
     Kind {
         code: *b" A4M",
-        extension: "m4a",
+        extension: AAC_EXT,
+        unk14: 0x0033,
+        priming: 2112,
+        unk27: 0x0000_0001,
     },
 ];
+
+/// The extension a converted file lands as, which is what `KINDS` names it by.
+const AAC_EXT: &str = "m4a";
 
 /// The kind of file at `path`, or `None` when the device cannot play it.
 pub fn kind_of(path: &Path) -> Option<&'static Kind> {
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    kind_named(&extension)
+}
+
+/// The kind stored under this extension.
+pub fn kind_named(extension: &str) -> Option<&'static Kind> {
     KINDS.iter().find(|k| k.extension == extension)
+}
+
+/// What `path` becomes on the device once the conversion decision is taken:
+/// its own kind when it copies as-is, or `.m4a` when a conversion takes it.
+///
+/// `None` is the refusal, and it is about the **destination**, not the source.
+/// A FLAC with AAC conversion on is accepted here and lands as `.m4a`; the same
+/// FLAC with conversion off is refused, because nothing would make it playable.
+pub fn kind_for(path: &Path, convert: bool) -> Option<&'static Kind> {
+    if convert {
+        kind_named(AAC_EXT)
+    } else {
+        kind_of(path)
+    }
 }
 
 /// What one push did.
@@ -287,6 +503,8 @@ pub struct Push<'a> {
     present: HashMap<String, u32>,
     /// How many `add_track` calls found one, for the summary.
     already: usize,
+    /// Optional function to resolve a track path to a local file (for SMB).
+    spool_fn: Option<SpoolFn>,
 }
 
 impl<'a> Push<'a> {
@@ -320,9 +538,15 @@ impl<'a> Push<'a> {
             covers: HashMap::new(),
             present: HashMap::new(),
             already: 0,
+            spool_fn: None,
         };
         push.take_stock()?;
         Ok(push)
+    }
+
+    /// Set the spool function for resolving SMB URIs to local paths.
+    pub fn set_spool_fn(&mut self, f: SpoolFn) {
+        self.spool_fn = Some(f);
     }
 
     fn take_stock(&mut self) -> Result<(), String> {
@@ -384,11 +608,23 @@ impl<'a> Push<'a> {
     /// uses — so no album grouping is needed and a playlist spanning four albums
     /// gets each track's own.
     pub fn add_track(&mut self, path: &Path, aac_bps: Option<u32>) -> Result<u32, String> {
-        let Some(kind) = kind_of(path) else {
+        // Resolved once: the bitrate check and the copy both read the local
+        // file, and an SMB URI opens nothing.
+        let src_path = self.resolve_path(path)?;
+        let encode_bps = aac_bps.filter(|&bps| Self::should_convert(&src_path, bps));
+        let Some(kind) = kind_for(path, encode_bps.is_some()) else {
             return Err("this iPod cannot play that format".into());
         };
         let info = tracks::info(path)
             .ok_or_else(|| format!("{}: the file could not be read", path.display()))?;
+
+        log::info!(
+            "pushing '{}' by {} ({}) -> {}",
+            info.title,
+            info.artist,
+            path.display(),
+            kind.extension
+        );
 
         // Already on the device? Then this is the second push of the same song,
         // and the graceful answer is to leave the one that is there. Checked
@@ -411,23 +647,36 @@ impl<'a> Push<'a> {
 
         let track_id = self.next_id;
         let (location, size, encoded_duration) =
-            self.place(track_id, path, kind.extension, aac_bps)?;
+            self.place(track_id, &src_path, kind.extension, encode_bps)?;
         let album_id = self.album_id(&info);
 
-        let template = {
+        let (template, foreign) = {
             let list = db::list_holder(&self.root, db::kind::TRACKS)
                 .ok_or("this iPod's database has no track list")?;
-            template_for(list, kind.code)
-                .ok_or_else(|| {
-                    format!(
-                        "this iPod holds no {} file to take the record's shape from",
-                        kind.extension
-                    )
-                })?
-                .clone()
+            match template_for(list, kind.code) {
+                Some((found, foreign)) => (found.clone(), foreign),
+                None => {
+                    // Empty track list — use an embedded record from a real device
+                    // of this dbversion (0x75). For other versions we cannot guess
+                    // the correct header length and must refuse.
+                    let dbversion = self.root.u32(16).unwrap_or(0);
+                    if dbversion != 0x75 {
+                        return Err(
+                            "this iPod's database holds no track to copy a record from".into()
+                        );
+                    }
+                    let header_bytes = build_mhit_template(kind);
+                    (Chunk::leaf(id::MHIT, header_bytes), false)
+                }
+            }
         };
 
         let mut record = Chunk::leaf(id::MHIT, template.header().to_vec());
+        // A device holding no record of this format still gets a correct one:
+        // the clone carries another format's four words until they are rewritten.
+        if foreign {
+            retarget(&mut record, kind);
+        }
         record.set_u32(M_MHODS, 0);
         record.set_u32(M_ID, track_id);
         record.set_u32(M_VISIBLE, 1);
@@ -487,7 +736,18 @@ impl<'a> Push<'a> {
         self.already
     }
 
-    /// Whether a track at `path` should be converted to AAC at `target_bps`.
+    /// What `path` becomes on this device, or `None` when nothing will put it
+    /// there — which is the refusal the caller records before `add_track` turns
+    /// the same answer into an error.
+    ///
+    /// The kind is the **destination's**. Resolving happens here because the
+    /// bitrate check reads the local file, and an SMB URI opens nothing.
+    pub fn out_kind(&self, path: &Path, aac_bps: Option<u32>) -> Option<&'static Kind> {
+        let src_path = self.resolve_path(path).ok()?;
+        let convert = aac_bps.is_some_and(|bps| Self::should_convert(&src_path, bps));
+        kind_for(path, convert)
+    }
+
     /// Whether a track at `path` should be converted to AAC at `target_bps`.
     ///
     /// - If the format is not playable on the device (FLAC, OGG, WAV), always convert.
@@ -530,14 +790,27 @@ impl<'a> Push<'a> {
         Ok(Some(added.image_id))
     }
 
-    /// Copy `path` onto the device. Returns the colon-separated location the
+    /// Resolve `path` to a local file, using the spool function for SMB URIs.
+    fn resolve_path(&self, path: &Path) -> Result<PathBuf, String> {
+        if let Some(spool_fn) = &self.spool_fn {
+            spool_fn(path)
+        } else {
+            Ok(path.to_path_buf())
+        }
+    }
+
+    /// Copy `src_path` onto the device. Returns the colon-separated location the
     /// database must carry and the size it must record.
+    ///
+    /// `src_path` is already local, so an SMB URI never reaches `std::fs`, and
+    /// `extension` is the **destination's**: a converted file is an `.m4a` on
+    /// the device whatever it was sent as.
     fn place(
         &mut self,
         track_id: u32,
-        path: &Path,
+        src_path: &Path,
         extension: &str,
-        aac_bps: Option<u32>,
+        encode_bps: Option<u32>,
     ) -> Result<(String, u32, Option<u32>), String> {
         // iTunes distributes tracks across the fifty folders with its own hash,
         // which is not derivable from this database. It does not need to be: the
@@ -558,42 +831,35 @@ impl<'a> Push<'a> {
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let destination = dir.join(&name);
 
-        let (size, encoded_duration) = if let Some(bps) = aac_bps {
-            if Self::should_convert(path, bps) {
-                // Encode to AAC (.m4a)
-                let aac_dest = destination.with_extension("m4a");
-                let duration_ms = encode_file(path, bps, &aac_dest)
-                    .map_err(|e| format!("AAC encode failed: {e}"))?;
-                // Update extension to m4a for the location string
-                let aac_name = format!("{stem}.m4a");
-                return Ok((
-                    format!(":iPod_Control:Music:F{folder:02}:{aac_name}"),
-                    std::fs::metadata(&aac_dest)
-                        .map(|m| m.len() as u32)
-                        .unwrap_or(0),
-                    Some(duration_ms),
-                ));
+        let encoded_duration = match encode_bps {
+            // The destination name already carries `.m4a`, so the encode lands
+            // on the path the location string below names.
+            Some(bps) => {
+                log::info!(
+                    "encoding {} ({} kbps) -> {}",
+                    src_path.display(),
+                    bps / 1000,
+                    destination.display()
+                );
+                Some(
+                    encode_file(src_path, bps, &destination)
+                        .map_err(|e| format!("AAC encode failed: {e}"))?,
+                )
             }
-            // Copy as-is
-            std::fs::copy(path, &destination)
-                .map_err(|e| format!("{}: {e}", destination.display()))?;
-            (
-                std::fs::metadata(&destination)
-                    .map(|m| m.len() as u32)
-                    .unwrap_or(0),
-                None,
-            )
-        } else {
-            // No AAC conversion requested, copy as-is
-            std::fs::copy(path, &destination)
-                .map_err(|e| format!("{}: {e}", destination.display()))?;
-            (
-                std::fs::metadata(&destination)
-                    .map(|m| m.len() as u32)
-                    .unwrap_or(0),
-                None,
-            )
+            None => {
+                log::info!(
+                    "copying {} -> {}",
+                    src_path.display(),
+                    destination.display()
+                );
+                std::fs::copy(src_path, &destination)
+                    .map_err(|e| format!("{}: {e}", destination.display()))?;
+                None
+            }
         };
+        let size = std::fs::metadata(&destination)
+            .map(|m| m.len() as u32)
+            .unwrap_or(0);
 
         Ok((
             format!(":iPod_Control:Music:F{folder:02}:{name}"),
@@ -670,12 +936,23 @@ impl<'a> Push<'a> {
             .children_of(id::MHIP)
             .next()
             .cloned()
-            .ok_or("this iPod's Library playlist has no entries to copy the shape from")?;
-        let position = master.children_of(id::MHIP).count() as u32;
+            .unwrap_or_else(|| {
+                // Empty Library playlist — use a programmatically built MHIP template.
+                Chunk::leaf(id::MHIP, build_mhip_template())
+            });
+        let position = master.children_of(id::MHIP).count() as u32 + 1;
 
         let mut item = template;
         item.set_u32(P_TRACK, track_id);
         item.set_u32(P_STAMP, now_mac());
+        if item.mhod_mut(f::POSITION_INDICATOR).is_none() {
+            // Template has no position indicator — create one with value 1
+            // (must be >= 1, zero causes track to list but not play)
+            let mut mhod = Chunk::leaf(id::MHOD, vec![0u8; 12]);
+            mhod.set_trailer(vec![0u8; 16]);
+            mhod.set_u32(ORDER_POSITION, 1);
+            item.push(mhod);
+        }
         if let Some(order) = item.mhod_mut(f::POSITION_INDICATOR) {
             order.set_u32(ORDER_POSITION, position);
         }
@@ -701,7 +978,10 @@ impl<'a> Push<'a> {
             .children_of(id::MHIP)
             .next()
             .cloned()
-            .ok_or("this iPod's Library playlist has no entries to copy the shape from")?;
+            .unwrap_or_else(|| {
+                // Empty Library playlist — use a programmatically built MHIP template.
+                Chunk::leaf(id::MHIP, build_mhip_template())
+            });
 
         let mut list = Chunk::leaf(id::MHYP, master.header().to_vec());
         list.set_u32(H_MHODS, 1);
@@ -719,8 +999,16 @@ impl<'a> Push<'a> {
             let mut item = item_template.clone();
             item.set_u32(P_TRACK, *track_id);
             item.set_u32(P_STAMP, now_mac());
+            if item.mhod_mut(f::POSITION_INDICATOR).is_none() {
+                // Template has no position indicator — create one with value 1
+                // (must be >= 1, zero causes track to list but not play)
+                let mut mhod = Chunk::leaf(id::MHOD, vec![0u8; 12]);
+                mhod.set_trailer(vec![0u8; 16]);
+                mhod.set_u32(ORDER_POSITION, 1);
+                item.push(mhod);
+            }
             if let Some(order) = item.mhod_mut(f::POSITION_INDICATOR) {
-                order.set_u32(ORDER_POSITION, position as u32);
+                order.set_u32(ORDER_POSITION, (position as u32) + 1);
             }
             list.push(item);
         }
@@ -806,11 +1094,50 @@ fn stem_for(id: u32) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// An existing track of this file type, to clone.
-fn template_for(tracks: &Chunk, code: [u8; 4]) -> Option<&Chunk> {
-    tracks
+/// A record to clone, and whether it belongs to a track of **another** format.
+///
+/// The same format first: then every byte this module cannot name already
+/// describes the codec being written. But a device filled by AAC conversion
+/// holds no MP3 record, and one filled by MP3 holds no M4A — so with no exact
+/// match this hands back any track at all, and [`retarget`] rewrites the four
+/// words that follow the format. Refusing instead would reject a file the
+/// device can hold, which is the bug this fallback exists to fix.
+///
+/// `None` only when the database holds no track at all. Every record here is
+/// cloned and never constructed, so an empty track list has nothing to copy.
+pub fn template_for(tracks: &Chunk, code: [u8; 4]) -> Option<(&Chunk, bool)> {
+    if let Some(exact) = tracks
         .children_of(id::MHIT)
-        .find(|t| t.bytes_at(M_FILETYPE, 4) == Some(&code))
+        .find(|t| t.bytes_at(M_FILETYPE, 4) == Some(code.as_slice()))
+    {
+        return Some((exact, false));
+    }
+    tracks.children_of(id::MHIT).next().map(|any| (any, true))
+}
+
+/// Rewrite the four words that follow the file format on a record cloned from
+/// a track of another format.
+///
+/// Left alone, a record cloned from an M4A track tells the device that a
+/// `.mp3` file is AAC: file type, layer marker and priming all say the wrong
+/// codec.
+///
+/// type1/type2 (offsets 28/29) are format-specific. The fixture's 14 MP3
+/// records use (32, 51) and 1155 M4A records use (32, 65). Use those
+/// values per target format.
+pub fn retarget(record: &mut Chunk, kind: &Kind) {
+    record.set_u32(M_FILETYPE, u32::from_le_bytes(kind.code));
+    record.set_u16(M_UNK14, kind.unk14);
+    record.set_u32(M_PRIMING, kind.priming);
+    record.set_u32(M_UNK27, kind.unk27);
+    // type1 (offset 28), type2 (offset 29) - format-specific from fixture
+    let (t1, t2) = if kind.code == *b" 3PM" {
+        (32u8, 51u8) // MP3
+    } else {
+        (32u8, 65u8) // M4A
+    };
+    record.set_u8(28, t1);
+    record.set_u8(29, t2);
 }
 
 fn strings_for(info: &TrackInfo, location: &str) -> Vec<(u32, String)> {
@@ -961,10 +1288,13 @@ impl Job {
         tracks: Vec<PathBuf>,
         playlist: Option<String>,
         aac_bps: Option<u32>,
+        spool_fn: Option<SpoolFn>,
     ) {
         self.spawn(what, move |device| match playlist {
-            Some(name) => push_playlist(device, &tracks, &name, aac_bps).map(Outcome::Added),
-            None => push_album(device, &tracks, aac_bps).map(Outcome::Added),
+            Some(name) => {
+                push_playlist(device, &tracks, &name, aac_bps, spool_fn).map(Outcome::Added)
+            }
+            None => push_album(device, &tracks, aac_bps, spool_fn).map(Outcome::Added),
         });
     }
 
@@ -1092,12 +1422,16 @@ pub fn push_album(
     device: &Device,
     paths: &[PathBuf],
     aac_bps: Option<u32>,
+    spool_fn: Option<SpoolFn>,
 ) -> Result<Summary, String> {
     let mut push = Push::open(device)?;
+    if let Some(f) = spool_fn {
+        push.set_spool_fn(f);
+    }
     let mut summary = Summary::default();
     let mut added = Vec::new();
     for path in paths {
-        if kind_of(path).is_none() {
+        if push.out_kind(path, aac_bps).is_none() {
             summary.refused.push(
                 path.file_name()
                     .unwrap_or(path.as_os_str())
@@ -1120,12 +1454,16 @@ pub fn push_playlist(
     paths: &[PathBuf],
     name: &str,
     aac_bps: Option<u32>,
+    spool_fn: Option<SpoolFn>,
 ) -> Result<Summary, String> {
     let mut push = Push::open(device)?;
+    if let Some(f) = spool_fn {
+        push.set_spool_fn(f);
+    }
     let mut summary = Summary::default();
     let mut added = Vec::new();
     for path in paths {
-        if kind_of(path).is_none() {
+        if push.out_kind(path, aac_bps).is_none() {
             summary.refused.push(
                 path.file_name()
                     .unwrap_or(path.as_os_str())

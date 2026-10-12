@@ -49,7 +49,7 @@ pub fn encode_file(src: &Path, bitrate_bps: u32, dest: &Path) -> Result<u32, Str
         .channels
         .ok_or_else(|| format!("{}: no channel layout", src.display()))?;
 
-    let channel_count = channels.count();
+    let _channel_count = channels.count();
 
     // Build the decoder.
     let mut decoder = symphonia::default::get_codecs()
@@ -161,31 +161,30 @@ pub fn encode_file(src: &Path, bitrate_bps: u32, dest: &Path) -> Result<u32, Str
             }
         }
 
-        // Convert to interleaved f32.
-        let mut interleaved = Vec::with_capacity(frames * channel_count.min(2) as usize);
-        if channel_count >= 2 {
-            // Stereo or more: take first two channels, or downmix.
-            if channel_count == 2 {
+        // Convert to interleaved f32. Use decoded channel count `ch` for downmix.
+        let mut interleaved = Vec::with_capacity(frames * ch.min(2) as usize);
+        if ch >= 2 {
+            // Stereo or more: take first two channels, or downmix all to stereo.
+            if ch == 2 {
                 for (a, b) in chan_data[0].iter().zip(chan_data[1].iter()).take(frames) {
                     interleaved.push(*a);
                     interleaved.push(*b);
                 }
             } else {
-                // Downmix to stereo: average all channels into L/R.
+                // Downmix to stereo: average all channels into L and R.
                 for i in 0..frames {
-                    let (l, r) = chan_data.iter().take(channel_count).enumerate().fold(
-                        (0.0, 0.0),
-                        |(l, r), (c, ch_samples)| {
-                            let sample = ch_samples[i];
-                            if c % 2 == 0 {
-                                (l + sample, r)
-                            } else {
-                                (l, r + sample)
-                            }
-                        },
-                    );
-                    interleaved.push(l / (channel_count.div_ceil(2) as f32));
-                    interleaved.push(r / (channel_count / 2).max(1) as f32);
+                    let mut l = 0.0;
+                    let mut r = 0.0;
+                    for (c, samples) in chan_data.iter().enumerate().take(ch) {
+                        let sample = samples[i];
+                        if c % 2 == 0 {
+                            l += sample;
+                        } else {
+                            r += sample;
+                        }
+                    }
+                    interleaved.push(l / (ch.div_ceil(2) as f32));
+                    interleaved.push(r / (ch / 2).max(1) as f32);
                 }
             }
         } else {

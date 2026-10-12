@@ -410,6 +410,108 @@ fn only_formats_the_device_can_play_are_accepted() {
     }
 }
 
+/// A source the device cannot play is refused only when nothing converts it.
+///
+/// The refusal is about the **destination**, not the source. With AAC
+/// conversion on, a FLAC lands on the device as `.m4a` and must be accepted.
+/// With it off, nothing makes it playable and the push must list it as refused.
+#[test]
+fn a_source_is_refused_only_when_nothing_will_convert_it() {
+    let flac = Path::new("song.flac");
+    assert!(
+        push::kind_for(flac, false).is_none(),
+        "no conversion requested, and the device cannot play FLAC"
+    );
+    assert_eq!(
+        push::kind_for(flac, true).map(|k| k.extension),
+        Some("m4a"),
+        "conversion takes it, so it lands as .m4a"
+    );
+    assert_eq!(
+        push::kind_for(Path::new("song.mp3"), false).map(|k| k.extension),
+        Some("mp3"),
+        "a copy as-is keeps the source's format"
+    );
+    assert_eq!(
+        push::kind_for(Path::new("song.opus"), true).map(|k| k.extension),
+        Some("m4a"),
+        "a format the device has no word for is still convertible"
+    );
+}
+
+/// A device that holds no record of this format must still hand one back.
+///
+/// Before the fallback, pushing an MP3 to a device filled by AAC conversion
+/// failed with "this iPod holds no mp3 file to take the record's shape from",
+/// and pushing AAC to a device filled by MP3 failed the same way.
+#[test]
+fn a_device_without_this_format_still_hands_back_a_record_to_clone() {
+    // One record whose file type is zero, which matches neither format.
+    let mut foreign_list = Chunk::leaf(id::MHLT, vec![0u8; 12]);
+    foreign_list.push(Chunk::leaf(id::MHIT, vec![0u8; 612]));
+    let (_, foreign) = push::template_for(&foreign_list, *b" 3PM")
+        .expect("a database holding a track must offer something to clone");
+    assert!(
+        foreign,
+        "a record of another format must be flagged for rewriting"
+    );
+
+    let root = db::parse(&database()).unwrap();
+    let tracks = db::list_holder(&root, db::kind::TRACKS).expect("a track list");
+    let (_, foreign) = push::template_for(tracks, *b" 3PM").expect("the fixture holds MP3 records");
+    assert!(!foreign, "a record of the right format needs no rewriting");
+
+    let empty = Chunk::leaf(id::MHLT, vec![0u8; 12]);
+    assert!(
+        push::template_for(&empty, *b" 3PM").is_none(),
+        "an empty track list has nothing to clone and must not pretend otherwise"
+    );
+}
+
+/// The four words `retarget` writes, checked against records this device
+/// actually holds. The expected values are read from the fixture rather than
+/// written out, so the test fails if either side drifts.
+#[test]
+fn retargeting_a_record_makes_it_hold_the_target_formats_bytes() {
+    let root = db::parse(&database()).unwrap();
+    let tracks = db::list_holder(&root, db::kind::TRACKS).expect("a track list");
+    let (mp3, foreign) =
+        push::template_for(tracks, *b" 3PM").expect("the fixture holds MP3 records");
+    assert!(!foreign, "the fixture must hold real MP3 records to copy");
+    let (m4a, _) = push::template_for(tracks, *b" A4M").expect("the fixture holds M4A records");
+
+    let mut cloned = Chunk::leaf(id::MHIT, mp3.header().to_vec());
+    push::retarget(&mut cloned, push::kind_named("m4a").expect("an M4A kind"));
+
+    assert_eq!(
+        words(&cloned),
+        words(m4a),
+        "a record cloned across formats must read as a record of that format"
+    );
+}
+
+/// The four `mhit` bytes that follow the file type, for comparison.
+fn words(record: &Chunk) -> ([u8; 4], u16, u32, u32) {
+    let code = record
+        .bytes_at(push::M_FILETYPE, 4)
+        .expect("a file type")
+        .try_into()
+        .expect("four bytes");
+    let marker = u16::from_le_bytes(
+        record
+            .bytes_at(push::M_UNK14, 2)
+            .expect("a layer marker")
+            .try_into()
+            .expect("two bytes"),
+    );
+    (
+        code,
+        marker,
+        record.u32(push::M_PRIMING).expect("priming"),
+        record.u32(push::M_UNK27).expect("the word at 204"),
+    )
+}
+
 /// Add one track, and check every claim the push makes about what it did.
 #[test]
 fn adding_a_track_updates_the_database_and_the_disk_together() {
@@ -2212,7 +2314,7 @@ fn pushing_the_same_song_twice_leaves_one_copy() {
     common::write_tagged_mp3(&source, "Renascença", "A Band", "An Album");
 
     let tracks_before = tracks_of(&pod).len();
-    let first = push::push_album(&device, std::slice::from_ref(&source), None).unwrap();
+    let first = push::push_album(&device, std::slice::from_ref(&source), None, None).unwrap();
     assert_eq!(first.added, 1);
     assert_eq!(first.already, 0);
     let after_first = tracks_of(&pod).len();
@@ -2220,7 +2322,7 @@ fn pushing_the_same_song_twice_leaves_one_copy() {
     let files_after_first = device_music_files(&pod).len();
 
     // The same file, same folder, same everything — the second press.
-    let second = push::push_album(&device, std::slice::from_ref(&source), None).unwrap();
+    let second = push::push_album(&device, std::slice::from_ref(&source), None, None).unwrap();
     assert_eq!(second.already, 1, "the song was recognised");
     assert_eq!(second.added, 0, "and not copied again");
     assert_eq!(
@@ -2250,7 +2352,7 @@ fn two_different_songs_both_go_across() {
     common::write_tagged_mp3(&one, "First Song", "A Band", "An Album");
     common::write_tagged_mp3(&two, "Second Song", "A Band", "An Album");
 
-    let summary = push::push_album(&device, &[one, two], None).unwrap();
+    let summary = push::push_album(&device, &[one, two], None, None).unwrap();
     assert_eq!(summary.added, 2);
     assert_eq!(summary.already, 0, "same album and artist, different song");
     assert_eq!(device_tracks_titled(&pod, "First Song").len(), 1);
@@ -2268,7 +2370,7 @@ fn the_same_song_on_two_albums_is_two_tracks() {
     common::write_tagged_mp3(&one, "Yesterday", "A Band", "Live");
     common::write_tagged_mp3(&two, "Yesterday", "A Band", "Studio");
 
-    let summary = push::push_album(&device, &[one, two], None).unwrap();
+    let summary = push::push_album(&device, &[one, two], None, None).unwrap();
     assert_eq!(summary.added, 2, "a compilation has the same song twice");
 }
 
@@ -2286,9 +2388,15 @@ fn a_playlist_of_already_present_songs_is_still_created() {
     let source = pod.root.join("song.mp3");
     common::write_tagged_mp3(&source, "Renascença", "A Band", "An Album");
 
-    push::push_album(&device, std::slice::from_ref(&source), None).unwrap();
-    let second =
-        push::push_playlist(&device, std::slice::from_ref(&source), "Favourites", None).unwrap();
+    push::push_album(&device, std::slice::from_ref(&source), None, None).unwrap();
+    let second = push::push_playlist(
+        &device,
+        std::slice::from_ref(&source),
+        "Favourites",
+        None,
+        None,
+    )
+    .unwrap();
     assert_eq!(second.added, 0, "nothing new to copy");
     assert_eq!(second.already, 1);
 
@@ -2325,11 +2433,11 @@ fn a_tag_edit_makes_a_second_copy_rather_than_silently_skipping() {
     let device = pod.device();
     let source = pod.root.join("song.mp3");
     common::write_tagged_mp3(&source, "Original Title", "A Band", "An Album");
-    push::push_album(&device, std::slice::from_ref(&source), None).unwrap();
+    push::push_album(&device, std::slice::from_ref(&source), None, None).unwrap();
 
     // The same audio, retitled on disk.
     common::write_tagged_mp3(&source, "Corrected Title", "A Band", "An Album");
-    let second = push::push_album(&device, std::slice::from_ref(&source), None).unwrap();
+    let second = push::push_album(&device, std::slice::from_ref(&source), None, None).unwrap();
 
     assert_eq!(
         second.already, 0,
@@ -2383,10 +2491,10 @@ fn a_retagged_title_in_another_case_is_the_same_song() {
     let device = pod.device();
     let source = pod.root.join("song.mp3");
     common::write_tagged_mp3(&source, "Yesterday", "The Beatles", "Help!");
-    push::push_album(&device, std::slice::from_ref(&source), None).unwrap();
+    push::push_album(&device, std::slice::from_ref(&source), None, None).unwrap();
 
     common::write_tagged_mp3(&source, "YESTERDAY", "The Beatles", "Help!");
-    let second = push::push_album(&device, std::slice::from_ref(&source), None).unwrap();
+    let second = push::push_album(&device, std::slice::from_ref(&source), None, None).unwrap();
 
     assert_eq!(second.already, 1, "capitalisation is not a different song");
     assert_eq!(second.added, 0);
